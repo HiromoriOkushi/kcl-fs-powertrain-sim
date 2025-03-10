@@ -1,0 +1,14 @@
+﻿# Track Generator Configuration
+
+# Default track generation parameters
+track_width: 3.0  # meters
+min_length: 200   # meters
+max_length: 300   # meters
+curvature_threshold: 0.267  # 1/3.75
+
+# Generation mode preference
+preferred_mode: "extend"  # One of: "expand", "extend", "random"
+
+# Visualization settings
+visualize_generation: true
+visualize_results: true
