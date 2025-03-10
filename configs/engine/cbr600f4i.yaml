@@ -1,0 +1,37 @@
+# Honda CBR600F4i Engine Configuration
+make: 'Honda'
+model: 'CBR600F4i'
+year: 2004
+displacement_cc: 599
+cylinders: 4
+configuration: 'Inline'
+compression_ratio: 12.0
+bore_mm: 67.0
+stroke_mm: 42.5
+valves_per_cylinder: 4
+valve_train_type: 'DOHC'
+intake_open_btdc: 25
+intake_close_abdc: 55
+exhaust_open_bbdc: 25
+exhaust_close_atdc: 10
+max_power_hp: 110
+max_power_rpm: 12500
+max_torque_nm: 65
+max_torque_rpm: 10500
+redline_rpm: 14000
+idle_rpm: 1300
+dry_weight_kg: 57  # Engine weight estimate
+cooling_type: 'Liquid'
+fuel_system: 'PGM-FI'
+fuel_type: 'Gasoline'
+ignition_type: 'Digital transistorized'
+
+# FS-specific modifications
+fs_modifications:
+  exhaust: 'Custom header and exhaust system'
+  intake: 'Velocity stacks and custom airbox'
+  ecu: 'Reprogrammed for E85 fuel'
+  weight_reduction: 'Removed starter motor, lights, and other non-essentials'
+  air_filter: 'High flow air filter'
+  fuel_injectors: 'Higher flow rate injectors for E85'
+fs_weight_reduction_kg: 5.0
