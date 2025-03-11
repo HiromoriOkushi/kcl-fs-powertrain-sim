@@ -1,0 +1,38 @@
+﻿# Electric Compressor Configuration for Formula Student
+
+# Compressor parameters
+compressor:
+  type: "CENTRIFUGAL"           # CENTRIFUGAL, AXIAL, MIXED_FLOW, TWIN_STAGE
+  control_method: "ADAPTIVE"    # ON_OFF, VARIABLE_SPEED, PID_CONTROL, ADAPTIVE
+  max_airflow: 0.25             # m³/s
+  max_pressure: 180.0           # Pa
+  max_power: 100.0              # W
+  voltage: 12.0                 # V
+  diameter: 0.1                 # m
+  weight: 0.8                   # kg
+  response_time: 0.2            # seconds
+
+# Control parameters
+control:
+  strategy: "ADAPTIVE"          # ON_OFF, VARIABLE_SPEED, PID_CONTROL, ADAPTIVE
+  target_temp: 90.0             # °C
+  max_temp: 98.0                # °C
+  min_temp: 85.0                # °C
+  
+  # PID control parameters
+  pid:
+    kp: 0.12                    # Proportional gain
+    ki: 0.02                    # Integral gain
+    kd: 0.08                    # Derivative gain
+  
+  # Adaptive control parameters
+  adaptive:
+    temp_weight: 0.7
+    speed_weight: 0.2
+    load_weight: 0.1
+
+# Ducting parameters
+ducting:
+  duct_diameter: 0.08           # m
+  duct_length: 0.5              # m
+  discharge_area: 0.01          # m²

@@ -1,0 +1,45 @@
+﻿# Shift Strategy Configuration for Formula Student
+
+# Engine parameters for shift strategy
+engine:
+  max_rpm: 14000
+  peak_power_rpm: 12500
+  peak_torque_rpm: 10500
+  idle_rpm: 1300
+
+# Default strategy settings
+default_strategy: "MAX_ACCELERATION"  # MAX_ACCELERATION, MAX_EFFICIENCY, ENDURANCE, ACCELERATION
+
+# Strategy-specific settings
+strategies:
+  max_acceleration:
+    upshift_rpm_threshold: 500         # RPM below redline
+    downshift_rpm_threshold: 1500      # RPM above idle
+
+  max_efficiency:
+    upshift_rpm_factor: 1.1            # Factor of peak torque RPM
+    min_rpm: 2000                      # Minimum RPM to prevent lugging
+
+  endurance:
+    target_rpm_factor: 0.5             # Factor between peak power and peak torque
+    min_rpm: 2500                      # Slightly higher than efficiency to maintain responsiveness
+    load_upshift_threshold: 0.4        # Upshift at 40% load
+    load_downshift_threshold: 0.8      # Downshift at 80% load
+
+  acceleration:
+    upshift_rpm_factor: 0.98           # Factor of max RPM
+    launch_rpm_factor: 0.8             # Factor of peak power RPM for launch
+    launch_slip_target: 0.2            # Target wheel slip ratio
+
+# CAS (Clutch-less Automatic Shifter) parameters
+cas:
+  ignition_cut_time: 20                # ms
+  shift_actuation_time: 15             # ms
+  throttle_blip_time: 25               # ms
+  recovery_time: 10                    # ms
+  minimum_shift_interval: 200          # ms
+  throttle_cut_percentage: 80          # %
+  throttle_blip_percentage: 40         # %
+  max_shifts_per_minute: 30
+  neutral_safety_enabled: true
+  overrev_protection_enabled: true

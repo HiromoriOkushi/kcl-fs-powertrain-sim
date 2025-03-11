@@ -1,0 +1,55 @@
+﻿# Side Pod Configuration for Formula Student
+
+# Left side pod parameters
+left_pod:
+  type: "STANDARD"              # MINIMAL, STANDARD, UNDERCUT, HIGH_DOWNFORCE, COOLING_FOCUSED
+  length: 0.8                   # m
+  max_width: 0.28               # m
+  max_height: 0.32              # m
+  inlet_area: 0.035             # m²
+  outlet_area: 0.04             # m²
+  floor_clearance: 0.05         # m
+  radiator_orientation: "VERTICAL"  # VERTICAL, ANGLED, HORIZONTAL, SPLIT
+
+# Left radiator parameters
+left_radiator:
+  type: "SINGLE_CORE_ALUMINUM"
+  core_area: 0.14               # m²
+  core_thickness: 0.036         # m
+  fin_density: 16               # fins/inch
+  tube_rows: 2
+  tilt_angle: 5.0               # degrees
+  position_factor: 0.4          # 0-1 (0=front, 1=rear)
+
+# Left fan parameters
+left_fan:
+  type: "VARIABLE_SPEED"
+  max_airflow: 0.18             # m³/s
+  diameter: 0.24                # m
+
+# Right side pod parameters (mirror of left for symmetry)
+right_pod:
+  type: "STANDARD"
+  length: 0.8                   # m
+  max_width: 0.28               # m
+  max_height: 0.32              # m
+  inlet_area: 0.035             # m²
+  outlet_area: 0.04             # m²
+  floor_clearance: 0.05         # m
+  radiator_orientation: "VERTICAL"
+
+# Right radiator parameters
+right_radiator:
+  type: "SINGLE_CORE_ALUMINUM"
+  core_area: 0.14               # m²
+  core_thickness: 0.036         # m
+  fin_density: 16               # fins/inch
+  tube_rows: 2
+  tilt_angle: 5.0               # degrees
+  position_factor: 0.4          # 0-1 (0=front, 1=rear)
+
+# Right fan parameters
+right_fan:
+  type: "VARIABLE_SPEED"
+  max_airflow: 0.18             # m³/s
+  diameter: 0.24                # m

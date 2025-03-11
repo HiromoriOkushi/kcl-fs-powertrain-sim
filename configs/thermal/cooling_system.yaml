@@ -1,0 +1,41 @@
+﻿# Cooling System Configuration for Formula Student
+
+# Radiator parameters
+radiator:
+  type: "SINGLE_CORE_ALUMINUM"  # SINGLE_CORE_ALUMINUM, DOUBLE_CORE_ALUMINUM, SINGLE_CORE_COPPER
+  core_area: 0.16                # m²
+  core_thickness: 0.04           # m
+  fin_density: 16                # fins/inch
+  tube_rows: 2
+  max_pressure: 1.5              # bar
+
+# Water pump parameters
+water_pump:
+  type: "ELECTRIC"               # MECHANICAL, ELECTRIC
+  max_flow_rate: 70.0            # L/min
+  max_pressure: 1.8              # bar
+  nominal_speed: 6000.0          # RPM
+  mechanical_efficiency: 0.75
+  voltage: 12.0                  # V
+  current_draw_max: 10.0         # A
+
+# Cooling fan parameters
+cooling_fan:
+  type: "VARIABLE_SPEED"         # SINGLE_SPEED, VARIABLE_SPEED, DUAL_FAN
+  max_airflow: 0.28              # m³/s
+  diameter: 0.27                 # m
+  max_power: 90.0                # W
+  voltage: 12.0                  # V
+
+# Thermostat parameters
+thermostat:
+  opening_temp: 82.0             # °C
+  full_open_temp: 92.0           # °C
+  bypass_flow_max: 12.0          # L/min
+
+# System parameters
+system:
+  coolant_volume: 2.2            # L
+  coolant_density: 1050.0        # kg/m³
+  coolant_specific_heat: 3900.0  # J/(kg·K)
+  system_pressure_cap: 1.3       # bar

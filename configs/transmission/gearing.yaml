@@ -1,0 +1,28 @@
+﻿# Transmission Configuration for Formula Student
+
+# Gear ratios (Honda CBR600F4i)
+gear_ratios:
+  - 2.750  # 1st gear
+  - 2.000  # 2nd gear
+  - 1.667  # 3rd gear
+  - 1.444  # 4th gear
+  - 1.304  # 5th gear
+  - 1.208  # 6th gear
+
+# Final drive configuration
+final_drive:
+  drive_sprocket_teeth: 14
+  driven_sprocket_teeth: 53
+  chain_pitch: 0.0125            # m (12.5mm standard pitch)
+  efficiency: 0.95
+
+# Differential configuration
+differential:
+  locked: true                   # Solid axle for Formula Student
+  ratio: 1.0                     # Direct drive ratio
+  efficiency: 0.97
+
+# Vehicle parameters
+vehicle:
+  wheel_radius: 0.2286           # m (9-inch for 13-inch wheels)
+  drivetrain_inertia: 0.25       # kg·m²
