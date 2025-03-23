@@ -515,6 +515,48 @@
 - **lap_time_optimization.py**
   - `run_lap_optimization`: Unified interface for running lap time optimization
   - `compare_optimization_methods`: Compares basic and advanced optimization methods
+
+- **weight_sensitivity.py**
+  - `WeightSensitivityAnalyzer.__init__`: Initializes analyzer with vehicle model and creates base simulators
+  - `WeightSensitivityAnalyzer.analyze_acceleration_sensitivity`: Analyzes sensitivity of acceleration metrics to weight changes
+  - `WeightSensitivityAnalyzer.analyze_lap_time_sensitivity`: Analyzes sensitivity of lap times to weight changes
+  - `WeightSensitivityAnalyzer.analyze_weight_distribution_sensitivity`: Analyzes sensitivity to weight distribution changes
+  - `WeightSensitivityAnalyzer.calculate_weight_reduction_targets`: Calculates required weight reduction to reach performance targets
+  - `WeightSensitivityAnalyzer._calculate_sensitivity_coefficient`: Calculates sensitivity coefficient from data using linear regression
+  - `WeightSensitivityAnalyzer.plot_weight_sensitivity_curves`: Plots weight sensitivity curves for acceleration and lap time
+  - `WeightSensitivityAnalyzer.generate_weight_sensitivity_report`: Generates comprehensive weight sensitivity report with metrics
+  - `analyze_weight_sensitivity`: Convenience function to perform complete weight sensitivity analysis
+### performance/
+- **performance/endurance.py**
+  - `ReliabilityEvent`: Enum for possible reliability events during endurance
+  - `EnduranceSimulator.__init__`: Initializes endurance simulator with vehicle and track
+  - `EnduranceSimulator.configure_event`: Configures the endurance event parameters
+  - `EnduranceSimulator.configure_vehicle`: Configures vehicle-specific parameters for endurance
+  - `EnduranceSimulator.configure_reliability`: Configures reliability parameters for the simulation
+  - `EnduranceSimulator._calculate_reliability_probability`: Calculates probability of reliability issues
+  - `EnduranceSimulator._simulate_reliability_event`: Simulates potential reliability events
+  - `EnduranceSimulator._update_component_wear`: Updates component wear based on lap conditions
+  - `EnduranceSimulator._calculate_fuel_consumption`: Calculates fuel consumption for a lap
+  - `EnduranceSimulator._update_thermal_state`: Updates thermal state after lap and recovery
+  - `EnduranceSimulator._apply_thermal_state`: Applies thermal state to vehicle before a lap
+  - `EnduranceSimulator._calculate_thermal_performance_impact`: Calculates performance impact from thermal
+  - `EnduranceSimulator.simulate_endurance`: Simulates a complete endurance event
+  - `EnduranceSimulator.calculate_score`: Calculates Formula Student endurance and efficiency scores
+  - `EnduranceSimulator.plot_lap_times`: Plots lap times for the endurance event
+  - `EnduranceSimulator.plot_thermal_profile`: Plots thermal profile throughout the endurance
+  - `EnduranceSimulator.plot_fuel_consumption`: Plots fuel consumption throughout the endurance
+  - `EnduranceSimulator.plot_component_wear`: Plots component wear at end of endurance
+  - `EnduranceSimulator.generate_endurance_report`: Generates comprehensive endurance report
+  - `EnduranceAnalysis.__init__`: Initializes endurance analysis tool
+  - `EnduranceAnalysis.add_vehicle_configuration`: Adds vehicle configuration to analysis set
+  - `EnduranceAnalysis.compare_configurations`: Compares all simulated vehicle configurations
+  - `EnduranceAnalysis.optimize_vehicle_setup`: Optimizes vehicle setup for best performance
+  - `EnduranceAnalysis.plot_optimization_results`: Plots results of parameter optimization
+  - `create_endurance_simulator`: Creates and configures an endurance simulator
+  - `run_endurance_simulation`: Runs a complete endurance simulation with report generation
+  - `optimize_endurance_setup`: Optimizes vehicle setup for endurance performance
+  - `compare_endurance_configurations`: Compares different vehicle configurations
+
 ### utils/
 - Empty directory (likely for future development)
 

@@ -6,6 +6,14 @@ kcl-fs-powertrain-sim/
 ├── .gitattributes                      ✅ Created with text file normalization
 │
 ├── kcl_fs_powertrain/                  
+kcl-fs-powertrain-sim/
+├── README.md                           ✅ Created with project overview
+├── setup.py                            ✅ Basic package setup
+├── requirements.txt                    ✅ Core dependencies listed
+├── .gitignore                          ✅ Standard Python gitignore
+├── .gitattributes                      ✅ Created with text file normalization
+│
+├── kcl_fs_powertrain/                  
 │   ├── __init__.py                     ✅ Created
 │   ├── main.py                         🔄 Placeholder created
 │   ├── config.py                       ❌ Not implemented yet
@@ -14,8 +22,8 @@ kcl-fs-powertrain-sim/
 │   │   ├── __init__.py                 ✅ Created
 │   │   ├── simulator.py                ❌ Not implemented yet
 │   │   ├── track.py                    ❌ Not implemented yet
-│   │   ├── track_integration.py        ✅ Framework created for track generator integration
-│   │   └── vehicle.py                  ❌ Not implemented yet
+│   │   ├── track_integration.py        ✅ Implemented
+│   │   └── vehicle.py                  ✅ Implemented
 │   │
 │   ├── engine/                         
 │   │   ├── __init__.py                 ✅ Created with exported classes
@@ -49,8 +57,8 @@ kcl-fs-powertrain-sim/
 │   │   ├── lap_time.py                 ✅ Implemented lap time simulator
 │   │   ├── optimal_lap_time.py         ✅ Implemented advanced lap time optimization
 │   │   ├── lap_time_optimization.py    ✅ Created integration module for lap time methods
-│   │   ├── endurance.py                ❌ Not implemented yet
-│   │   └── weight_sensitivity.py       ❌ Not implemented yet
+│   │   ├── endurance.py                ✅ Implemented endurance event simulator
+│   │   └── weight_sensitivity.py       ✅ Implemented
 │   │
 │   └── utils/                          
 │       ├── __init__.py                 ✅ Created
