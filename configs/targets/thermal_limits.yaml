@@ -1,0 +1,41 @@
+# Thermal Limits Configuration for Formula Student
+
+# Engine thermal limits
+engine:
+  warning_temp: 110.0           # Engine warning temperature (°C)
+  critical_temp: 120.0          # Engine critical temperature (°C)
+  optimal_temp: 95.0            # Engine optimal operating temperature (°C)
+  shutdown_temp: 125.0          # Engine automatic shutdown temperature (°C)
+
+# Coolant system limits
+coolant:
+  warning_temp: 95.0            # Coolant warning temperature (°C)
+  critical_temp: 105.0          # Coolant critical temperature (°C)
+  thermostat_open_temp: 82.0    # Temperature when thermostat begins to open (°C)
+  thermostat_full_open_temp: 92.0  # Temperature when thermostat is fully open (°C)
+  fan_on_temp: 88.0             # Temperature to activate cooling fan(s) (°C)
+  fan_off_temp: 84.0            # Temperature to deactivate cooling fan(s) (°C)
+
+# Oil system limits
+oil:
+  warning_temp: 110.0           # Oil warning temperature (°C)
+  critical_temp: 130.0          # Oil critical temperature (°C)
+  minimum_temp: 60.0            # Minimum temperature for optimal operation (°C)
+  
+# Control responses
+control:
+  warning_power_limit: 0.9      # Power limit factor when warning temp reached (0-1)
+  critical_power_limit: 0.7     # Power limit factor when critical temp reached (0-1)
+  adaptive_control: true        # Enable adaptive thermal management
+  
+  # PID control parameters for electric fans
+  pid:
+    kp: 0.12                    # Proportional gain
+    ki: 0.02                    # Integral gain
+    kd: 0.08                    # Derivative gain
+    
+# Ambient conditions for thermal simulation
+ambient:
+  default_temperature: 25.0     # Default ambient temperature (°C)
+  max_test_temperature: 40.0    # Maximum ambient temperature for testing (°C)
+  airflow_factor: 1.0           # Airflow factor for cooling (1.0 = normal)

@@ -1,0 +1,35 @@
+# Acceleration Event Configuration for Formula Student
+
+# Event parameters
+event:
+  distance: 75.0                # Acceleration distance in meters
+  max_time: 10.0                # Maximum simulation time in seconds
+  surface_friction: 0.9         # Track surface friction coefficient
+  time_step: 0.001              # Simulation time step for acceleration events
+
+# Launch control parameters
+launch_control:
+  enabled: true                 # Whether to use launch control
+  initial_rpm: 10000            # Target RPM for launch
+  initial_clutch_slip: 0.2      # Target clutch slip ratio (0-1)
+  throttle_ramp_time: 0.3       # Time to reach full throttle in seconds
+  traction_control: true        # Enable traction control during launch
+  
+# Shift strategy parameters
+shifting:
+  strategy: "MAX_ACCELERATION"  # Shift strategy to use
+  shift_rpm_offset: 200         # RPM below redline to upshift
+  rpm_drop_target: 0.85         # Target RPM drop as fraction of peak power RPM
+  
+# Target metrics
+targets:
+  zero_to_sixty_mph: 3.8        # Target 0-60mph time (seconds)
+  zero_to_hundred_kph: 3.6      # Target 0-100kph time (seconds)
+  event_time: 4.2               # Target 75m acceleration time (seconds)
+
+# Results output
+output:
+  log_frequency: 100            # Data points per second to log
+  plot_results: true            # Automatically generate plots
+  save_results: true            # Save results to file
+  results_filename: "acceleration_results"  # Base filename for results
