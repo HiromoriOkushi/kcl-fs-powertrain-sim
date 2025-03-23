@@ -14,13 +14,13 @@ kcl-fs-powertrain-sim/
 ├── .gitattributes                      ✅ Created with text file normalization
 │
 ├── kcl_fs_powertrain/                  
-│   ├── __init__.py                     ✅ Created
+│   ├── __init__.py                     🔄 Placeholder created
 │   ├── main.py                         🔄 Placeholder created
 │   ├── config.py                       ❌ Not implemented yet
 │   │
 │   ├── core/                           
-│   │   ├── __init__.py                 ✅ Created
-│   │   ├── simulator.py                ❌ Not implemented yet
+│   │   ├── __init__.py                 🔄 Placeholder created
+│   │   ├── simulator.py                ✅ Implemented
 │   │   ├── track.py                    ✅ Implemented
 │   │   ├── track_integration.py        ✅ Implemented
 │   │   └── vehicle.py                  ✅ Implemented
@@ -83,8 +83,8 @@ kcl-fs-powertrain-sim/
 │   │   └── optimal_lap_time.yaml       ✅ Created with lap time optimization settings
 │   │
 │   ├── targets/                        
-│   │   ├── acceleration.yaml           ❌ Not created yet
-│   │   └── thermal_limits.yaml         ❌ Not created yet
+│   │   ├── acceleration.yaml           ✅ Created
+│   │   └── thermal_limits.yaml         ✅ Created
 │   │
 │   ├── track_generator/                
 │   │   └── generator_settings.yaml     ✅ Created with basic settings

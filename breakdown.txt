@@ -620,7 +620,8 @@
 - **track_generator/generator_settings.yaml**: Configuration for track generator
 - **transmission/gearing.yaml**: Configuration for transmission and drivetrain
 - **transmission/shift_strategy.yaml**: Configuration for shift strategies
-
+- **targets/acceleration.yaml**:defines parameters for acceleration event simulations
+- **targets/thermal_limits.yaml**:defines temperature limits and thermal management thresholds
 ## examples/ (Example Scripts)
 - **generate_basic_track.py**
   - `main`: Creates and demonstrates the track generator functionality
