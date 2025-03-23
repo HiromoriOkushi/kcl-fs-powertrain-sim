@@ -469,7 +469,52 @@
   - `AccelerationSimulator.generate_acceleration_report`: Generates a comprehensive acceleration performance report
   - `create_acceleration_simulator`: Creates and configures an acceleration simulator for a Formula Student vehicle
   - `run_fs_acceleration_simulation`: Runs a complete Formula Student acceleration event simulation with reporting
+- **lap_time.py**
+  - `LapTimeSimulator.__init__`: Initializes lap time simulator with vehicle model and track
+  - `LapTimeSimulator.load_track`: Loads track data from file
+  - `LapTimeSimulator.calculate_racing_line`: Calculates optimized racing line for the track
+  - `LapTimeSimulator.calculate_speed_profile`: Calculates speed profile along the track
+  - `LapTimeSimulator._estimate_optimal_gear`: Estimates the optimal gear for a given speed
+  - `LapTimeSimulator.calculate_max_speed`: Calculates maximum achievable speed
+  - `LapTimeSimulator.calculate_max_acceleration`: Calculates maximum acceleration at current speed
+  - `LapTimeSimulator.calculate_max_deceleration`: Calculates maximum deceleration at current speed
+  - `LapTimeSimulator.simulate_lap`: Simulates a complete lap with thermal effects
+  - `LapTimeSimulator.calculate_sector_times`: Calculates sector times based on track sections
+  - `LapTimeSimulator.analyze_lap_performance`: Analyzes lap performance metrics
+  - `LapTimeSimulator.visualize_lap`: Visualizes lap simulation results
+  - `LapTimeSimulator.compare_vehicle_configs`: Compares lap times for different vehicle configs
+  - `LapTimeSimulator.optimize_vehicle_setup`: Optimizes vehicle setup parameters for fastest lap
+  
+  - `CorneringPerformance.__init__`: Initializes cornering performance calculator
+  - `CorneringPerformance.calculate_max_lateral_acceleration`: Calculates maximum lateral acceleration
+  - `CorneringPerformance.calculate_max_cornering_speed`: Calculates maximum cornering speed
+  - `CorneringPerformance.calculate_weight_transfer`: Calculates lateral weight transfer during cornering
+  - `CorneringPerformance.calculate_roll_angle`: Calculates roll angle during cornering
+  - `CorneringPerformance.get_cornering_metrics`: Calculates comprehensive cornering metrics
+  
+  - `create_lap_time_simulator`: Creates and configures a lap time simulator
+  - `run_fs_lap_simulation`: Runs a complete Formula Student lap time simulation
+  - `create_example_track`: Creates an example track for lap time simulation
 
+- **optimal_lap_time.py**
+  - `VehicleState`: Class representing complete vehicle state for integration
+  - `ControlInputs`: Class representing control inputs to the vehicle
+  - `OptimalLapTimeOptimizer.__init__`: Initializes optimizer with vehicle and track
+  - `OptimalLapTimeOptimizer._initialize_track_interpolation`: Initializes track centerline interpolation
+  - `OptimalLapTimeOptimizer._vehicle_dynamics_derivatives`: Calculates derivatives for integration
+  - `OptimalLapTimeOptimizer._integrate_rk4`: Integrates vehicle dynamics using Runge-Kutta
+  - `OptimalLapTimeOptimizer._racing_line_from_parameters`: Converts parameters to racing line
+  - `OptimalLapTimeOptimizer._controls_from_parameters`: Converts parameters to control inputs
+  - `OptimalLapTimeOptimizer._simulate_lap_with_params`: Simulates lap with given parameters
+  - `OptimalLapTimeOptimizer._estimate_optimal_gear`: Estimates optimal gear for current state
+  - `OptimalLapTimeOptimizer._objective_function`: Objective function for optimization
+  - `OptimalLapTimeOptimizer.optimize_lap_time`: Finds optimal racing line and control inputs
+  - `OptimalLapTimeOptimizer.visualize_optimization_results`: Visualizes optimization results
+  - `run_advanced_lap_optimization`: Helper function to run advanced lap optimization
+
+- **lap_time_optimization.py**
+  - `run_lap_optimization`: Unified interface for running lap time optimization
+  - `compare_optimization_methods`: Compares basic and advanced optimization methods
 ### utils/
 - Empty directory (likely for future development)
 

@@ -44,9 +44,11 @@ kcl-fs-powertrain-sim/
 │   │   └── utils.py                    ✅ Created with track generation functions
 │   │
 │   ├── performance/                    
-│   │   ├── __init__.py                 ✅ Created
-│   │   ├── acceleration.py             ❌ Not implemented yet
-│   │   ├── lap_time.py                 ❌ Not implemented yet
+│   │   ├── __init__.py                 ✅ Updated with new module exports
+│   │   ├── acceleration.py             ✅ Implemented acceleration performance simulator
+│   │   ├── lap_time.py                 ✅ Implemented lap time simulator
+│   │   ├── optimal_lap_time.py         ✅ Implemented advanced lap time optimization
+│   │   ├── lap_time_optimization.py    ✅ Created integration module for lap time methods
 │   │   ├── endurance.py                ❌ Not implemented yet
 │   │   └── weight_sensitivity.py       ❌ Not implemented yet
 │   │
@@ -68,6 +70,9 @@ kcl-fs-powertrain-sim/
 │   │   ├── cooling_system.yaml         ✅ Created with cooling system settings
 │   │   ├── side_pod.yaml               ✅ Created with side pod specifications
 │   │   └── electric_compressor.yaml    ✅ Created with electric compressor settings
+│   │   
+│   ├── lap_time/                       
+│   │   └── optimal_lap_time.yaml       ✅ Created with lap time optimization settings
 │   │
 │   ├── targets/                        
 │   │   ├── acceleration.yaml           ❌ Not created yet
