@@ -1,0 +1,503 @@
+# KCL Formula Student Powertrain Repository Tree
+
+## kcl_fs_powertrain (Main Package)
+
+### core/
+- **track_integration.py**
+  - `TrackProfile.__init__`: Initializes track profile from file
+  - `TrackProfile.load_track`: Loads track data from file (CSV or YAML)
+  - `TrackProfile._load_fsds_format`: Loads track from FSDS CSV format
+  - `TrackProfile._load_fssim_format`: Loads track from FSSIM YAML format
+  - `TrackProfile.calculate_speed_profile`: Calculates speed profile based on vehicle parameters
+  - `TrackProfile.visualize`: Visualizes the track layout
+
+- **vehicle.py**
+  - `__init__`: Initializes the vehicle model with engine, drivetrain, cooling systems and default parameters
+  - `load_config`: Loads vehicle configuration from YAML file including mass, aero parameters, and dimensions
+  - `_initialize_subsystems`: Creates default engine, drivetrain and cooling systems if not provided
+  - `_initialize_shifting_systems`: Sets up shifting strategy manager and clutchless automatic shifter (CAS)
+  - `_initialize_thermal_systems`: Creates side pods, rear radiator and cooling assist systems
+  - `update_engine_state`: Updates engine torque, throttle position and thermal state based on inputs
+  - `update_drivetrain_state`: Changes gears and calculates wheel torque from engine torque
+  - `update_cooling_system`: Updates cooling system based on temperatures and vehicle speed
+  - `calculate_acceleration`: Calculates vehicle acceleration based on forces (tractive, drag, rolling resistance)
+  - `update_vehicle_state`: Updates speed, position and engine RPM over a time step
+  - `simulate_acceleration_run`: Simulates a full acceleration event and calculates 0-60mph time
+  - `simulate_lap`: Simulates a complete lap with speed profiles based on track curvature	
+  - `calculate_weight_transfer`: Calculates dynamic weight distribution during acceleration/braking
+  - `plot_acceleration_results`: Creates visualization of acceleration run data
+  - `plot_lap_results`: Creates visualization of lap simulation data
+  - `get_vehicle_specs`: Returns comprehensive dictionary of vehicle specifications
+  - `simulate_skidpad`: Simulates a figure-8 skidpad event measuring lateral acceleration
+  - `calculate_performance_metrics`: Calculates power-to-weight ratio, top speed, and lateral acceleration
+  - `analyze_thermal_performance`: Tests cooling system across different vehicle speeds
+  - `plot_thermal_analysis`: Visualizes thermal system performance data
+  - `plot_skidpad_results`: Creates visualization of skidpad simulation results
+  - `optimize_shift_points`: Determines optimal RPM for upshifts to maximize acceleration
+  - `create_formula_student_vehicle`: Creates a default Formula Student vehicle with Honda CBR600F4i engine
+
+### engine/
+- **__init__.py**: Import declarations for engine module components
+- **motorcycle_engine.py**
+  - `MotorcycleEngine.__init__`: Initializes motorcycle engine model with parameters
+  - `MotorcycleEngine.load_config`: Loads engine configuration from YAML file
+  - `MotorcycleEngine.set_parameters`: Sets engine parameters from dictionary
+  - `MotorcycleEngine.generate_performance_curves`: Generates torque and power curves
+  - `MotorcycleEngine._volumetric_efficiency_model`: Models volumetric efficiency
+  - `MotorcycleEngine._mechanical_efficiency_model`: Models mechanical efficiency
+  - `MotorcycleEngine._thermal_efficiency_model`: Models thermal efficiency
+  - `MotorcycleEngine.get_torque`: Calculates engine torque at specific RPM and throttle
+  - `MotorcycleEngine.get_power`: Calculates engine power at specific RPM and throttle
+  - `MotorcycleEngine.get_fuel_consumption`: Calculates fuel consumption rate
+  - `MotorcycleEngine.update_thermal_state`: Updates engine thermal state based on operation
+  - `MotorcycleEngine.plot_performance_curves`: Plots torque and power curves
+  - `MotorcycleEngine.get_engine_specs`: Gets engine specifications dictionary
+
+- **torque_curve.py**
+  - `TorqueCurve.__init__`: Initializes torque curve with RPM and torque values
+  - `TorqueCurve.set_curve`: Sets torque curve based on RPM and torque arrays
+  - `TorqueCurve._calculate_power`: Calculates power values from torque and RPM
+  - `TorqueCurve._create_interpolation_functions`: Creates interpolation functions for curves
+  - `TorqueCurve.load_from_dyno_data`: Loads torque curve from dyno data file
+  - `TorqueCurve.load_from_engine`: Loads torque curve from MotorcycleEngine object
+  - `TorqueCurve.get_torque`: Gets torque at specified RPM using interpolation
+  - `TorqueCurve.get_power`: Gets power at specified RPM using interpolation
+  - `TorqueCurve.get_power_hp`: Gets power at specified RPM in horsepower
+  - `TorqueCurve.find_peak_torque`: Finds RPM at which torque is maximum
+  - `TorqueCurve.find_peak_power`: Finds RPM at which power is maximum
+  - `TorqueCurve.get_optimal_shift_points`: Calculates optimal shift points for gear ratios
+  - `TorqueCurve.apply_modification`: Applies a modification function to the torque curve
+  - `TorqueCurve.modify_for_e85`: Modifies torque curve for E85 fuel conversion
+  - `TorqueCurve.modify_for_exhaust`: Modifies torque curve for performance exhaust
+  - `TorqueCurve.modify_for_intake`: Modifies torque curve for performance intake
+  - `TorqueCurve.predict_transmission_limited_curve`: Generates limited torque curve
+  - `TorqueCurve.predict_wheel_torque`: Calculates wheel torque for specific gear ratio
+  - `TorqueCurve.save_to_csv`: Saves torque curve to CSV file
+  - `TorqueCurve.plot_curve`: Plots the torque curve
+  - `TorqueCurve.plot_comparison`: Plots comparison between two torque curves
+
+- **fuel_systems.py**
+  - `FuelType`: Enum for different fuel types (GASOLINE, E85, E100, METHANOL)
+  - `FuelProperties.__init__`: Initializes fuel properties for specified fuel type
+  - `FuelProperties.from_config`: Creates FuelProperties instance from configuration
+  - `FuelProperties.get_volumetric_energy_density`: Calculates volumetric energy density
+  - `FuelProperties.get_theoretical_power`: Calculates theoretical power from fuel flow
+  - `FuelProperties.get_cooling_effect`: Calculates cooling effect from fuel evaporation
+  - `FuelProperties.compare_with`: Compares properties with another fuel
+  - `FuelProperties.to_dict`: Converts fuel properties to dictionary
+  
+  - `FuelInjector.__init__`: Initializes fuel injector model
+  - `FuelInjector.from_config`: Creates FuelInjector instance from configuration
+  - `FuelInjector.set_operating_conditions`: Sets operating conditions for injector
+  - `FuelInjector.get_flow_rate`: Calculates adjusted flow rate based on pressure
+  - `FuelInjector.get_pulse_width`: Calculates required pulse width for fuel mass
+  - `FuelInjector.get_max_flow_rate`: Calculates maximum possible flow rate at RPM
+  - `FuelInjector.get_max_fuel_mass`: Calculates maximum injectable fuel mass per cycle
+  - `FuelInjector.calculate_duty_cycle`: Calculates duty cycle for fuel mass and RPM
+  - `FuelInjector.is_adequate`: Checks if injector is adequate for required flow
+  - `FuelInjector.to_dict`: Converts injector properties to dictionary
+  
+  - `FuelPump.__init__`: Initializes fuel pump model
+  - `FuelPump._create_pressure_flow_curve`: Creates pressure-flow curve for the pump
+  - `FuelPump.from_config`: Creates FuelPump instance from configuration
+  - `FuelPump.set_operating_conditions`: Sets operating conditions for the pump
+  - `FuelPump.get_flow_rate`: Calculates flow rate at given pressure
+  - `FuelPump.get_power_consumption`: Calculates electrical power consumption
+  - `FuelPump.is_adequate`: Checks if pump is adequate for required flow
+  - `FuelPump.to_dict`: Converts pump properties to dictionary
+  
+  - `FuelConsumption.__init__`: Initializes fuel consumption analyzer
+  - `FuelConsumption.calculate_fuel_mass`: Calculates fuel mass flow rate for power
+  - `FuelConsumption.calculate_consumption_map`: Calculates fuel consumption map
+  - `FuelConsumption.calculate_specific_consumption`: Calculates BSFC map
+  - `FuelConsumption.calculate_track_consumption`: Calculates consumption over track
+  - `FuelConsumption.calculate_endurance_requirement`: Calculates fuel for endurance
+  - `FuelConsumption.calculate_acceleration_requirement`: Calculates fuel for acceleration
+  - `FuelConsumption.calculate_autocross_requirement`: Calculates fuel for autocross
+  - `FuelConsumption.calculate_skidpad_requirement`: Calculates fuel for skidpad
+  - `FuelConsumption.calculate_total_event_requirement`: Calculates total fuel requirement
+  - `FuelConsumption.plot_consumption_profile`: Plots consumption profile over time
+  - `FuelConsumption.plot_bsfc_map`: Plots BSFC map
+  - `FuelConsumption.plot_event_requirements`: Plots fuel requirements by event
+  - `FuelConsumption.to_dict`: Converts fuel consumption data to dictionary
+  
+  - `FuelSystem.__init__`: Initializes the fuel system with components
+  - `FuelSystem.from_config`: Creates FuelSystem instance from configuration
+  - `FuelSystem.set_system_state`: Sets current state of the fuel system
+  - `FuelSystem.calculate_max_flow_rate`: Calculates maximum possible fuel flow rate
+  - `FuelSystem.calculate_max_power`: Calculates maximum engine power possible
+  - `FuelSystem.update_fuel_level`: Updates fuel level based on consumption
+  - `FuelSystem.is_fuel_sufficient`: Checks if fuel level is sufficient
+  - `FuelSystem.validate_system`: Validates fuel system adequacy
+  - `FuelSystem.to_dict`: Converts fuel system to dictionary
+
+- **engine_thermal.py**
+  - `ThermalConfig.__init__`: Initializes thermal configuration parameters
+  - `ThermalConfig.load_from_file`: Loads thermal configuration from YAML file
+  - `ThermalConfig.save_to_file`: Saves thermal configuration to YAML file
+  - `ThermalConfig.get_thermal_capacities`: Calculates thermal capacities of components
+  - `ThermalConfig.to_dict`: Converts configuration to dictionary
+  
+  - `CoolingSystem.__init__`: Initializes cooling system model
+  - `CoolingSystem._initialize_model`: Initializes thermal model parameters
+  - `CoolingSystem.update_thermostat`: Updates thermostat position based on temperature
+  - `CoolingSystem.update_fan`: Updates cooling fan state based on temperature
+  - `CoolingSystem.update_pump`: Updates coolant pump state based on conditions
+  - `CoolingSystem.calculate_radiator_airflow`: Calculates airflow through radiator
+  - `CoolingSystem.calculate_heat_rejection`: Calculates heat rejection rate
+  - `CoolingSystem.calculate_coolant_flow`: Calculates coolant flow rate through engine
+  - `CoolingSystem.get_system_state`: Gets current state of the cooling system
+  
+  - `EngineHeatModel.__init__`: Initializes engine heat model
+  - `EngineHeatModel.calculate_total_heat`: Calculates total heat generated by engine
+  - `EngineHeatModel.calculate_heat_sources`: Calculates heat generation for components
+  - `EngineHeatModel.calculate_fuel_power`: Calculates chemical power from fuel
+  - `EngineHeatModel.calculate_engine_power`: Calculates engine power output
+  - `EngineHeatModel.calculate_thermal_transfer`: Calculates heat transfer
+  - `EngineHeatModel.update_temperatures`: Updates component temperatures
+  - `EngineHeatModel.get_temperature_state`: Gets current temperature state
+  - `EngineHeatModel.get_temperature_effects`: Calculates temperature effects
+  
+  - `ThermalSimulation.__init__`: Initializes thermal simulation with components
+  - `ThermalSimulation.reset`: Resets simulation to initial state
+  - `ThermalSimulation.run_step`: Runs a single simulation step
+  - `ThermalSimulation.run_profile`: Runs simulation over a time profile
+  - `ThermalSimulation.run_steady_state`: Runs simulation until steady state
+  - `ThermalSimulation.plot_temperature_profile`: Plots temperature profile over time
+  - `ThermalSimulation.plot_heat_flow`: Plots heat flow over time
+  - `ThermalSimulation.plot_cooling_system`: Plots cooling system state over time
+  
+  - `CoolingPerformance.__init__`: Initializes cooling performance analyzer
+  - `CoolingPerformance.generate_steady_state_map`: Generates steady state temperature map
+  - `CoolingPerformance.analyze_transient_response`: Analyzes thermal response
+  - `CoolingPerformance.analyze_cooling_system_sizing`: Analyzes cooling system sizing
+  - `CoolingPerformance.plot_steady_state_map`: Plots steady state temperature map
+  - `CoolingPerformance.plot_transient_response`: Plots transient thermal response
+  - `CoolingPerformance.plot_cooling_sizing`: Plots cooling system sizing analysis
+
+### thermal/
+- **__init__.py**: Import declarations for thermal module components
+- **cooling_system.py**
+  - `Radiator.__init__`: Initializes radiator model with specific parameters
+  - `Radiator._calculate_surface_area`: Calculates the air side surface area
+  - `Radiator.calculate_heat_rejection`: Calculates heat rejected by radiator
+  - `Radiator._update_effectiveness`: Updates effectiveness based on flow rates
+  - `Radiator.calculate_pressure_drop`: Calculates pressure drop across radiator
+  - `Radiator.calculate_coolant_exit_temp`: Calculates coolant exit temperature
+  - `Radiator.get_radiator_specs`: Gets specifications of the radiator
+  
+  - `WaterPump.__init__`: Initializes water pump model with parameters
+  - `WaterPump.update_pump_speed`: Updates pump speed based on engine or control
+  - `WaterPump.calculate_flow_rate`: Calculates flow rate based on system pressure
+  - `WaterPump.calculate_power_consumption`: Calculates power consumption
+  - `WaterPump.get_pump_state`: Gets current state of the pump
+  - `WaterPump.get_pump_specs`: Gets specifications of the pump
+  
+  - `CoolingFan.__init__`: Initializes cooling fan model
+  - `CoolingFan.update_control`: Updates fan control state based on signal
+  - `CoolingFan._update_outputs`: Updates airflow and power based on duty cycle
+  - `CoolingFan.calculate_power_consumption`: Calculates current power consumption
+  - `CoolingFan.calculate_back_pressure_effect`: Calculates airflow reduction
+  - `CoolingFan.get_fan_state`: Gets current state of the fan
+  - `CoolingFan.get_fan_specs`: Gets specifications of the fan
+  
+  - `Thermostat.__init__`: Initializes thermostat model
+  - `Thermostat.update_temperature`: Updates thermostat opening based on temperature
+  - `Thermostat.calculate_flow_distribution`: Calculates flow distribution
+  - `Thermostat.get_thermostat_state`: Gets current state of the thermostat
+  
+  - `CoolingSystem.__init__`: Initializes the complete cooling system
+  - `CoolingSystem.update_ambient_conditions`: Updates ambient conditions
+  - `CoolingSystem.update_engine_state`: Updates engine state parameters
+  - `CoolingSystem.update_control_signals`: Updates control signals for components
+  - `CoolingSystem.create_automatic_control`: Configures automatic temperature control
+  - `CoolingSystem.update_system_state`: Updates the complete system state
+  - `CoolingSystem.simulate_step`: Performs a single simulation step
+  - `CoolingSystem.get_system_state`: Gets current state of the system
+  - `CoolingSystem.get_system_specs`: Gets specifications of the system
+  - `CoolingSystem.calculate_system_performance`: Calculates performance across conditions
+  - `CoolingSystem.plot_performance_map`: Plots cooling system performance map
+  - `CoolingSystem.plot_cooling_capacity`: Plots cooling capacity vs temperature
+  
+  - `create_cbr600f4i_cooling_system`: Creates a cooling system for CBR600F4i
+  - `create_formula_student_cooling_system`: Creates an optimized cooling system
+
+- **rear_radiator.py**
+  - `RearRadiator.__init__`: Initializes a rear-mounted radiator configuration
+  - `RearRadiator._calculate_drag_impact`: Calculates drag impact of installation
+  - `RearRadiator.calculate_effective_airflow`: Calculates effective airflow
+  - `RearRadiator.calculate_heat_rejection`: Calculates heat rejected by radiator
+  - `RearRadiator.get_radiator_specs`: Gets specifications of the rear radiator
+  
+  - `RearRadiatorDuct.__init__`: Initializes a radiator duct system
+  - `RearRadiatorDuct._calculate_flow_resistance`: Calculates flow resistance
+  - `RearRadiatorDuct.calculate_airflow`: Calculates airflow through the duct
+  - `RearRadiatorDuct.calculate_drag`: Calculates drag force contributed by the duct
+  - `RearRadiatorDuct.get_duct_specs`: Gets specifications of the duct system
+  
+  - `RearRadiatorSystem.__init__`: Initializes the complete rear radiator system
+  - `RearRadiatorSystem.update_fan_control`: Updates cooling fan control
+  - `RearRadiatorSystem.calculate_system_airflow`: Calculates airflow through system
+  - `RearRadiatorSystem.calculate_system_drag`: Calculates total drag from the system
+  - `RearRadiatorSystem.calculate_heat_rejection`: Calculates heat rejected by system
+  - `RearRadiatorSystem.calculate_coolant_exit_temp`: Calculates coolant exit temperature
+  - `RearRadiatorSystem.automatic_fan_control`: Applies automatic fan control
+  - `RearRadiatorSystem.get_system_state`: Gets current state of the system
+  - `RearRadiatorSystem.get_system_specs`: Gets specifications of the system
+  - `RearRadiatorSystem.analyze_performance`: Analyzes system performance across speeds
+  - `RearRadiatorSystem.plot_performance_curves`: Plots system performance curves
+  
+  - `create_default_rear_radiator_system`: Creates a default rear radiator system
+  - `create_optimized_rear_radiator_system`: Creates an optimized rear radiator system
+  - `create_minimal_weight_rear_radiator_system`: Creates a minimal weight system
+
+- **side_pod.py**
+  - `SidePod.__init__`: Initializes side pod model with parameters
+  - `SidePod._calculate_volume`: Calculates the approximate volume of the side pod
+  - `SidePod._calculate_surface_area`: Calculates the approximate surface area
+  - `SidePod._calculate_frontal_area`: Calculates the frontal area of the side pod
+  - `SidePod._determine_radiator_volume_fraction`: Determines space for radiator
+  - `SidePod._calculate_duct_loss_coefficient`: Calculates duct loss coefficient
+  - `SidePod.calculate_max_radiator_size`: Calculates maximum radiator dimensions
+  - `SidePod.calculate_airflow`: Calculates airflow through the side pod
+  - `SidePod.calculate_drag`: Calculates drag force from the side pod
+  - `SidePod.calculate_downforce`: Calculates downforce from the side pod
+  - `SidePod.get_side_pod_specs`: Gets specifications of the side pod
+  
+  - `SidePodRadiator.__init__`: Initializes a side pod radiator configuration
+  - `SidePodRadiator._validate_dimensions`: Validates radiator dimensions
+  - `SidePodRadiator._calculate_effective_area`: Calculates effective radiator area
+  - `SidePodRadiator._calculate_orientation_efficiency`: Calculates orientation efficiency
+  - `SidePodRadiator._calculate_position_efficiency`: Calculates position efficiency
+  - `SidePodRadiator.calculate_effective_airflow`: Calculates effective airflow
+  - `SidePodRadiator.calculate_heat_rejection`: Calculates heat rejected by radiator
+  - `SidePodRadiator.calculate_pressure_drop`: Calculates pressure drop in radiator
+  - `SidePodRadiator.get_radiator_specs`: Gets specifications of the side pod radiator
+  
+  - `SidePodSystem.__init__`: Initializes the complete side pod system
+  - `SidePodSystem.update_fan_control`: Updates cooling fan control
+  - `SidePodSystem.calculate_system_airflow`: Calculates airflow through system
+  - `SidePodSystem.calculate_heat_rejection`: Calculates heat rejected by system
+  - `SidePodSystem.calculate_aerodynamic_forces`: Calculates aerodynamic forces
+  - `SidePodSystem.calculate_coolant_exit_temp`: Calculates coolant exit temperature
+  - `SidePodSystem.automatic_fan_control`: Applies automatic fan control
+  - `SidePodSystem.get_system_state`: Gets current state of the system
+  - `SidePodSystem.get_system_specs`: Gets specifications of the system
+  - `SidePodSystem.analyze_performance`: Analyzes system performance across speeds
+  - `SidePodSystem.plot_performance_curves`: Plots system performance curves
+  
+  - `DualSidePodSystem.__init__`: Initializes dual side pod system
+  - `DualSidePodSystem.update_fan_control`: Updates cooling fan control for both pods
+  - `DualSidePodSystem.calculate_total_airflow`: Calculates total airflow through pods
+  - `DualSidePodSystem.calculate_total_heat_rejection`: Calculates total heat rejection
+  - `DualSidePodSystem.calculate_total_aerodynamic_forces`: Calculates total forces
+  - `DualSidePodSystem.automatic_fan_control`: Applies automatic fan control
+  - `DualSidePodSystem.get_system_state`: Gets current state of the dual system
+  - `DualSidePodSystem.get_system_specs`: Gets specifications of the dual system
+  - `DualSidePodSystem.analyze_system_performance`: Analyzes dual system performance
+  - `DualSidePodSystem.plot_combined_performance`: Plots combined performance
+  
+  - `create_standard_side_pod_system`: Creates a standard dual side pod system
+  - `create_aero_optimized_side_pod_system`: Creates an aerodynamically optimized system
+  - `create_cooling_optimized_side_pod_system`: Creates a cooling-optimized system
+  - `create_minimum_weight_side_pod_system`: Creates a minimum weight system
+
+- **electric_compressor.py**
+  - `ElectricCompressor.__init__`: Initializes electric compressor model
+  - `ElectricCompressor._initialize_performance_curves`: Initializes performance curves
+  - `ElectricCompressor.update_control`: Updates compressor control state
+  - `ElectricCompressor._update_performance_values`: Updates performance values
+  - `ElectricCompressor.calculate_pid_control`: Calculates control using PID
+  - `ElectricCompressor.calculate_adaptive_control`: Calculates control using adaptive logic
+  - `ElectricCompressor.calculate_power_consumption`: Calculates power consumption
+  - `ElectricCompressor.calculate_airflow_vs_backpressure`: Calculates actual airflow
+  - `ElectricCompressor.get_operational_envelope`: Gets compressor operational envelope
+  - `ElectricCompressor.get_compressor_state`: Gets current state of the compressor
+  - `ElectricCompressor.get_compressor_specs`: Gets specifications of the compressor
+  - `ElectricCompressor.plot_performance_curves`: Plots compressor performance curves
+  - `ElectricCompressor.plot_compressor_map`: Plots compressor map with efficiency
+  
+  - `CompressorControlModule.__init__`: Initializes compressor control module
+  - `CompressorControlModule.update_control`: Updates compressor control
+  - `CompressorControlModule.override_control`: Overrides automatic control
+  - `CompressorControlModule.reset_controller`: Resets controller state
+  - `CompressorControlModule.get_control_state`: Gets current state of controller
+  
+  - `CoolingAssistSystem.__init__`: Initializes cooling assist system
+  - `CoolingAssistSystem._calculate_pressure_loss`: Calculates pressure loss coefficient
+  - `CoolingAssistSystem.update_system`: Updates cooling assist system state
+  - `CoolingAssistSystem.calculate_supplementary_airflow`: Calculates supplementary airflow
+  - `CoolingAssistSystem.calculate_total_power`: Calculates total power consumption
+  - `CoolingAssistSystem.get_system_state`: Gets current state of the system
+  - `CoolingAssistSystem.get_system_specs`: Gets specifications of the system
+  - `CoolingAssistSystem.plot_system_performance`: Plots system performance
+  
+  - `create_default_cooling_assist_system`: Creates a default cooling assist system
+  - `create_high_performance_cooling_assist_system`: Creates a high-performance system
+  - `create_lightweight_cooling_assist_system`: Creates a lightweight system
+  - `create_integrated_cooling_system`: Creates an integrated cooling system
+
+### transmission/
+- **__init__.py**: Import declarations for transmission module components
+- **gearing.py**
+  - `Transmission.__init__`: Initializes transmission with gear ratios and efficiency
+  - `Transmission.get_ratio`: Gets the gear ratio for the specified gear
+  - `Transmission.get_efficiency`: Gets transmission efficiency for specified gear
+  - `Transmission.change_gear`: Changes to the specified gear
+  - `Transmission.calculate_output_torque`: Calculates output torque based on input
+  - `Transmission.calculate_output_speed`: Calculates output speed based on input
+  
+  - `FinalDrive.__init__`: Initializes final drive with sprocket teeth and efficiency
+  - `FinalDrive.get_ratio`: Gets the final drive ratio
+  - `FinalDrive.calculate_output_torque`: Calculates output torque based on input
+  - `FinalDrive.calculate_output_speed`: Calculates output speed based on input
+  - `FinalDrive.calculate_chain_length`: Calculates required chain length
+  - `FinalDrive.optimize_sprockets`: Finds optimal sprocket combinations for ratio
+  
+  - `Differential.__init__`: Initializes differential with ratio and configuration
+  - `Differential.get_ratio`: Gets the differential ratio
+  - `Differential.set_torque_bias`: Sets the torque bias ratio for limited slip
+  - `Differential.calculate_wheel_torques`: Calculates torque delivered to each wheel
+  
+  - `DrivetrainSystem.__init__`: Initializes drivetrain system with components
+  - `DrivetrainSystem._calculate_overall_ratios`: Calculates overall drive ratios
+  - `DrivetrainSystem.get_overall_ratio`: Gets overall drive ratio for gear
+  - `DrivetrainSystem.change_gear`: Changes to the specified gear
+  - `DrivetrainSystem.get_current_gear`: Gets the current transmission gear
+  - `DrivetrainSystem.calculate_wheel_torque`: Calculates torque at wheels
+  - `DrivetrainSystem.calculate_engine_speed`: Calculates engine speed from vehicle speed
+  - `DrivetrainSystem.calculate_vehicle_speed`: Calculates vehicle speed from engine RPM
+  - `DrivetrainSystem.calculate_acceleration`: Calculates vehicle acceleration
+  - `DrivetrainSystem.calculate_optimal_shift_points`: Calculates optimal shift points
+  - `DrivetrainSystem.plot_speed_profile`: Plots vehicle speed profile for each gear
+  - `DrivetrainSystem.plot_acceleration_profile`: Plots acceleration profile for each gear
+  - `DrivetrainSystem.get_drivetrain_specs`: Gets specifications of the drivetrain
+
+- **cas_system.py** (Clutch-less Automatic Shifter)
+  - `CASSystem.__init__`: Initializes the CAS system with configuration parameters
+  - `CASSystem._calculate_initial_shift_points`: Calculates initial optimal shift points
+  - `CASSystem.update_shift_points`: Updates shift points based on engine performance
+  - `CASSystem.request_shift`: Requests a gear shift in the specified direction
+  - `CASSystem._execute_shift`: Executes the actual gear shift operation
+  - `CASSystem._reduce_throttle`: Reduces throttle for upshift
+  - `CASSystem._blip_throttle`: Blips throttle for downshift
+  - `CASSystem._restore_throttle`: Restores normal throttle operation
+  - `CASSystem._cut_ignition`: Cuts ignition for shift
+  - `CASSystem._restore_ignition`: Restores ignition after shift
+  - `CASSystem.engage_neutral`: Engages neutral gear for startup/shutdown
+  - `CASSystem.get_optimal_rpm_for_shift`: Gets optimal RPM for shifting
+  - `CASSystem.should_shift`: Determines if a shift should be made
+  - `CASSystem.get_system_status`: Gets the current status of the CAS system
+  - `CASSystem.simulate_shift`: Simulates a shift for testing
+  - `CASSystem.reset_shift_statistics`: Resets shift statistics and counters
+  - `CASSystem.update`: Updates the system state based on elapsed time
+
+- **shift_strategy.py**
+  - `ShiftStrategy.__init__`: Initializes the shift strategy with type and name
+  - `ShiftStrategy.add_upshift_point`: Adds an upshift point to the strategy
+  - `ShiftStrategy.add_downshift_point`: Adds a downshift point to the strategy
+  - `ShiftStrategy.evaluate_shift`: Evaluates whether a shift is needed
+  - `ShiftStrategy._check_shift_condition`: Checks if a specific shift condition is met
+  - `ShiftStrategy._predict_torque_in_gear`: Predicts engine torque after shifting
+  - `ShiftStrategy._predict_power_in_gear`: Predicts engine power after shifting
+  - `ShiftStrategy.record_shift`: Records a shift for performance analysis
+  - `ShiftStrategy.analyze_performance`: Analyzes shift strategy performance
+  - `ShiftStrategy.plot_shift_points`: Plots the shift points of the strategy
+  
+  - `MaxAccelerationStrategy.__init__`: Initializes strategy for maximum acceleration
+  - `MaxEfficiencyStrategy.__init__`: Initializes strategy for maximum efficiency
+  - `EnduranceStrategy.__init__`: Initializes strategy for endurance events
+  - `AccelerationEventStrategy.__init__`: Initializes strategy for acceleration events
+  - `AccelerationEventStrategy.configure_launch_control`: Configures launch control parameters
+  - `AccelerationEventStrategy.get_launch_params`: Gets launch control parameters
+  
+  - `StrategyManager.__init__`: Initializes strategy manager
+  - `StrategyManager.add_strategy`: Adds a strategy to the manager
+  - `StrategyManager.set_active_strategy`: Sets the active shift strategy
+  - `StrategyManager.update_vehicle_state`: Updates vehicle state data
+  - `StrategyManager.evaluate_shift`: Evaluates whether a shift is needed
+  - `StrategyManager.record_shift`: Records a shift in the active strategy
+  - `StrategyManager.get_strategy_performance`: Gets performance metrics for strategies
+  - `StrategyManager.get_active_strategy_name`: Gets the name of the active strategy
+  
+  - `create_formula_student_strategies`: Creates strategies for Formula Student events
+
+### track_generator/
+- **__init__.py**: Import declarations for track generator module
+- **enums.py**
+  - `TrackMode`: Enum for different track generation modes (EXPAND, EXTEND, RANDOM)
+  - `SimType`: Enum for different simulator output formats (FSSIM, FSDS, GPX)
+
+- **generator.py**
+  - `FSTrackGenerator.__init__`: Initializes track generator with parameters
+  - `FSTrackGenerator._scale_track`: Scales track coordinates to match specifications
+  - `FSTrackGenerator._ensure_directories`: Creates necessary directories for output
+  - `FSTrackGenerator._closest_node`: Finds the k-th closest node
+  - `FSTrackGenerator._clockwise_sort`: Sorts nodes in clockwise order
+  - `FSTrackGenerator._calculate_curvature`: Calculates curvature along a line
+  - `FSTrackGenerator._arc_length`: Calculates arc length between points
+  - `FSTrackGenerator._bounded_voronoi`: Creates a bounded Voronoi diagram
+  - `FSTrackGenerator._validate_track`: Validates track meets Formula Student criteria
+  - `FSTrackGenerator._find_start_position`: Finds suitable start position on track
+  - `FSTrackGenerator.visualize_voronoi`: Visualizes Voronoi diagram and track
+  - `FSTrackGenerator.plot_track`: Plots generated track with cones and start/finish
+  - `FSTrackGenerator.export_track`: Exports track to specified simulator format
+  - `FSTrackGenerator._export_fssim_yaml`: Exports track to FSSIM YAML format
+  - `FSTrackGenerator._export_fsds_csv`: Exports track to FSDS CSV format
+  - `FSTrackGenerator._export_gpx`: Exports track to GPX format
+  - `FSTrackGenerator.generate_track`: Generates a track with Formula Student constraints
+  - `generate_multiple_tracks`: Generates multiple tracks and returns their metadata
+
+- **utils.py**
+  - `generate_multiple_tracks`: Generates multiple tracks and returns their metadata
+
+### integration/
+- Empty directory (likely for future development)
+
+### performance/
+-**__init__.py**: Import declarations for performance module components
+- **acceleration.py**
+  - `AccelerationSimulator.__init__`: Initializes acceleration simulator with a vehicle model
+  - `AccelerationSimulator.configure`: Configures simulation parameters like distance and time step
+  - `AccelerationSimulator.configure_launch_control`: Configures launch control parameters
+  - `AccelerationSimulator.simulate_acceleration`: Simulates an acceleration run with optional launch control
+  - `AccelerationSimulator.optimize_shift_points`: Optimizes gear shift points for maximum acceleration
+  - `AccelerationSimulator.optimize_launch_control`: Optimizes launch control parameters for best acceleration
+  - `AccelerationSimulator.analyze_performance_metrics`: Calculates and analyzes acceleration performance metrics
+  - `AccelerationSimulator.plot_acceleration_results`: Plots acceleration simulation results with detailed metrics
+  - `AccelerationSimulator.plot_acceleration_comparison`: Plots comparison of multiple acceleration simulations
+  - `AccelerationSimulator.generate_acceleration_report`: Generates a comprehensive acceleration performance report
+  - `create_acceleration_simulator`: Creates and configures an acceleration simulator for a Formula Student vehicle
+  - `run_fs_acceleration_simulation`: Runs a complete Formula Student acceleration event simulation with reporting
+
+### utils/
+- Empty directory (likely for future development)
+
+## configs/ (Configuration Files)
+- **engine/cbr600f4i.yaml**: Configuration for Honda CBR600F4i engine parameters
+- **thermal/cooling_system.yaml**: Configuration for cooling system components
+- **thermal/electric_compressor.yaml**: Configuration for electric compressor parameters
+- **thermal/side_pod.yaml**: Configuration for side pod dimensions and parameters
+- **track_generator/generator_settings.yaml**: Configuration for track generator
+- **transmission/gearing.yaml**: Configuration for transmission and drivetrain
+- **transmission/shift_strategy.yaml**: Configuration for shift strategies
+
+## examples/ (Example Scripts)
+- **generate_basic_track.py**
+  - `main`: Creates and demonstrates the track generator functionality
+
+- **run_engine_demo.py**
+  - `check_dependencies`: Checks and installs required dependencies
+  - `create_directories`: Creates necessary directories for output
+  - `ensure_config_file`: Ensures engine configuration file exists
+  - `run_engine_demo`: Runs a basic demonstration of the engine program
+  - `main`: Main function to run setup and demonstration
+
+## scripts/
+- **run.sh**: Shell script to run the engine demonstration
+
+## tests/
+- Empty directory (likely for future test implementations)
+
+## data/
+- Directory for storing output data from simulations (auto-created by scripts)

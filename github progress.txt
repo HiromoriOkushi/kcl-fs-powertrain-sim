@@ -1,0 +1,107 @@
+kcl-fs-powertrain-sim/
+├── README.md                           ✅ Created with project overview
+├── setup.py                            ✅ Basic package setup
+├── requirements.txt                    ✅ Core dependencies listed
+├── .gitignore                          ✅ Standard Python gitignore
+├── .gitattributes                      ✅ Created with text file normalization
+│
+├── kcl_fs_powertrain/                  
+│   ├── __init__.py                     ✅ Created
+│   ├── main.py                         🔄 Placeholder created
+│   ├── config.py                       ❌ Not implemented yet
+│   │
+│   ├── core/                           
+│   │   ├── __init__.py                 ✅ Created
+│   │   ├── simulator.py                ❌ Not implemented yet
+│   │   ├── track.py                    ❌ Not implemented yet
+│   │   ├── track_integration.py        ✅ Framework created for track generator integration
+│   │   └── vehicle.py                  ❌ Not implemented yet
+│   │
+│   ├── engine/                         
+│   │   ├── __init__.py                 ✅ Created with exported classes
+│   │   ├── motorcycle_engine.py        ✅ Implemented Honda CBR600F4i engine model
+│   │   ├── torque_curve.py             ✅ Implemented torque curve analysis 
+│   │   ├── fuel_systems.py             ✅ Implemented fuel system components
+│   │   └── engine_thermal.py           ✅ Implemented engine thermal model
+│   │
+│   ├── transmission/                   
+│   │   ├── __init__.py                 ✅ Created with exported classes
+│   │   ├── cas_system.py               ✅ Implemented Clutchless Automatic Shifter system
+│   │   ├── gearing.py                  ✅ Implemented transmission & drivetrain system
+│   │   └── shift_strategy.py           ✅ Implemented gear shift strategies
+│   │
+│   ├── thermal/                        
+│   │   ├── __init__.py                 ✅ Created with exported classes
+│   │   ├── cooling_system.py           ✅ Implemented cooling system components
+│   │   ├── rear_radiator.py            ✅ Implemented rear-mounted radiator system
+│   │   ├── side_pod.py                 ✅ Implemented side pod cooling system
+│   │   └── electric_compressor.py      ✅ Implemented electric compressor system
+│   │
+│   ├── track_generator/                
+│   │   ├── __init__.py                 ✅ Created with exported classes
+│   │   ├── generator.py                ✅ Structure prepared, needs refinement
+│   │   ├── enums.py                    ✅ Implemented with TrackMode and SimType
+│   │   └── utils.py                    ✅ Created with track generation functions
+│   │
+│   ├── performance/                    
+│   │   ├── __init__.py                 ✅ Created
+│   │   ├── acceleration.py             ❌ Not implemented yet
+│   │   ├── lap_time.py                 ❌ Not implemented yet
+│   │   ├── endurance.py                ❌ Not implemented yet
+│   │   └── weight_sensitivity.py       ❌ Not implemented yet
+│   │
+│   └── utils/                          
+│       ├── __init__.py                 ✅ Created
+│       ├── constants.py                ❌ Not implemented yet
+│       ├── plotting.py                 ❌ Not implemented yet
+│       └── validation.py               ❌ Not implemented yet
+│
+├── configs/                            
+│   ├── engine/                         
+│   │   └── cbr600f4i.yaml              ✅ Created with engine specifications
+│   │
+│   ├── transmission/                   
+│   │   ├── gearing.yaml                ✅ Created with transmission specifications
+│   │   └── shift_strategy.yaml         ✅ Created with shift strategy settings
+│   │
+│   ├── thermal/                        
+│   │   ├── cooling_system.yaml         ✅ Created with cooling system settings
+│   │   ├── side_pod.yaml               ✅ Created with side pod specifications
+│   │   └── electric_compressor.yaml    ✅ Created with electric compressor settings
+│   │
+│   ├── targets/                        
+│   │   ├── acceleration.yaml           ❌ Not created yet
+│   │   └── thermal_limits.yaml         ❌ Not created yet
+│   │
+│   ├── track_generator/                
+│   │   └── generator_settings.yaml     ✅ Created with basic settings
+│   │
+│   └── tracks/                         
+│       └── example_track.yaml          ❌ Not created yet
+│
+├── data/                               
+│   ├── input/                          
+│   │   ├── tracks/                     ✅ Directory created
+│   │   ├── dyno/                       ✅ Directory created
+│   │   └── reference/                  ✅ Directory created
+│   │
+│   └── output/                         
+│       ├── performance/                ✅ Directory created
+│       ├── thermal/                    ✅ Directory created
+│       └── tracks/                     ✅ Directory created for generated tracks
+│
+├── examples/                           
+│   ├── run_engine_demo.py              ✅ Created for engine demonstration
+│   ├── generate_basic_track.py         ✅ Created for track generation
+│   ├── cas_system_test.py              ❌ Not implemented yet
+│   ├── cooling_simulation.py           ❌ Not implemented yet
+│   └── full_race_simulation.py         ❌ Not implemented yet
+│
+├── tests/                              
+│   ├── __init__.py                     ✅ Created
+│   ├── test_engine.py                  ❌ Not implemented yet
+│   ├── test_transmission.py            ❌ Not implemented yet
+│   └── test_thermal.py                 ❌ Not implemented yet
+│
+└── scripts/                          
+    └── run.sh                          ✅ Created for running the engine demo

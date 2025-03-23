@@ -1,0 +1,36 @@
+# Advanced Lap Time Optimization Configuration
+
+# Optimization parameters
+optimization:
+  # Numerical integration parameters
+  dt: 0.01                    # Integration step size (seconds)
+  max_time: 180.0             # Maximum lap time (seconds)
+  include_thermal: true       # Whether to include thermal effects
+
+  # Optimization algorithm settings
+  method: 'SLSQP'             # Optimization method ('SLSQP', 'Newton-CG', 'trust-constr')
+  max_iterations: 50          # Maximum number of optimization iterations
+  tolerance: 1.0e-4           # Convergence tolerance
+  num_control_points: 50      # Number of control points for parameterization
+
+# Vehicle dynamics model parameters
+vehicle_dynamics:
+  # Tire model parameters
+  cornering_stiffness: 20000.0  # N/rad
+  max_lateral_accel: 2.0        # g
+  
+  # Powertrain parameters
+  rpm_lag: 0.5                # Engine RPM lag (seconds)
+  
+  # Braking parameters
+  max_braking_decel: 1.5      # Maximum braking deceleration (g)
+
+# Racing line parameters
+racing_line:
+  track_position_limit: 0.9   # Maximum normalized distance from centerline (-1 to 1)
+  look_ahead_distance: 10     # Look-ahead distance for steering calculation (points)
+
+# Visualization settings
+visualization:
+  sample_rate: 100            # Number of points to sample for visualization
+  plot_size: [15, 10]         # Figure size (inches)
