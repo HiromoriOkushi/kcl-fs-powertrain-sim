@@ -503,9 +503,6 @@
 - **utils.py**
   - `generate_multiple_tracks`: Generates multiple tracks and returns their metadata
 
-### integration/
-- Empty directory (likely for future development)
-
 ### performance/
 -**__init__.py**: Import declarations for performance module components
 - **acceleration.py**
@@ -610,7 +607,74 @@
   - `compare_endurance_configurations`: Compares different vehicle configurations
 
 ### utils/
-- Empty directory (likely for future development)
+- **__init__.py**
+  - Created - Import declarations for utility modules
+  
+- **constants.py**
+  - `GRAVITY`: Standard gravity constant (9.81 m/s²)
+  - `AIR_DENSITY_SEA_LEVEL`: Air density at sea level (1.225 kg/m³)
+  - `WATER_DENSITY`: Density of water at 4°C (1000.0 kg/m³)
+  - `AIR_VISCOSITY`: Dynamic viscosity of air at 15°C
+  - `WATER_SPECIFIC_HEAT`: Specific heat capacity of water
+  - `AIR_SPECIFIC_HEAT`: Specific heat capacity of air
+  - `AIR_GAS_CONSTANT`: Specific gas constant for dry air
+  - `STANDARD_PRESSURE`: Standard atmospheric pressure
+  - `STEFAN_BOLTZMANN`: Stefan-Boltzmann constant
+  - `ABSOLUTE_ZERO_C`: Absolute zero in Celsius
+  - Various unit conversion factors (KMH_TO_MS, MS_TO_KMH, KW_TO_HP, etc.)
+  - `celsius_to_kelvin`: Converts temperature from Celsius to Kelvin
+  - `kelvin_to_celsius`: Converts temperature from Kelvin to Celsius
+  - `celsius_to_fahrenheit`: Converts temperature from Celsius to Fahrenheit
+  - `fahrenheit_to_celsius`: Converts temperature from Fahrenheit to Celsius
+  - Formula Student reference values (track width, event lengths, etc.)
+  - Vehicle reference values (tire radius, weight distribution, etc.)
+  - Engine reference values (redline, idle RPM, etc.)
+  - Thermal reference values (operating temperatures, efficiencies, etc.)
+  - Transmission reference values (shift time, wheel slip ratio, etc.)
+  - `EventType`: Enum for Formula Student event types
+  - `TireType`: Enum for tire types used in Formula Student
+  - `EngineType`: Enum for engine types used in Formula Student
+  - `ThermalWarningLevel`: Enum for thermal warning levels
+  - Formula Student scoring references and calculation functions
+  - `FuelProperties`: Class with properties of different fuel types
+  
+- **plotting.py**
+  - `set_plot_style`: Sets global matplotlib style for consistent plots
+  - `save_plot`: Saves a plot to file with proper directory handling
+  - `_format_metric_name`: Formats metric names for display in plots
+  - `plot_engine_performance`: Plots engine torque and power curves
+  - `plot_vehicle_performance_summary`: Plots comprehensive vehicle performance summary
+  - `plot_torque_curves_comparison`: Plots comparison of multiple torque curves
+  - `plot_track_layout`: Plots track layout with optional racing line and segments
+  - `plot_racing_line_analysis`: Plots racing line analysis including curvature and speed profiles
+  - `plot_thermal_performance`: Plots thermal system performance
+  - `plot_thermal_comparison`: Plots comparison of multiple thermal system configurations
+  - `plot_cooling_system_map`: Plots cooling system performance map
+  - `plot_weight_sensitivity`: Plots weight sensitivity analysis
+  - `plot_weight_distribution_sensitivity`: Plots weight distribution sensitivity analysis
+  - `plot_endurance_results`: Plots endurance event simulation results
+  - `plot_endurance_comparison`: Plots comparison of multiple endurance configurations
+  - `plot_acceleration_results`: Plots acceleration simulation results
+  - `plot_acceleration_comparison`: Plots comparison of multiple acceleration test results
+  - `plot_lap_time_results`: Plots lap time simulation results
+  - `plot_lap_time_comparison`: Plots comparison of multiple lap time simulation results
+  
+- **validation.py**
+  - `FS_PERFORMANCE_RANGES`: Dictionary with expected performance ranges for FS vehicles
+  - `VALIDATION_THRESHOLDS`: Dictionary with error thresholds for validation
+  - `validate_in_range`: Validates if a value is within expected range for a metric
+  - `_determine_validation_status`: Determines validation status based on relative error
+  - `validate_theoretical_model`: Validates measured values against a theoretical model
+  - `validate_acceleration_performance`: Validates acceleration performance against theoretical models
+  - `validate_skidpad_performance`: Validates skidpad performance against theoretical models
+  - `validate_lap_time_performance`: Validates lap time performance against theoretical models
+  - `validate_thermal_performance`: Validates thermal performance against theoretical models
+  - `validate_vehicle_specs`: Validates vehicle specifications against expected ranges
+  - `validate_full_vehicle_performance`: Validates full vehicle performance across all simulation domains
+  - `compare_simulation_to_real_data`: Compares simulation results to real-world data
+  - `load_reference_data`: Loads reference data from file for validation
+  - `save_validation_results`: Saves validation results to file
+  - `plot_validation_results`: Plots validation results for visual inspection
 
 ## configs/ (Configuration Files)
 - **engine/cbr600f4i.yaml**: Configuration for Honda CBR600F4i engine parameters

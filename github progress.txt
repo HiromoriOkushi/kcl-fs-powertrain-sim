@@ -62,9 +62,9 @@ kcl-fs-powertrain-sim/
 │   │
 │   └── utils/                          
 │       ├── __init__.py                 ✅ Created
-│       ├── constants.py                ❌ Not implemented yet
-│       ├── plotting.py                 ❌ Not implemented yet
-│       └── validation.py               ❌ Not implemented yet
+│       ├── constants.py                ✅ Implemented
+│       ├── plotting.py                 ✅ Implemented
+│       └── validation.py               ✅ Implemented
 │
 ├── configs/                            
 │   ├── engine/                         
