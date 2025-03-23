@@ -10,6 +10,58 @@
   - `TrackProfile._load_fssim_format`: Loads track from FSSIM YAML format
   - `TrackProfile.calculate_speed_profile`: Calculates speed profile based on vehicle parameters
   - `TrackProfile.visualize`: Visualizes the track layout
+- **track.py**
+  - `TrackSegmentType`: Enum for track segment types (STRAIGHT, CORNER_LEFT, CORNER_RIGHT, etc.)
+  - `TrackSegment.__init__`: Initializes segment with type, start/end indices and radius
+  - `TrackSegment.calculate_properties`: Calculates segment properties based on track points
+  - `TrackSegment.get_curvature`: Gets the curvature of this segment (1/radius)
+  - `TrackSegment.get_segment_type_name`: Gets the name of the segment type
+  - `TrackSegment.__str__`: String representation of segment
+  
+  - `Track.__init__`: Initializes an empty track with name
+  - `Track.load_from_file`: Loads track from file (YAML, CSV, etc.)
+  - `Track._load_yaml_track`: Loads track from YAML file
+  - `Track._load_csv_track`: Loads track from CSV file
+  - `Track._load_fsds_format`: Loads track from FSDS CSV format
+  - `Track._load_fssim_format`: Loads track from FSSIM YAML dictionary
+  - `Track._create_centerline_from_cones`: Creates centerline points from left and right cones
+  - `Track._sort_centerline_points`: Sorts points to form a continuous path
+  - `Track.load_from_generator`: Loads track from track generator output
+  - `Track._post_load_processing`: Performs post-load processing such as calculating distances and curvature
+  - `Track._calculate_distances`: Calculates cumulative distances along the track centerline
+  - `Track._create_track_boundaries`: Creates left and right track boundaries
+  - `Track._calculate_normals`: Calculates normal vectors at each point
+  - `Track.calculate_curvature`: Calculates track curvature at each point
+  - `Track._smooth_array`: Applies smoothing to an array
+  - `Track.segment_track`: Divides track into logical segments (straights, corners)
+  - `Track._merge_short_segments`: Merges very short segments with adjacent ones
+  - `Track.calculate_racing_line`: Calculates an optimized racing line
+  - `Track.calculate_elevation_profile`: Calculates elevation changes along the track
+  - `Track.calculate_theoretical_speed_profile`: Calculates theoretical speed profile based on vehicle limits
+  - `Track.visualize`: Visualizes the track
+  - `Track.export_to_format`: Exports track to specific format
+  - `Track._export_to_fssim`: Exports track to FSSIM YAML format
+  - `Track._export_to_fsds`: Exports track to FSDS CSV format
+  - `Track._export_to_gpx`: Exports track to GPX format
+  - `Track.get_track_stats`: Gets track statistics (length, corners, etc.)
+  - `Track.__str__`: String representation of track
+  
+  - `RacingLine.__init__`: Initializes racing line for track
+  - `RacingLine.optimize`: Optimizes racing line using different methods
+  - `RacingLine._optimize_geometric`: Optimizes racing line using simple geometric method
+  - `RacingLine._optimize_minimum_curvature`: Optimizes racing line to minimize maximum curvature
+  - `RacingLine._optimize_lap_time`: Optimizes racing line for minimum lap time
+  - `RacingLine._calculate_normals`: Calculates normal vectors for track points
+  - `RacingLine._calculate_distances`: Calculates cumulative distances along the racing line
+  - `RacingLine._calculate_curvature`: Calculates curvature along the racing line
+  - `RacingLine._smooth_array`: Applies smoothing to an array
+  - `RacingLine.calculate_speed_profile`: Calculates achievable speed profile along the line
+  - `RacingLine._calculate_time_profile`: Calculates time profile based on speed profile
+  - `RacingLine.visualize`: Visualizes the racing line
+  - `RacingLine.get_stats`: Gets racing line statistics
+  
+  - `create_example_track`: Creates an example track for testing
+  - `load_track_from_config`: Loads track from configuration file
 
 - **vehicle.py**
   - `__init__`: Initializes the vehicle model with engine, drivetrain, cooling systems and default parameters
