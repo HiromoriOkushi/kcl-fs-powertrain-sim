@@ -57,6 +57,7 @@ class MotorcycleEngine:
         self.coolant_temperature = 20.0  # °C
         self.target_coolant_temp = 85.0  # °C
         self.fuel_consumption_rate = 0.0  # g/s
+        self.thermal_efficiency = 0.30  # Typical value for a motorcycle engine (30%)
         
         # Performance maps
         self.rpm_range = np.arange(1000, self.redline + 1, 100)

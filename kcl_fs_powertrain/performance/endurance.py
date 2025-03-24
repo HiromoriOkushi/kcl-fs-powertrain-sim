@@ -373,8 +373,8 @@ class EnduranceSimulator:
             # Convert kWh to MJ
             total_energy_mj = total_energy * 3.6
             
-            # Calculate fuel volume in liters
-            fuel_volume = total_energy_mj / energy_density / self.vehicle.engine.thermal_efficiency
+            engine_efficiency = getattr(self.vehicle.engine, 'thermal_efficiency', 0.30)  # Default to 30% if not defined
+            fuel_volume = total_energy_mj / energy_density / engine_efficiency
             
             return fuel_volume
         
@@ -1034,10 +1034,10 @@ class EnduranceSimulator:
                 'lap_times': results['lap_times']
             },
             'scores': {
-                'endurance_score': score['endurance_score'],
-                'efficiency_score': score['efficiency_score'],
-                'total_score': score['total_score'],
-                'max_possible': score['max_endurance_score'] + score['max_efficiency_score']
+                'endurance_score': score.get('endurance_score', 0.0),
+                'efficiency_score': score.get('efficiency_score', 0.0),
+                'total_score': score.get('total_score', 0.0),
+                'max_possible': score.get('max_endurance_score', 275.0) + score.get('max_efficiency_score', 75.0)
             },
             'reliability': {
                 'events': results['reliability_events'],

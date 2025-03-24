@@ -206,9 +206,11 @@ class LapTimeSimulator:
             # Calculate maximum deceleration
             max_decel = self.calculate_max_deceleration(next_speed)
             
-            # Calculate speed limit based on braking
-            # v² = u² - 2as
-            braking_limited_speed = np.sqrt(next_speed**2 + 2*max_decel*distance)
+            # Check for negative values under the sqrt
+            under_sqrt = next_speed**2 + 2*max_decel*distance
+            if under_sqrt < 0:  
+                under_sqrt = 0  #  prevents sqrt of negative number
+            braking_limited_speed = np.sqrt(under_sqrt) 
             
             # Update speed profile
             speed_profile[i] = min(speed_profile[i], braking_limited_speed)
