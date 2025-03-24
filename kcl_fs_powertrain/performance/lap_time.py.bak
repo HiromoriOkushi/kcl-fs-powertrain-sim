@@ -269,27 +269,8 @@ class LapTimeSimulator:
         # Air density
         air_density = 1.225  # kg/m³
         
-        # Get maximum engine power, handling different attribute names
-        max_power = None
-        
-        # Try different possible attribute names
-        if hasattr(self.vehicle.engine, 'max_power_hp'):
-            max_power = self.vehicle.engine.max_power_hp * 745.7  # Convert hp to watts
-        elif hasattr(self.vehicle.engine, 'max_power'):
-            max_power = self.vehicle.engine.max_power * 745.7  # Assuming max_power is in hp
-        else:
-            # If we can't find a direct power attribute, try getting from engine specs
-            if hasattr(self.vehicle.engine, 'get_engine_specs'):
-                specs = self.vehicle.engine.get_engine_specs()
-                if 'max_power_hp' in specs:
-                    max_power = specs['max_power_hp'] * 745.7
-                elif 'max_power' in specs:
-                    max_power = specs['max_power'] * 745.7
-        
-        # If we still don't have max_power, use a default value
-        if max_power is None:
-            print("Warning: Could not determine engine maximum power. Using default value of 110hp.")
-            max_power = 110 * 745.7  # Default to 110hp for Formula Student
+        # Get maximum engine power
+        max_power = self.vehicle.engine.max_power_hp * 745.7  # Convert hp to watts
         
         # Calculate maximum speed (solving: P = F_drag * v and F_drag = 0.5 * rho * Cd * A * v²)
         # This gives v³ = 2 * P / (rho * Cd * A)
@@ -305,7 +286,7 @@ class LapTimeSimulator:
         logger.info(f"Calculated maximum speed: {max_speed*2.23694:.1f} mph")
         
         return max_speed
-
+    
     def calculate_max_acceleration(self, speed: float, gear: int) -> float:
         """
         Calculate maximum acceleration at current speed and gear.

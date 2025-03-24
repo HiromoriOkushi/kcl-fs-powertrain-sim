@@ -725,7 +725,7 @@ class VehicleFactory:
 
 def create_test_track(output_dir):
     """
-    Create a simple test track for lap simulation.
+    Create a test track for lap simulation using the track generator.
     
     Args:
         output_dir: Directory to save track file
@@ -733,13 +733,28 @@ def create_test_track(output_dir):
     Returns:
         str: Path to the created track file
     """
+    from kcl_fs_powertrain.track_generator.generator import FSTrackGenerator
+    from kcl_fs_powertrain.track_generator.enums import TrackMode, SimType
+    import os
+    
     # Create track file path
     track_file = os.path.join(output_dir, "test_track.yaml")
     
-    # Create a medium difficulty track
-    create_example_track(track_file, difficulty='medium')
+    print(f"Generating Formula Student track...")
     
-    print(f"Test track created and saved to {track_file}")
+    # Create the track generator - it expects (base_dir, visualize) parameters
+    generator = FSTrackGenerator(output_dir, visualize=True)
+    
+    # Generate track with EXTEND mode (medium difficulty)
+    track_metadata = generator.generate_track(TrackMode.EXTEND)
+    
+    # Export to FSSIM format (YAML)
+    generator.export_track(track_file, SimType.FSSIM)
+    
+    print(f"Track generated and exported to: {track_file}")
+    print(f"Track length: {track_metadata['track_length']:.1f}m")
+    print(f"Number of cones: {track_metadata['num_cones']}")
+    
     return track_file
 
 def run_acceleration_test(vehicle, output_dir):
