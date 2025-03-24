@@ -1253,8 +1253,15 @@ def analyze_results(accel_results, lap_results, endurance_results):
         
         # Compare to typical Formula Student benchmarks
         print("\nAcceleration Performance:")
-        print(f"  75m Time: {metrics.get('finish_time', 0):.3f}s (Benchmark: 3.9-4.5s)")
-        print(f"  0-60 mph: {metrics.get('time_to_60mph', 0):.3f}s (Benchmark: 3.6-4.2s)")
+        print(f"  75m Time: {metrics.get('finish_time', 'N/A')} (Benchmark: 3.9-4.5s)")
+        
+        # Handle None value for time_to_60mph
+        time_to_60mph = metrics.get('time_to_60mph')
+        if time_to_60mph is not None:
+            print(f"  0-60 mph: {time_to_60mph:.3f}s (Benchmark: 3.6-4.2s)")
+        else:
+            print(f"  0-60 mph: N/A (Benchmark: 3.6-4.2s)")
+            
         print(f"  Grade: {metrics.get('performance_grade', 'N/A')}")
     
     # Analyze lap time performance
@@ -1270,15 +1277,30 @@ def analyze_results(accel_results, lap_results, endurance_results):
         }
         
         print("\nLap Time Performance:")
-        print(f"  Lap Time: {lap_results.get('lap_time', 0):.3f}s")
-        print(f"  Average Speed: {metrics.get('avg_speed_kph', 0):.1f} km/h")
-        print(f"  Time in Corners: {metrics.get('time_in_corners', 0):.2f}s")
+        lap_time = lap_results.get('lap_time')
+        if lap_time is not None:
+            print(f"  Lap Time: {lap_time:.3f}s")
+        else:
+            print(f"  Lap Time: N/A")
+            
+        avg_speed = metrics.get('avg_speed_kph')
+        if avg_speed is not None:
+            print(f"  Average Speed: {avg_speed:.1f} km/h")
+        else:
+            print(f"  Average Speed: N/A")
+            
+        time_in_corners = metrics.get('time_in_corners')
+        if time_in_corners is not None:
+            print(f"  Time in Corners: {time_in_corners:.2f}s")
+        else:
+            print(f"  Time in Corners: N/A")
+            
         print(f"  Thermal Limited: {'Yes' if metrics.get('thermal_limited', False) else 'No'}")
     
     # Analyze endurance performance
     if endurance_results and 'results' in endurance_results:
         results = endurance_results['results']
-        score = endurance_results['score']
+        score = endurance_results.get('score', {})
         analysis['endurance'] = {
             'completed': results.get('completed', False),
             'total_time': results.get('total_time', 0),
@@ -1293,14 +1315,41 @@ def analyze_results(accel_results, lap_results, endurance_results):
         print("\nEndurance Performance:")
         if results.get('completed', False):
             print(f"  Status: Completed")
-            print(f"  Total Time: {results.get('total_time', 0):.2f}s")
-            print(f"  Average Lap: {results.get('average_lap', 0):.2f}s")
-            print(f"  Fuel Efficiency: {results.get('fuel_efficiency', 0):.3f}L/lap")
-            print(f"  Endurance Score: {score.get('endurance_score', 0):.1f}/{score.get('max_endurance_score', 0)}")
-            print(f"  Efficiency Score: {score.get('efficiency_score', 0):.1f}/{score.get('max_efficiency_score', 0)}")
+            
+            total_time = results.get('total_time')
+            if total_time is not None:
+                print(f"  Total Time: {total_time:.2f}s")
+            else:
+                print(f"  Total Time: N/A")
+                
+            avg_lap = results.get('average_lap')
+            if avg_lap is not None:
+                print(f"  Average Lap: {avg_lap:.2f}s")
+            else:
+                print(f"  Average Lap: N/A")
+                
+            fuel_eff = results.get('fuel_efficiency')
+            if fuel_eff is not None:
+                print(f"  Fuel Efficiency: {fuel_eff:.3f}L/lap")
+            else:
+                print(f"  Fuel Efficiency: N/A")
+                
+            endurance_score = score.get('endurance_score')
+            max_endurance_score = score.get('max_endurance_score')
+            if endurance_score is not None and max_endurance_score is not None:
+                print(f"  Endurance Score: {endurance_score:.1f}/{max_endurance_score}")
+            else:
+                print(f"  Endurance Score: N/A")
+                
+            efficiency_score = score.get('efficiency_score')
+            max_efficiency_score = score.get('max_efficiency_score')
+            if efficiency_score is not None and max_efficiency_score is not None:
+                print(f"  Efficiency Score: {efficiency_score:.1f}/{max_efficiency_score}")
+            else:
+                print(f"  Efficiency Score: N/A")
         else:
             print(f"  Status: DNF - {results.get('dnf_reason', 'Unknown reason')}")
-            print(f"  Completed Laps: {results.get('lap_count', 0)}")
+            print(f"  Completed Laps: {results.get('lap_count', 'N/A')}")
     
     # Calculate overall performance metrics
     analysis['overall'] = {
@@ -1313,27 +1362,36 @@ def analyze_results(accel_results, lap_results, endurance_results):
     # Calculate a simple performance index based on normalized metrics
     # This is just an example approach for a combined score
     try:
-        accel_norm = 4.0 / analysis['acceleration'].get('75m_time', 4.0)  # Normalized to 4.0s benchmark
-        lap_norm = 60.0 / analysis['lap_time'].get('lap_time', 60.0)  # Normalized to 60s benchmark
-        endurance_norm = 1.0 if analysis['endurance'].get('completed', False) else 0.5
+        # Get values safely
+        time_75m = analysis['acceleration'].get('75m_time', 0)
+        lap_time = analysis['lap_time'].get('lap_time', 0)
+        completed = analysis['endurance'].get('completed', False)
         
-        # Weight factors for each area
-        analysis['overall']['performance_index'] = (
-            0.3 * accel_norm + 0.3 * lap_norm + 0.4 * endurance_norm
-        )
-        
-        print("\nOverall Performance Index:", f"{analysis['overall']['performance_index']:.3f}")
-        
-        # Qualitative assessment
-        if analysis['overall']['performance_index'] > 0.9:
-            print("Assessment: Excellent - Competitive at international level")
-        elif analysis['overall']['performance_index'] > 0.8:
-            print("Assessment: Good - Competitive at national level")
-        elif analysis['overall']['performance_index'] > 0.7:
-            print("Assessment: Average - Typical Formula Student performance")
-        else:
-            print("Assessment: Needs improvement for competition")
+        # Only proceed if we have valid values
+        if time_75m and lap_time:
+            accel_norm = 4.0 / time_75m  # Normalized to 4.0s benchmark
+            lap_norm = 60.0 / lap_time  # Normalized to 60s benchmark
+            endurance_norm = 1.0 if completed else 0.5
             
+            # Weight factors for each area
+            analysis['overall']['performance_index'] = (
+                0.3 * accel_norm + 0.3 * lap_norm + 0.4 * endurance_norm
+            )
+            
+            print("\nOverall Performance Index:", f"{analysis['overall']['performance_index']:.3f}")
+            
+            # Qualitative assessment
+            if analysis['overall']['performance_index'] > 0.9:
+                print("Assessment: Excellent - Competitive at international level")
+            elif analysis['overall']['performance_index'] > 0.8:
+                print("Assessment: Good - Competitive at national level")
+            elif analysis['overall']['performance_index'] > 0.7:
+                print("Assessment: Average - Typical Formula Student performance")
+            else:
+                print("Assessment: Needs improvement for competition")
+        else:
+            print("\nOverall Performance: Unable to calculate index due to missing data")
+                
     except ZeroDivisionError:
         analysis['overall']['performance_index'] = 0
         print("\nOverall Performance: Unable to calculate index due to missing data")
