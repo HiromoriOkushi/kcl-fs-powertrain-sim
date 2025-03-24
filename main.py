@@ -96,7 +96,9 @@ class ConfigurationManager:
         self.args = args
         self.config = {}
         self.config_dir = "configs"
-        self.output_dir = "data/output/simulation"
+        
+        # Set default output directory in current working directory
+        self.output_dir = os.path.join(os.getcwd(), "output")
         
         # Set output directory from args if provided
         if args and hasattr(args, 'output_dir') and args.output_dir:
@@ -172,8 +174,8 @@ class ConfigurationManager:
         Returns:
             Dict: Complete configuration dictionary
         """
-        # Create output directory
-        os.makedirs(self.output_dir, exist_ok=True)
+        # Create main output directory first
+        self._ensure_output_directory()
         
         # Initialize config dictionary
         self.config = {
@@ -202,6 +204,17 @@ class ConfigurationManager:
         self._create_output_directories()
         
         return self.config
+    
+    def _ensure_output_directory(self):
+        """Ensure the main output directory exists."""
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            print(f"Output directory set to: {self.output_dir}")
+        except Exception as e:
+            print(f"Error creating output directory: {str(e)}")
+            print(f"Falling back to current directory")
+            self.output_dir = os.path.join(os.getcwd(), "output")
+            os.makedirs(self.output_dir, exist_ok=True)
     
     def _apply_command_line_overrides(self):
         """Apply command line argument overrides to configuration."""
@@ -236,9 +249,6 @@ class ConfigurationManager:
     
     def _create_output_directories(self):
         """Create all necessary output directories."""
-        # Main output directory
-        os.makedirs(self.output_dir, exist_ok=True)
-        
         # Create subdirectories for different analyses
         subdirs = [
             'acceleration',
@@ -251,16 +261,23 @@ class ConfigurationManager:
             'thermal_analysis',
             'track_generator',
             'transmission_analysis',
-            'reports'
+            'reports',
+            'simulation'  # Added for general simulation outputs
         ]
         
-        for subdir in subdirs:
-            os.makedirs(os.path.join(self.output_dir, subdir), exist_ok=True)
-        
         # Store paths in config
-        self.config['output_paths'] = {
-            subdir: os.path.join(self.output_dir, subdir) for subdir in subdirs
-        }
+        self.config['output_paths'] = {}
+        
+        # Create each subdirectory
+        for subdir in subdirs:
+            subdir_path = os.path.join(self.output_dir, subdir)
+            try:
+                os.makedirs(subdir_path, exist_ok=True)
+                self.config['output_paths'][subdir] = subdir_path
+            except Exception as e:
+                print(f"Warning: Could not create output directory {subdir_path}: {str(e)}")
+                # Fallback to main output directory
+                self.config['output_paths'][subdir] = self.output_dir
     
     def get_output_path(self, analysis_type: str) -> str:
         """
@@ -287,16 +304,76 @@ class ConfigurationManager:
             'optimization_settings': self.optimization_settings,
             'paths': self.default_paths,
             'output_dir': self.output_dir,
+            'output_paths': self.config['output_paths'],
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         
         # Save the configuration
         config_path = os.path.join(self.output_dir, 'simulation_config.yaml')
-        with open(config_path, 'w') as f:
-            yaml.dump(save_config, f, default_flow_style=False)
-            
-        print(f"Configuration saved to: {config_path}")
+        try:
+            with open(config_path, 'w') as f:
+                yaml.dump(save_config, f, default_flow_style=False)
+                
+            print(f"Configuration saved to: {config_path}")
+        except Exception as e:
+            print(f"Warning: Could not save configuration to {config_path}: {str(e)}")
+    
+    def _ensure_directory_exists(self):
+        """
+        Ensure that the directory for a file exists before writing to it.
+        
+        Args:
+            file_path: Path to the file that will be written
+        """
+        if directory := os.path.dirname(self):
+            os.makedirs(directory, exist_ok=True)
 
+    # Example usage in export_results methods for each simulator class:
+
+    def export_results(self) -> None:
+        """Export the simulation results to files."""
+        if not self.results or 'results' not in self.results:
+            print("No results to export")
+            return
+
+        # Export results as CSV
+        results = self.results['results']
+
+        if 'time' in results and 'speed' in results:
+            self._extracted_from_export_results_11(results)
+
+    # TODO Rename this here and in `export_results`
+    def _extracted_from_export_results_11(self, results):
+        df = pd.DataFrame({
+            'time': results['time'],
+            'speed': results['speed'],
+            'acceleration': results.get('acceleration', [0] * len(results['time'])),
+            'distance': results.get('distance', [0] * len(results['time'])),
+            'engine_rpm': results.get('engine_rpm', [0] * len(results['time'])),
+            'gear': results.get('gear', [0] * len(results['time'])),
+            'wheel_slip': results.get('wheel_slip', [0] * len(results['time']))
+        })
+
+        csv_path = self._extracted_from_export_results_21("acceleration_data.csv", df)
+        # Export metrics
+        metrics = self.results['metrics']
+        metrics_df = pd.DataFrame([metrics])
+        metrics_path = self._extracted_from_export_results_21(
+            "acceleration_metrics.csv", metrics_df
+        )
+        print(f"Acceleration data exported to: {csv_path}")
+        print(f"Acceleration metrics exported to: {metrics_path}")
+
+    # TODO Rename this here and in `export_results`
+    def _extracted_from_export_results_21(self, arg0, arg1):
+        result = os.path.join(self.output_dir, arg0)
+
+            # Ensure the directory exists
+        self._ensure_directory_exists(result)
+
+        arg1.to_csv(result, index=False)
+
+        return result
 
 # =========================================================================
 # Vehicle Factory
@@ -319,7 +396,7 @@ class VehicleFactory:
         """
         # Create a default Formula Student vehicle
         vehicle = create_formula_student_vehicle()
-        
+
         # Load engine configuration if specified
         if 'engine' in config and config['engine'] and 'engine' in config['paths']:
             try:
@@ -331,7 +408,7 @@ class VehicleFactory:
                     print(f"Engine configured from: {engine_config_path}")
             except Exception as e:
                 print(f"Warning: Could not load engine configuration: {str(e)}")
-        
+
         # Load transmission configuration if specified
         if 'transmission' in config and config['transmission'] and 'transmission' in config['paths']:
             try:
@@ -346,7 +423,7 @@ class VehicleFactory:
                     print(f"Transmission configured from: {transmission_config_path}")
             except Exception as e:
                 print(f"Warning: Could not load transmission configuration: {str(e)}")
-        
+
         # Load shift strategy configuration if specified
         if 'shift_strategy' in config and config['shift_strategy'] and 'shift_strategy' in config['paths']:
             try:
@@ -360,49 +437,49 @@ class VehicleFactory:
                     print(f"Shift strategy configured from: {shift_config_path}")
             except Exception as e:
                 print(f"Warning: Could not load shift strategy configuration: {str(e)}")
-        
         # Configure cooling system based on the specified configuration
-        if cooling_config == 'standard':
-            print("Using standard cooling configuration")
-            # Use the standard cooling system
-            if hasattr(vehicle, '_initialize_thermal_systems'):
-                # The vehicle object already has thermal systems initialized
-                pass
-            else:
-                # Set up thermal systems manually
+        if cooling_config == 'custom':
+            print("Using custom cooling configuration from config files")
+            # Try to load cooling configuration from config files
+            try:
+                # Create thermal configuration
+                thermal_config = ThermalConfig()
+                if 'thermal' in config['paths'] and os.path.exists(config['paths']['thermal']):
+                    thermal_config.load_from_file(config['paths']['thermal'])
+
+                # Create engine heat model with this configuration
+                heat_model = EngineHeatModel(thermal_config, vehicle.engine)
+
+                # Create cooling system
+                cooling_system = CoolingSystem()
+
+                # Create side pod system if config available
+                if 'side_pod' in config['paths'] and os.path.exists(config['paths']['side_pod']):
+                    with open(config['paths']['side_pod'], 'r') as f:
+                        side_pod_data = yaml.safe_load(f)
+                        # Simplified creation - in a real implementation this would use the config file
+                        side_pod_system = create_standard_side_pod_system()
+                else:
+                    side_pod_system = create_standard_side_pod_system()
+
+                # Assign to vehicle
+                vehicle.engine.heat_model = heat_model
+                vehicle.cooling_system = cooling_system
+                vehicle.side_pod_system = side_pod_system
+
+            except Exception as e:
+                print(f"Warning: Could not load custom cooling configuration: {str(e)}")
+                print("Falling back to standard cooling configuration")
+
+                # Fall back to standard configuration
                 cooling_system = create_formula_student_cooling_system()
                 vehicle.cooling_system = cooling_system
-                
-                # Add side pod cooling if possible
-                try:
-                    side_pod_system = create_standard_side_pod_system()
-                    vehicle.side_pod_system = side_pod_system
-                except Exception as e:
-                    print(f"Note: Could not initialize side pod system: {str(e)}")
-        
-        elif cooling_config == 'optimized':
-            print("Using optimized cooling configuration")
-            # Create an optimized cooling setup with both side pods and rear radiator
-            cooling_system = create_formula_student_cooling_system()
-            side_pod_system = create_cooling_optimized_side_pod_system()
-            rear_radiator = create_optimized_rear_radiator_system()
-            cooling_assist = create_high_performance_cooling_assist_system()
-            
-            # Assign to vehicle
-            vehicle.cooling_system = cooling_system
-            vehicle.side_pod_system = side_pod_system
-            vehicle.rear_radiator = rear_radiator
-            vehicle.cooling_assist = cooling_assist
-            
-            # Update engine thermal model with optimized cooling
-            if hasattr(vehicle.engine, 'heat_model'):
-                vehicle.engine.heat_model.combustion_efficiency = 0.32  # Slight improvement
-        
+
         elif cooling_config == 'minimal':
             print("Using minimal weight cooling configuration")
             # Create minimal cooling setup (prioritizing weight)
             cooling_system = create_formula_student_cooling_system()
-            
+
             # Use a single radiator with lightweight configuration
             radiator = Radiator(
                 radiator_type=RadiatorType.SINGLE_CORE_ALUMINUM,
@@ -412,66 +489,62 @@ class VehicleFactory:
                 tube_rows=1  # Single row for weight reduction
             )
             cooling_system.radiator = radiator
-            
+
             # Assign to vehicle
             vehicle.cooling_system = cooling_system
-        
-        elif cooling_config == 'custom':
-            print("Using custom cooling configuration from config files")
-            # Try to load cooling configuration from config files
-            try:
-                # Create thermal configuration
-                thermal_config = ThermalConfig()
-                if 'thermal' in config['paths'] and os.path.exists(config['paths']['thermal']):
-                    thermal_config.load_from_file(config['paths']['thermal'])
-                
-                # Create engine heat model with this configuration
-                heat_model = EngineHeatModel(thermal_config, vehicle.engine)
-                
-                # Create cooling system
-                cooling_system = CoolingSystem()
-                
-                # Create side pod system if config available
-                if 'side_pod' in config['paths'] and os.path.exists(config['paths']['side_pod']):
-                    with open(config['paths']['side_pod'], 'r') as f:
-                        side_pod_data = yaml.safe_load(f)
-                        # Simplified creation - in a real implementation this would use the config file
-                        side_pod_system = create_standard_side_pod_system()
-                else:
-                    side_pod_system = create_standard_side_pod_system()
-                
-                # Assign to vehicle
-                vehicle.engine.heat_model = heat_model
-                vehicle.cooling_system = cooling_system
-                vehicle.side_pod_system = side_pod_system
-                
-            except Exception as e:
-                print(f"Warning: Could not load custom cooling configuration: {str(e)}")
-                print("Falling back to standard cooling configuration")
-                
-                # Fall back to standard configuration
+
+        elif cooling_config == 'optimized':
+            print("Using optimized cooling configuration")
+            # Create an optimized cooling setup with both side pods and rear radiator
+            cooling_system = create_formula_student_cooling_system()
+            side_pod_system = create_cooling_optimized_side_pod_system()
+            rear_radiator = create_optimized_rear_radiator_system()
+            cooling_assist = create_high_performance_cooling_assist_system()
+
+            # Assign to vehicle
+            vehicle.cooling_system = cooling_system
+            vehicle.side_pod_system = side_pod_system
+            vehicle.rear_radiator = rear_radiator
+            vehicle.cooling_assist = cooling_assist
+
+            # Update engine thermal model with optimized cooling
+            if hasattr(vehicle.engine, 'heat_model'):
+                vehicle.engine.heat_model.combustion_efficiency = 0.32  # Slight improvement
+
+        elif cooling_config == 'standard':
+            print("Using standard cooling configuration")
+            # Use the standard cooling system
+            if not hasattr(vehicle, '_initialize_thermal_systems'):
+                # Set up thermal systems manually
                 cooling_system = create_formula_student_cooling_system()
                 vehicle.cooling_system = cooling_system
-        
+
+                # Add side pod cooling if possible
+                try:
+                    side_pod_system = create_standard_side_pod_system()
+                    vehicle.side_pod_system = side_pod_system
+                except Exception as e:
+                    print(f"Note: Could not initialize side pod system: {str(e)}")
+
         # Set thermal limits if available in config
         if 'thermal_limits' in config and config['thermal_limits']:
             try:
                 limits = config['thermal_limits']
-                
+
                 if 'engine' in limits:
                     vehicle.engine_warning_temp = limits['engine'].get('warning_temp', 110.0)
                     vehicle.engine_critical_temp = limits['engine'].get('critical_temp', 120.0)
                     vehicle.engine_shutdown_temp = limits['engine'].get('shutdown_temp', 125.0)
-                
+
                 if 'coolant' in limits:
                     vehicle.coolant_warning_temp = limits['coolant'].get('warning_temp', 95.0)
                     vehicle.coolant_critical_temp = limits['coolant'].get('critical_temp', 105.0)
-                
+
                 print(f"Thermal limits set - Engine warning: {vehicle.engine_warning_temp}°C, critical: {vehicle.engine_critical_temp}°C")
-                
+
             except Exception as e:
                 print(f"Warning: Could not set thermal limits: {str(e)}")
-        
+
         # Print vehicle specifications
         specs = vehicle.get_vehicle_specs()
         print("\nVehicle Specifications:")
@@ -481,7 +554,7 @@ class VehicleFactory:
         print(f"  Mass: {specs['vehicle']['mass']} kg")
         print(f"  Drag Coefficient: {specs['vehicle']['drag_coefficient']}")
         print(f"  Gear Ratios: {specs['drivetrain']['transmission_ratios']}")
-        
+
         # Print cooling system info if available
         if hasattr(vehicle, 'cooling_system'):
             print("\nCooling System Information:")
@@ -489,16 +562,16 @@ class VehicleFactory:
                 radiator = vehicle.cooling_system.radiator
                 print(f"  Radiator: {radiator.__class__.__name__}, type: {getattr(radiator, 'radiator_type', 'Unknown').name if hasattr(radiator, 'radiator_type') else 'Unknown'}")
                 print(f"  Radiator Area: {getattr(radiator, 'core_area', 0.0):.3f} m²")
-            
+
             if hasattr(vehicle, 'side_pod_system'):
                 print("  Side Pod Cooling: Enabled")
-            
+
             if hasattr(vehicle, 'rear_radiator'):
                 print("  Rear Radiator: Enabled")
-            
+
             if hasattr(vehicle, 'cooling_assist'):
                 print("  Electric Cooling Assist: Enabled")
-        
+
         return vehicle
 
 
@@ -1956,6 +2029,23 @@ class SimulationManager:
         
         # Save configuration for reference
         self.config_manager.save_configuration()
+        
+        # Make a copy of the running script to the output directory for reference
+        self._copy_script_to_output()
+    
+    def _copy_script_to_output(self):
+        """Copy the current script to the output directory for reference."""
+        try:
+            script_path = os.path.abspath(sys.argv[0])
+            output_dir = self.config['output_dir']
+            script_name = os.path.basename(script_path)
+            dest_path = os.path.join(output_dir, f"simulator_script_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py")
+            
+            import shutil
+            shutil.copy2(script_path, dest_path)
+            print(f"Script copied to output directory: {dest_path}")
+        except Exception as e:
+            print(f"Note: Could not copy script to output directory: {str(e)}")
     
     def create_vehicle(self):
         """Create the vehicle model."""
@@ -2107,6 +2197,10 @@ class SimulationManager:
                 print("\nKey Recommendations:")
                 for i, rec in enumerate(tradeoffs['recommendations'][:2], 1):  # Show top 2 recommendations
                     print(f"  {i}. {rec}")
+        
+        # Print output directory location
+        if self.config and 'output_dir' in self.config:
+            print(f"\nAll simulation results saved to: {self.config['output_dir']}")
     
     def run(self):
         """Run the complete simulation process."""
@@ -2127,19 +2221,30 @@ class SimulationManager:
             self.run_performance_analyses()
             
             # Generate report
-            self.generate_report()
+            report_path = self.generate_report()
             
             # Print conclusion
             self.print_conclusion()
             
             print("\nSimulation completed successfully!")
-            print(f"Results saved to: {self.config['output_dir']}")
             return True
         
         except Exception as e:
             print(f"Error during simulation: {str(e)}")
             import traceback
             traceback.print_exc()
+            
+            # Try to create error log in output directory
+            if hasattr(self, 'config') and self.config and 'output_dir' in self.config:
+                try:
+                    error_log_path = os.path.join(self.config['output_dir'], 'simulation_error.log')
+                    with open(error_log_path, 'w') as f:
+                        f.write(f"Error during simulation: {str(e)}\n\n")
+                        traceback.print_exc(file=f)
+                    print(f"Error log saved to: {error_log_path}")
+                except:
+                    pass
+            
             return False
 
 
@@ -2421,7 +2526,8 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Formula Student Performance Simulator")
     
     # General settings
-    parser.add_argument('--output-dir', type=str, help="Output directory for simulation results")
+    parser.add_argument('--output-dir', type=str, 
+                        help="Output directory for simulation results (default: ./output)")
     parser.add_argument('--config-dir', type=str, help="Configuration directory")
     
     # Simulation settings
@@ -2463,7 +2569,6 @@ def parse_arguments():
     
     return parser.parse_args()
 
-
 def main():
     """Main entry point for the simulation program."""
     # Parse command line arguments
@@ -2479,6 +2584,6 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-        
-        # Generate summary report
-        report_path =
+    
+    # Generate summary report
+    report_path =
