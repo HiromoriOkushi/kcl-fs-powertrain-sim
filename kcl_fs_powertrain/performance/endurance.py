@@ -306,7 +306,7 @@ class EnduranceSimulator:
         
         Args:
             lap_results: Results from lap_simulator.simulate_lap()
-            
+                
         Returns:
             Fuel consumption in liters
         """
@@ -362,36 +362,45 @@ class EnduranceSimulator:
             for i in range(1, len(power_profile)):
                 dt = time_profile[i] - time_profile[i-1]
                 avg_power = (power_profile[i] + power_profile[i-1]) / 2
-                energy = avg_power * dt  # kWh
+                energy = avg_power * dt / 3600  # kWh (divide by 3600 to convert from kW*s to kWh)
                 total_energy += energy
             
-            # Convert energy to fuel volume based on fuel properties
-            # Typical E85 energy content: ~29.2 MJ/kg, density ~0.781 kg/L
-            # So ~22.8 MJ/L
-            energy_density = 22.8  # MJ/L
+            # Get engine efficiency - default to a reasonable value if not available
+            engine_efficiency = getattr(self.vehicle.engine, 'thermal_efficiency', 0.30)  # Default to 30% if not defined
             
-            # Convert kWh to MJ
+            # Convert kWh to MJ (1 kWh = 3.6 MJ)
             total_energy_mj = total_energy * 3.6
             
-            engine_efficiency = getattr(self.vehicle.engine, 'thermal_efficiency', 0.30)  # Default to 30% if not defined
+            # E85 properties: ~29.2 MJ/kg, density ~0.781 kg/L
+            energy_density = 22.8  # MJ/L 
+            
+            # Calculate fuel volume with proper efficiency adjustment
             fuel_volume = total_energy_mj / energy_density / engine_efficiency
+            
+            # Sanity check - limit consumption to a reasonable value (0.5L/km is already very high)
+            track_length_km = lap_results.get('distance', [])[-1] / 1000 if 'distance' in lap_results else 1.0
+            max_reasonable_consumption = track_length_km * 0.5  # 0.5L/km as a high limit
+            
+            if fuel_volume > max_reasonable_consumption:
+                logger.warning(f"Calculated fuel consumption ({fuel_volume:.2f}L) seems too high. Limiting to {max_reasonable_consumption:.2f}L")
+                fuel_volume = max_reasonable_consumption
             
             return fuel_volume
         
         # Fallback method with rough estimate based on track length and vehicle efficiency
-        track_length = lap_results.get('distance', [])[-1] / 1000  # km
+        track_length = lap_results.get('distance', [])[-1] / 1000 if 'distance' in lap_results else 1.0  # km
         
-        # Typical consumption for a Formula Student car
-        # Around 0.5-0.7 L/km for E85
-        base_consumption = 0.6  # L/km
+        # Typical consumption for a Formula Student car with E85
+        # Around 0.3-0.4 L/km for E85 is reasonable
+        base_consumption = 0.35  # L/km
         
         # Adjust based on average speed (higher speed = higher consumption)
-        avg_speed = track_length / (lap_results['time'][-1] / 3600)  # km/h
-        speed_factor = 0.8 + 0.2 * (avg_speed / 60)  # Normalized to 60 km/h
+        lap_time = lap_results['time'][-1] if 'time' in lap_results and len(lap_results['time']) > 0 else 60.0
+        avg_speed = track_length / (lap_time / 3600)  # km/h
+        speed_factor = 0.8 + 0.2 * min(1.0, avg_speed / 60)  # Normalize to 60 km/h, with a cap
         
-        # Calculate consumption
+        # Calculate consumption with a reasonable limit
         fuel_volume = track_length * base_consumption * speed_factor
-        
         return fuel_volume
     
     def _update_thermal_state(self, lap_results: Dict, recovery_time: float) -> Dict:

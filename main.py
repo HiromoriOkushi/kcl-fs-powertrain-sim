@@ -15,7 +15,7 @@ import pandas as pd
 import time
 import yaml
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, List, Tuple, Optional, Union, Any
 
 # Add project root to Python path for imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -941,268 +941,224 @@ def run_endurance_simulation(vehicle, track_file, output_dir, laps=3):
         'simulator': simulator
     }
 
-def analyze_thermal_performance(vehicle, accel_results, lap_results, endurance_results, output_dir):
+def analyze_thermal_performance(acceleration_results: Optional[Dict] = None,
+                            lap_time_results: Optional[Dict] = None,
+                            endurance_results: Optional[Dict] = None,
+                            config=None) -> Dict:
     """
-    Analyze thermal performance of the vehicle during different events.
+    Analyze thermal performance across different events.
     
     Args:
-        vehicle: Vehicle model used in simulations
-        accel_results: Results from acceleration simulation
-        lap_results: Results from lap time simulation
+        acceleration_results: Results from acceleration simulation
+        lap_time_results: Results from lap time simulation
         endurance_results: Results from endurance simulation
-        output_dir: Directory to save analysis results
+        config: Configuration object with thermal limits
         
     Returns:
-        dict: Thermal performance analysis metrics
+        Dictionary with thermal analysis results
     """
-    print("\n--- Thermal Performance Analysis ---")
+    # Default thermal limits if config not provided
+    if config is None:
+        engine_warning_temp = 110.0  # °C
+        engine_critical_temp = 120.0  # °C
+    else:
+        engine_warning_temp = getattr(config, 'engine_warning_temp', 110.0)
+        engine_critical_temp = getattr(config, 'engine_critical_temp', 120.0)
     
-    # Create output directory for thermal analysis
-    thermal_dir = os.path.join(output_dir, "thermal_analysis")
-    os.makedirs(thermal_dir, exist_ok=True)
-    
-    # Initialize thermal analysis dictionary
+    # Initialize analysis dictionary
     thermal_analysis = {
         'acceleration': {},
         'lap_time': {},
-        'endurance': {},
-        'comparison': {},
-        'cooling_effectiveness': {}
+        'endurance': {}
     }
     
-    # Extract thermal data from different simulations
+    # Temperature validation function
+    def validate_temperature(temp, min_valid=10.0, max_valid=200.0):
+        """Validate temperature to ensure it's physically reasonable"""
+        if temp is None:
+            return None
+        if not isinstance(temp, (int, float)):
+            return None
+        if temp < min_valid or temp > max_valid:
+            logger.warning(f"Invalid temperature detected: {temp}°C. Value outside reasonable range ({min_valid}-{max_valid}°C)")
+            return None
+        return temp
     
-    # Extract from acceleration results
-    accel_thermal_data = None
-    if accel_results and 'results' in accel_results:
-        results = accel_results['results']
-        if 'engine_temp' in results:
-            accel_thermal_data = {
-                'time': results.get('time', []),
-                'engine_temp': results.get('engine_temp', []),
-                'coolant_temp': results.get('coolant_temp', []) if 'coolant_temp' in results else None,
-                'oil_temp': results.get('oil_temp', []) if 'oil_temp' in results else None
-            }
+    # Process acceleration results
+    if acceleration_results and isinstance(acceleration_results, dict):
+        # Extract temperature data if available
+        if 'temperatures' in acceleration_results:
+            temp_data = acceleration_results['temperatures']
             
-            # Calculate metrics
-            if len(accel_thermal_data['engine_temp']) > 0:
-                thermal_analysis['acceleration'] = {
-                    'max_engine_temp': max(accel_thermal_data['engine_temp']),
-                    'temp_rise': max(accel_thermal_data['engine_temp']) - accel_thermal_data['engine_temp'][0],
-                    'max_temp_rate': max(np.diff(accel_thermal_data['engine_temp']) / np.diff(accel_thermal_data['time'])) if len(accel_thermal_data['time']) > 1 else 0
-                }
+            # Max engine temperature
+            if 'engine_temp' in temp_data and len(temp_data['engine_temp']) > 0:
+                max_temp = validate_temperature(np.max(temp_data['engine_temp']))
+                if max_temp is not None:
+                    thermal_analysis['acceleration']['max_engine_temp'] = max_temp
+            
+            # Average engine temperature
+            if 'engine_temp' in temp_data and len(temp_data['engine_temp']) > 0:
+                avg_temp = validate_temperature(np.mean(temp_data['engine_temp']))
+                if avg_temp is not None:
+                    thermal_analysis['acceleration']['avg_engine_temp'] = avg_temp
+            
+            # Determine if thermal limited
+            thermal_analysis['acceleration']['thermally_limited'] = False
+            if thermal_analysis['acceleration'].get('max_engine_temp', 0) > engine_warning_temp:
+                thermal_analysis['acceleration']['thermally_limited'] = True
+    
+    # Process lap time results
+    if lap_time_results and isinstance(lap_time_results, dict):
+        # Extract temperature data if available
+        if 'temperatures' in lap_time_results:
+            temp_data = lap_time_results['temperatures']
+            
+            # Max engine temperature
+            if 'engine_temp' in temp_data and len(temp_data['engine_temp']) > 0:
+                max_temp = validate_temperature(np.max(temp_data['engine_temp']))
+                if max_temp is not None:
+                    thermal_analysis['lap_time']['max_engine_temp'] = max_temp
+            
+            # Average engine temperature
+            if 'engine_temp' in temp_data and len(temp_data['engine_temp']) > 0:
+                avg_temp = validate_temperature(np.mean(temp_data['engine_temp']))
+                if avg_temp is not None:
+                    thermal_analysis['lap_time']['avg_engine_temp'] = avg_temp
+            
+            # Cooling system data
+            if 'coolant_temp' in temp_data and len(temp_data['coolant_temp']) > 0:
+                max_coolant = validate_temperature(np.max(temp_data['coolant_temp']))
+                if max_coolant is not None:
+                    thermal_analysis['lap_time']['max_coolant_temp'] = max_coolant
+            
+            # Determine if thermal limited
+            thermal_analysis['lap_time']['thermally_limited'] = False
+            if thermal_analysis['lap_time'].get('max_engine_temp', 0) > engine_warning_temp:
+                thermal_analysis['lap_time']['thermally_limited'] = True
+        else:
+            # Alternative data path - some implementations might store temps differently
+            if 'engine_temp' in lap_time_results:
+                if isinstance(lap_time_results['engine_temp'], (list, np.ndarray)):
+                    max_temp = validate_temperature(np.max(lap_time_results['engine_temp']))
+                    avg_temp = validate_temperature(np.mean(lap_time_results['engine_temp']))
+                else:
+                    max_temp = validate_temperature(lap_time_results['engine_temp'])
+                    avg_temp = max_temp
                 
-                print(f"Acceleration Event Thermal Analysis:")
-                print(f"  Maximum Engine Temperature: {thermal_analysis['acceleration']['max_engine_temp']:.1f}°C")
-                print(f"  Temperature Rise: {thermal_analysis['acceleration']['temp_rise']:.1f}°C")
+                if max_temp is not None:
+                    thermal_analysis['lap_time']['max_engine_temp'] = max_temp
+                if avg_temp is not None:
+                    thermal_analysis['lap_time']['avg_engine_temp'] = avg_temp
                 
-                # Plot acceleration thermal data
-                if len(accel_thermal_data['time']) > 1:
-                    plt.figure(figsize=(10, 6))
-                    plt.plot(accel_thermal_data['time'], accel_thermal_data['engine_temp'], 'r-', linewidth=2, label='Engine')
-                    
-                    if accel_thermal_data['coolant_temp'] is not None:
-                        plt.plot(accel_thermal_data['time'], accel_thermal_data['coolant_temp'], 'b-', linewidth=2, label='Coolant')
+                # Determine if thermal limited
+                thermal_analysis['lap_time']['thermally_limited'] = max_temp > engine_warning_temp if max_temp is not None else False
+    
+    # Process endurance results
+    if endurance_results and isinstance(endurance_results, dict):
+        # Extract temperature data if available
+        if 'thermal_data' in endurance_results:
+            thermal_data = endurance_results['thermal_data']
+            
+            # Process lap-by-lap temperature data if available
+            if 'lap_temps' in thermal_data and len(thermal_data['lap_temps']) > 0:
+                lap_temps = thermal_data['lap_temps']
+                
+                # Calculate max and average across all laps
+                max_temps = []
+                avg_temps = []
+                
+                for lap_data in lap_temps:
+                    if 'engine_temp' in lap_data and len(lap_data['engine_temp']) > 0:
+                        max_temp = validate_temperature(np.max(lap_data['engine_temp']))
+                        avg_temp = validate_temperature(np.mean(lap_data['engine_temp']))
                         
-                    if accel_thermal_data['oil_temp'] is not None:
-                        plt.plot(accel_thermal_data['time'], accel_thermal_data['oil_temp'], 'g-', linewidth=2, label='Oil')
-                    
-                    plt.xlabel('Time (s)')
-                    plt.ylabel('Temperature (°C)')
-                    plt.title('Thermal Profile during Acceleration')
-                    plt.grid(True, linestyle='--', alpha=0.7)
-                    plt.legend()
-                    
-                    plt.savefig(os.path.join(thermal_dir, 'acceleration_thermal.png'), dpi=300, bbox_inches='tight')
-                    plt.close()
-    
-    # Extract from lap time results
-    lap_thermal_data = None
-    if lap_results and 'results' in lap_results:
-        results = lap_results['results']
-        if 'engine_temp' in results:
-            lap_thermal_data = {
-                'distance': results.get('distance', []),
-                'time': results.get('time', []),
-                'engine_temp': results.get('engine_temp', []),
-                'coolant_temp': results.get('coolant_temp', []) if 'coolant_temp' in results else None,
-                'oil_temp': results.get('oil_temp', []) if 'oil_temp' in results else None
-            }
+                        if max_temp is not None:
+                            max_temps.append(max_temp)
+                        if avg_temp is not None:
+                            avg_temps.append(avg_temp)
+                
+                if max_temps:
+                    thermal_analysis['endurance']['max_engine_temp'] = max(max_temps)
+                if avg_temps:
+                    thermal_analysis['endurance']['avg_engine_temp'] = np.mean(avg_temps)
+                
+                # Calculate temperature rise over endurance
+                if len(max_temps) >= 2:
+                    thermal_analysis['endurance']['temp_rise'] = max_temps[-1] - max_temps[0]
             
-            # Calculate metrics
-            if len(lap_thermal_data['engine_temp']) > 0:
-                thermal_analysis['lap_time'] = {
-                    'max_engine_temp': max(lap_thermal_data['engine_temp']),
-                    'avg_engine_temp': sum(lap_thermal_data['engine_temp']) / len(lap_thermal_data['engine_temp']),
-                    'temp_rise': max(lap_thermal_data['engine_temp']) - lap_thermal_data['engine_temp'][0],
-                    'thermal_limited': lap_results.get('metrics', {}).get('thermal_limited', False)
-                }
+            # In case there's a summary field
+            if 'summary' in thermal_data:
+                summary = thermal_data['summary']
+                if 'max_engine_temp' in summary:
+                    max_temp = validate_temperature(summary['max_engine_temp'])
+                    if max_temp is not None:
+                        thermal_analysis['endurance']['max_engine_temp'] = max_temp
                 
-                if lap_thermal_data['coolant_temp'] is not None:
-                    thermal_analysis['lap_time']['max_coolant_temp'] = max(lap_thermal_data['coolant_temp'])
-                
-                print(f"Lap Time Event Thermal Analysis:")
-                print(f"  Maximum Engine Temperature: {thermal_analysis['lap_time']['max_engine_temp']:.1f}°C")
-                print(f"  Average Engine Temperature: {thermal_analysis['lap_time']['avg_engine_temp']:.1f}°C")
-                print(f"  Thermally Limited: {'Yes' if thermal_analysis['lap_time'].get('thermal_limited', False) else 'No'}")
-                
-                # Plot lap thermal data
-                if len(lap_thermal_data['distance']) > 1:
-                    plt.figure(figsize=(10, 6))
-                    plt.plot(lap_thermal_data['distance'], lap_thermal_data['engine_temp'], 'r-', linewidth=2, label='Engine')
+                if 'avg_engine_temp' in summary:
+                    avg_temp = validate_temperature(summary['avg_engine_temp'])
+                    if avg_temp is not None:
+                        thermal_analysis['endurance']['avg_engine_temp'] = avg_temp
+            
+            # Determine if thermal limited
+            thermal_analysis['endurance']['thermally_limited'] = False
+            if thermal_analysis['endurance'].get('max_engine_temp', 0) > engine_warning_temp:
+                thermal_analysis['endurance']['thermally_limited'] = True
+        
+        # Some implementations might store lap data differently
+        elif 'laps' in endurance_results and len(endurance_results['laps']) > 0:
+            max_temps = []
+            avg_temps = []
+            
+            for lap_data in endurance_results['laps']:
+                if 'temperatures' in lap_data and 'engine_temp' in lap_data['temperatures']:
+                    temps = lap_data['temperatures']['engine_temp']
+                    if isinstance(temps, (list, np.ndarray)) and len(temps) > 0:
+                        max_temp = validate_temperature(np.max(temps))
+                        avg_temp = validate_temperature(np.mean(temps))
+                    else:
+                        max_temp = validate_temperature(temps)
+                        avg_temp = max_temp
                     
-                    if lap_thermal_data['coolant_temp'] is not None:
-                        plt.plot(lap_thermal_data['distance'], lap_thermal_data['coolant_temp'], 'b-', linewidth=2, label='Coolant')
-                        
-                    if lap_thermal_data['oil_temp'] is not None:
-                        plt.plot(lap_thermal_data['distance'], lap_thermal_data['oil_temp'], 'g-', linewidth=2, label='Oil')
-                    
-                    plt.xlabel('Distance (m)')
-                    plt.ylabel('Temperature (°C)')
-                    plt.title('Thermal Profile during Lap')
-                    plt.grid(True, linestyle='--', alpha=0.7)
-                    plt.legend()
-                    
-                    plt.savefig(os.path.join(thermal_dir, 'lap_thermal.png'), dpi=300, bbox_inches='tight')
-                    plt.close()
-    
-    # Extract from endurance results
-    endurance_thermal_data = None
-    if endurance_results and 'results' in endurance_results:
-        results = endurance_results['results']
-        if 'detailed_results' in results and 'thermal_states' in results['detailed_results']:
-            thermal_states = results['detailed_results']['thermal_states']
+                    if max_temp is not None:
+                        max_temps.append(max_temp)
+                    if avg_temp is not None:
+                        avg_temps.append(avg_temp)
             
-            if thermal_states and len(thermal_states) > 0:
-                # Extract thermal data
-                time_points = range(len(thermal_states))
-                engine_temps = [state.get('engine_temp', 0) for state in thermal_states]
-                coolant_temps = [state.get('coolant_temp', 0) for state in thermal_states]
-                oil_temps = [state.get('oil_temp', 0) for state in thermal_states]
-                
-                endurance_thermal_data = {
-                    'time_points': time_points,
-                    'engine_temp': engine_temps,
-                    'coolant_temp': coolant_temps,
-                    'oil_temp': oil_temps
-                }
-                
-                # Calculate metrics
-                thermal_analysis['endurance'] = {
-                    'max_engine_temp': max(engine_temps),
-                    'avg_engine_temp': sum(engine_temps) / len(engine_temps),
-                    'max_coolant_temp': max(coolant_temps),
-                    'avg_coolant_temp': sum(coolant_temps) / len(coolant_temps),
-                    'max_oil_temp': max(oil_temps),
-                    'avg_oil_temp': sum(oil_temps) / len(oil_temps),
-                    'thermal_limited': any(temp > getattr(vehicle, 'engine_warning_temp', 110.0) for temp in engine_temps)
-                }
-                
-                print(f"Endurance Event Thermal Analysis:")
-                print(f"  Maximum Engine Temperature: {thermal_analysis['endurance']['max_engine_temp']:.1f}°C")
-                print(f"  Maximum Coolant Temperature: {thermal_analysis['endurance']['max_coolant_temp']:.1f}°C")
-                print(f"  Maximum Oil Temperature: {thermal_analysis['endurance']['max_oil_temp']:.1f}°C")
-                print(f"  Thermally Limited: {'Yes' if thermal_analysis['endurance']['thermal_limited'] else 'No'}")
-                
-                # Plot endurance thermal data
-                plt.figure(figsize=(10, 6))
-                plt.plot(time_points, engine_temps, 'r-', linewidth=2, label='Engine')
-                plt.plot(time_points, coolant_temps, 'b-', linewidth=2, label='Coolant')
-                plt.plot(time_points, oil_temps, 'g-', linewidth=2, label='Oil')
-                
-                # Add warning and critical temperature lines
-                warning_temp = getattr(vehicle, 'engine_warning_temp', 110.0)
-                critical_temp = getattr(vehicle, 'engine_critical_temp', 120.0)
-                
-                plt.axhline(y=warning_temp, color='orange', linestyle='--', alpha=0.7, label=f'Warning ({warning_temp}°C)')
-                plt.axhline(y=critical_temp, color='red', linestyle='--', alpha=0.7, label=f'Critical ({critical_temp}°C)')
-                
-                plt.xlabel('Time Point')
-                plt.ylabel('Temperature (°C)')
-                plt.title('Thermal Profile during Endurance')
-                plt.grid(True, linestyle='--', alpha=0.7)
-                plt.legend()
-                
-                plt.savefig(os.path.join(thermal_dir, 'endurance_thermal.png'), dpi=300, bbox_inches='tight')
-                plt.close()
-    
-    # Calculate comparative metrics
-    if 'lap_time' in thermal_analysis and 'endurance' in thermal_analysis:
-        thermal_analysis['comparison'] = {
-            'endurance_vs_lap_temp_increase': thermal_analysis['endurance']['max_engine_temp'] - thermal_analysis['lap_time']['max_engine_temp'],
-            'thermal_margin_to_warning': getattr(vehicle, 'engine_warning_temp', 110.0) - thermal_analysis['endurance']['max_engine_temp'],
-            'thermal_margin_to_critical': getattr(vehicle, 'engine_critical_temp', 120.0) - thermal_analysis['endurance']['max_engine_temp']
-        }
-        
-        print("\nThermal Comparison:")
-        print(f"  Temperature Increase in Endurance vs Single Lap: {thermal_analysis['comparison']['endurance_vs_lap_temp_increase']:.1f}°C")
-        print(f"  Thermal Margin to Warning: {thermal_analysis['comparison']['thermal_margin_to_warning']:.1f}°C")
-        print(f"  Thermal Margin to Critical: {thermal_analysis['comparison']['thermal_margin_to_critical']:.1f}°C")
-    
-    # Evaluate cooling system effectiveness
-    if hasattr(vehicle, 'cooling_system') or hasattr(vehicle, 'side_pod_system') or hasattr(vehicle, 'rear_radiator'):
-        if 'endurance' in thermal_analysis:
-            max_temp = thermal_analysis['endurance']['max_engine_temp']
-            warning_temp = getattr(vehicle, 'engine_warning_temp', 110.0)
-            critical_temp = getattr(vehicle, 'engine_critical_temp', 120.0)
+            if max_temps:
+                thermal_analysis['endurance']['max_engine_temp'] = max(max_temps)
+            if avg_temps:
+                thermal_analysis['endurance']['avg_engine_temp'] = np.mean(avg_temps)
             
-            if max_temp < warning_temp - 10:
-                cooling_status = "Excellent - Significant margin to warning temperature"
-                cooling_score = 5
-            elif max_temp < warning_temp:
-                cooling_status = "Good - Within safe operating range"
-                cooling_score = 4
-            elif max_temp < critical_temp:
-                cooling_status = "Marginal - Operating in warning zone"
-                cooling_score = 3
-            else:
-                cooling_status = "Inadequate - Exceeding critical temperature"
-                cooling_score = 1
-            
-            thermal_analysis['cooling_effectiveness'] = {
-                'status': cooling_status,
-                'score': cooling_score,
-                'margin_to_warning': warning_temp - max_temp,
-                'margin_to_critical': critical_temp - max_temp
-            }
-            
-            print(f"\nCooling System Effectiveness: {cooling_status}")
+            # Determine if thermal limited
+            thermal_analysis['endurance']['thermally_limited'] = (
+                thermal_analysis['endurance'].get('max_engine_temp', 0) > engine_warning_temp
+            )
     
-    # Create a thermal comparison plot
-    if accel_thermal_data or lap_thermal_data or endurance_thermal_data:
-        plt.figure(figsize=(12, 8))
-        plt.title('Thermal Performance Comparison Across Events', fontsize=14)
-        
-        # Plot data for each event
-        if accel_thermal_data and len(accel_thermal_data['time']) > 0:
-            # Normalize time to percentage of event
-            norm_time = np.array(accel_thermal_data['time']) / max(accel_thermal_data['time']) * 100
-            plt.plot(norm_time, accel_thermal_data['engine_temp'], 'r-', linewidth=2, label='Acceleration - Engine')
-        
-        if lap_thermal_data and len(lap_thermal_data['time']) > 0:
-            # Normalize time to percentage of event
-            norm_time = np.array(lap_thermal_data['time']) / max(lap_thermal_data['time']) * 100
-            plt.plot(norm_time, lap_thermal_data['engine_temp'], 'g-', linewidth=2, label='Lap - Engine')
-        
-        if endurance_thermal_data and len(endurance_thermal_data['time_points']) > 0:
-            # Normalize time to percentage of event
-            norm_time = np.array(endurance_thermal_data['time_points']) / max(endurance_thermal_data['time_points']) * 100
-            plt.plot(norm_time, endurance_thermal_data['engine_temp'], 'b-', linewidth=2, label='Endurance - Engine')
-        
-        # Add warning and critical temperature lines
-        warning_temp = getattr(vehicle, 'engine_warning_temp', 110.0)
-        critical_temp = getattr(vehicle, 'engine_critical_temp', 120.0)
-        
-        plt.axhline(y=warning_temp, color='orange', linestyle='--', alpha=0.7, label=f'Warning ({warning_temp}°C)')
-        plt.axhline(y=critical_temp, color='red', linestyle='--', alpha=0.7, label=f'Critical ({critical_temp}°C)')
-        
-        plt.xlabel('Event Progress (%)')
-        plt.ylabel('Engine Temperature (°C)')
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.legend()
-        
-        plt.savefig(os.path.join(thermal_dir, 'thermal_comparison.png'), dpi=300, bbox_inches='tight')
-        plt.close()
+    # Add overall analysis
+    thermal_analysis['overall'] = {}
+    
+    # Comparison between events - only if both data points exist
+    if ('max_engine_temp' in thermal_analysis['lap_time'] and
+        'max_engine_temp' in thermal_analysis['endurance']):
+        lap_max = thermal_analysis['lap_time']['max_engine_temp']
+        endurance_max = thermal_analysis['endurance']['max_engine_temp']
+        thermal_analysis['overall']['endurance_vs_lap_temp_increase'] = endurance_max - lap_max
+    
+    # Calculate cooling system performance metrics if data available
+    cooling_metrics = {}
+    
+    # Flag overall thermal issues
+    thermal_analysis['overall']['has_thermal_issues'] = (
+        thermal_analysis['acceleration'].get('thermally_limited', False) or
+        thermal_analysis['lap_time'].get('thermally_limited', False) or
+        thermal_analysis['endurance'].get('thermally_limited', False)
+    )
+    
+    # Add thermal limits
+    thermal_analysis['limits'] = {
+        'engine_warning_temp': engine_warning_temp,
+        'engine_critical_temp': engine_critical_temp
+    }
     
     return thermal_analysis
 
