@@ -1409,7 +1409,6 @@ def compare_cooling_configurations(config, vehicle_base, track_file, output_dir)
             'avg_speed': (lap_results.get('distance', [0])[-1] / lap_results.get('time', [1])[-1]) * 3.6 if 'distance' in lap_results and 'time' in lap_results else 0,
             'thermal_limited': lap_results.get('thermal_limited', False)
         }
-        
         # Add thermal metrics if available
         if thermal_data and len(thermal_data['engine_temp']) > 0:
             metrics.update({
@@ -1498,7 +1497,7 @@ def compare_cooling_configurations(config, vehicle_base, track_file, output_dir)
     print("-" * 80)
     
     for r in results:
-        print(f"{r['configuration']:<15} | {r['lap_time']:<10.3f} | {r.get('max_engine_temp', 'N/A'):<10} | {str(r['thermal_limited']):<15} | {r.get('temp_rise', 'N/A'):<10.1f}")
+        print(f"{r['configuration']:<15} | {r['lap_time']:<10.3f} | {r.get('max_engine_temp', 'N/A'):<10} | {str(r['thermal_limited']):<15} | {r.get('temp_rise', 'N/A'):<10.1}")
     
     print("-" * 80)
     

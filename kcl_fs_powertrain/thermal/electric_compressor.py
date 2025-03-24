@@ -63,6 +63,7 @@ class ElectricCompressor:
                  diameter: float = 0.1,           # m
                  weight: float = 0.8,             # kg
                  response_time: float = 0.2,      # seconds to reach setpoint
+                 efficiency: float = 0.7,         # Added efficiency parameter
                  custom_params: Optional[Dict] = None):
         """
         Initialize the electric compressor model.
@@ -88,6 +89,7 @@ class ElectricCompressor:
         self.diameter = diameter
         self.weight = weight
         self.response_time = response_time
+        self.efficiency = efficiency
         
         # Calculate inlet area
         self.inlet_area = np.pi * (diameter / 2)**2
