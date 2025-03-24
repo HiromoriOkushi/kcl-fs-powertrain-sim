@@ -2083,12 +2083,10 @@ def analyze_weight_sensitivity(vehicle, track_file, output_dir, weight_range=Non
         include_thermal=True
     )
     
-    # Analyze weight distribution sensitivity (optional)
-    distribution_sensitivity = analyzer.analyze_weight_distribution_sensitivity(
-        distribution_range=(0.4, 0.6),  # 40% to 60% front weight
-        num_points=5,
-        test_type='lap_time'
-    )
+    # Skip weight distribution sensitivity as the method doesn't exist
+    # This method doesn't exist in the WeightSensitivityAnalyzer class
+    distribution_sensitivity = {}
+    print("Weight distribution sensitivity analysis not available in this version")
     
     # Plot sensitivity curves
     analyzer.plot_weight_sensitivity_curves(save_path=os.path.join(weight_dir, "weight_sensitivity_curves.png"))
@@ -2122,9 +2120,6 @@ def analyze_weight_sensitivity(vehicle, track_file, output_dir, weight_range=Non
     print("\nWeight Sensitivity Key Findings:")
     print(f"  Acceleration Sensitivity: {accel_sensitivity['seconds_per_10kg_75m']:.3f} seconds per 10kg")
     print(f"  Lap Time Sensitivity: {lap_sensitivity['seconds_per_10kg_lap']:.3f} seconds per 10kg")
-    
-    if 'optimal_distribution' in distribution_sensitivity:
-        print(f"  Optimal Weight Distribution: {distribution_sensitivity['optimal_distribution']*100:.1f}% front")
     
     print("\nWeight Reduction Targets:")
     if accel_reduction:
