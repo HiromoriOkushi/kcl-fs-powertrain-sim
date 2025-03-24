@@ -38,7 +38,7 @@ from kcl_fs_powertrain.thermal.electric_compressor import ElectricCompressor, Co
 from kcl_fs_powertrain.performance.weight_sensitivity import WeightSensitivityAnalyzer
 from kcl_fs_powertrain.performance.lap_time_optimization import run_lap_optimization, compare_optimization_methods
 from kcl_fs_powertrain.performance.optimal_lap_time import OptimalLapTimeOptimizer, run_advanced_lap_optimization
-from kcl_fs_powertrain.core.track_integration import TrackProfile, calculate_optimal_racing_lines
+from kcl_fs_powertrain.core.track_integration import TrackProfile, calculate_optimal_racing_line
 
 def load_configurations():
     """

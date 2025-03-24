@@ -48,7 +48,7 @@
   - `run_cooling_comparison`: Compares different cooling system configurations
   - `_create_cooling_comparison_plot`: Creates cooling configuration comparison plot
   - `run_lap_optimization`: Runs lap time optimization using selected method
-  - `calculate_optimal_racing_lines`: Calculates and visualizes optimal racing lines
+  - `calculate_optimal_racing_line: Calculates and visualizes optimal racing lines
   - `_plot_racing_lines`: Creates racing line comparison visualization
   - `analyze_performance_tradeoffs`: Analyzes tradeoffs between weight, lap time, and thermal performance
 - **ReportGenerator**
