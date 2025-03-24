@@ -374,8 +374,13 @@ class EnduranceSimulator:
             # Convert kWh to MJ
             total_energy_mj = total_energy * 3.6
             
-            # Calculate fuel volume in liters
-            fuel_volume = total_energy_mj / energy_density / self.vehicle.engine.thermal_efficiency
+            if hasattr(self.vehicle.engine, 'thermal_efficiency'):
+                engine_efficiency = self.vehicle.engine.thermal_efficiency
+            else:
+                # Use a default thermal efficiency value for motorcycles
+                engine_efficiency = 0.30  # Typical efficiency for motorcycle engines
+                
+            fuel_volume = total_energy_mj / energy_density / engine_efficiency
             
             return fuel_volume
         

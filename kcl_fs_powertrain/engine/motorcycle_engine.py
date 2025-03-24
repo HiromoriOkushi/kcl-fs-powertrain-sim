@@ -324,7 +324,7 @@ class MotorcycleEngine:
         
         # Apply thermal factor if it exists
         if hasattr(self, 'thermal_factor'):
-            power *= self.thermal_factor
+            power_kw *= self.thermal_factor
             
         return power_kw
     

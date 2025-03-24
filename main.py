@@ -1090,6 +1090,19 @@ def analyze_thermal_performance(vehicle, accel_results, lap_results, endurance_r
                 plt.savefig(os.path.join(thermal_dir, 'endurance_thermal.png'), dpi=300, bbox_inches='tight')
                 plt.close()
     
+    if 'lap_time' in thermal_analysis and 'endurance' in thermal_analysis:
+    # Check if the required keys exist in endurance data
+        if all(key in thermal_analysis['endurance'] for key in ['max_engine_temp']):
+            thermal_analysis['comparison'] = {
+                'endurance_vs_lap_temp_increase': thermal_analysis['endurance']['max_engine_temp'] - thermal_analysis['lap_time']['max_engine_temp'],
+                'thermal_margin_to_warning': getattr(vehicle, 'engine_warning_temp', 110.0) - thermal_analysis['endurance']['max_engine_temp'],
+                'thermal_margin_to_critical': getattr(vehicle, 'engine_critical_temp', 120.0) - thermal_analysis['endurance']['max_engine_temp']
+            }
+        else:
+            # Create a limited comparison without the missing data
+            thermal_analysis['comparison'] = {
+                'note': 'Limited comparison available due to incomplete endurance data'
+            }
     # Calculate comparative metrics
     if 'lap_time' in thermal_analysis and 'endurance' in thermal_analysis:
         thermal_analysis['comparison'] = {
