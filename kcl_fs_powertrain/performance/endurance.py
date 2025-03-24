@@ -563,17 +563,9 @@ class EnduranceSimulator:
             
             # If engine has a power method that we can modify
             if hasattr(self.vehicle.engine, 'get_power'):
-                original_power = self.vehicle.engine.get_power
-                # Make a copy of the original function
-                original_power_func = self.vehicle.engine.get_power
-
-                def modified_power_func(self, rpm, throttle=1.0):
-                    return original_power_func(rpm, throttle) * thermal_factor
-
-                # Bind method to engine instance
-                self.vehicle.engine.get_power = types.MethodType(modified_power_func, self.vehicle.engine)
-            
-            # Simulate the lap
+                self.vehicle.engine.thermal_factor = thermal_factor
+                
+            # Simulate the lap        
             try:
                 lap_start_time = time.time()
                 lap_result = self.lap_simulator.simulate_lap(include_thermal=include_thermal)
@@ -643,8 +635,9 @@ class EnduranceSimulator:
             
             # Restore original vehicle parameters
             self.vehicle.mass = original_mass
-            if original_power is not None:
-                self.vehicle.engine.get_power = original_power
+            # Clean up thermal factor attribute
+            if hasattr(self.vehicle.engine, 'thermal_factor'):
+                delattr(self.vehicle.engine, 'thermal_factor')
         
         # Calculate event score
         if completed:

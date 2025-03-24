@@ -322,6 +322,10 @@ class MotorcycleEngine:
         # Angular velocity = 2π * rpm / 60
         power_kw = torque * rpm * 2 * np.pi / 60 / 1000
         
+        # Apply thermal factor if it exists
+        if hasattr(self, 'thermal_factor'):
+            power *= self.thermal_factor
+            
         return power_kw
     
     def get_fuel_consumption(self, rpm: float, throttle: float = 1.0) -> float:
