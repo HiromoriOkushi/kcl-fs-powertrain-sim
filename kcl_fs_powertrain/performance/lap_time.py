@@ -132,7 +132,14 @@ class LapTimeSimulator:
         
         # Extract track data
         points = self.track_data['points']
-        curvature = self.track_data['curvature']
+        
+        # Check if curvature is available in track data, calculate if not
+        if 'curvature' not in self.track_data or self.track_data['curvature'] is None:
+            logger.info("Track curvature not found in track data, calculating...")
+            curvature = self._calculate_curvature(points)
+        else:
+            curvature = self.track_data['curvature']
+            
         distances = self.track_data['distance']
         
         # Number of points
@@ -163,6 +170,7 @@ class LapTimeSimulator:
         max_speed = self.calculate_max_speed()
         speed_profile = np.minimum(speed_profile, max_speed)
         
+        # Rest of the method remains the same...
         # Second pass - forward simulation with acceleration limits
         for i in range(1, n_points):
             # Distance to next point
@@ -176,10 +184,6 @@ class LapTimeSimulator:
                 gear = self.vehicle.get_optimal_gear(current_speed)
             else:
                 gear = self._estimate_optimal_gear(current_speed)
-            
-            # Calculate maximum acceleration
-            throttle = 1.0  # Full throttle when accelerating
-            brake = 0.0     # No braking when accelerating
             
             # Calculate acceleration at current state
             acceleration = self.calculate_max_acceleration(current_speed, gear)
@@ -215,6 +219,90 @@ class LapTimeSimulator:
         logger.info("Speed profile calculated")
         
         return speed_profile
+
+    def _calculate_curvature(self, points: np.ndarray) -> np.ndarray:
+        """
+        Calculate track curvature if not available in track data.
+        
+        Args:
+            points: Track points as np.ndarray of shape (n, 2)
+            
+        Returns:
+            np.ndarray of curvature values
+        """
+        n_points = len(points)
+        curvature = np.zeros(n_points)
+        
+        for i in range(n_points):
+            # Get adjacent points (with wraparound for closed circuits)
+            prev_idx = (i - 1) % n_points
+            next_idx = (i + 1) % n_points
+            
+            # Get positions
+            p_prev = points[prev_idx]
+            p_curr = points[i]
+            p_next = points[next_idx]
+            
+            # Calculate vectors
+            v1 = p_prev - p_curr
+            v2 = p_next - p_curr
+            
+            # Normalize vectors
+            norm1 = np.linalg.norm(v1)
+            norm2 = np.linalg.norm(v2)
+            
+            if norm1 > 1e-6 and norm2 > 1e-6:
+                v1 = v1 / norm1
+                v2 = v2 / norm2
+                
+                # Calculate angle between vectors
+                dot_product = np.clip(np.dot(v1, v2), -1.0, 1.0)
+                angle = np.arccos(dot_product)
+                
+                # Calculate direction of curve
+                cross_product = np.cross(v1, v2)
+                sign = 1.0 if cross_product > 0 else -1.0
+                
+                # Calculate distances between points
+                d1 = np.linalg.norm(p_prev - p_curr)
+                d2 = np.linalg.norm(p_next - p_curr)
+                
+                # Curvature estimate
+                curvature[i] = sign * angle / ((d1 + d2) / 2.0)
+            else:
+                curvature[i] = 0.0
+        
+        # Apply smoothing to curvature
+        curvature = self._smooth_array(curvature, window_size=5)
+        
+        return curvature
+
+    def _smooth_array(self, array: np.ndarray, window_size: int = 3) -> np.ndarray:
+        """
+        Apply smoothing to an array.
+        
+        Args:
+            array: Array to smooth
+            window_size: Size of smoothing window
+            
+        Returns:
+            Smoothed array
+        """
+        if window_size < 2:
+            return array
+        
+        result = np.copy(array)
+        n = len(array)
+        half_window = window_size // 2
+        
+        for i in range(n):
+            # Get window indices with wraparound
+            window_indices = [(i + j - half_window) % n for j in range(window_size)]
+            
+            # Calculate mean for window
+            result[i] = np.mean(array[window_indices])
+        
+        return result
     
     def _estimate_optimal_gear(self, speed: float) -> int:
         """

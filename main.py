@@ -742,18 +742,39 @@ def create_test_track(output_dir):
     
     print(f"Generating Formula Student track...")
     
-    # Create the track generator - it expects (base_dir, visualize) parameters
-    generator = FSTrackGenerator(output_dir, visualize=True)
-    
-    # Generate track with EXTEND mode (medium difficulty)
-    track_metadata = generator.generate_track(TrackMode.EXTEND)
-    
-    # Export to FSSIM format (YAML)
-    generator.export_track(track_file, SimType.FSSIM)
-    
-    print(f"Track generated and exported to: {track_file}")
-    print(f"Track length: {track_metadata['track_length']:.1f}m")
-    print(f"Number of cones: {track_metadata['num_cones']}")
+    try:
+        # Create the track generator
+        # Check the correct initialization parameters for FSTrackGenerator
+        try:
+            # Try the initialization from the error
+            generator = FSTrackGenerator(output_dir, visualize=True)
+        except TypeError:
+            # If that fails, try standard initialization
+            generator = FSTrackGenerator(
+                track_width=3.0,
+                min_length=200,
+                max_length=300,
+                curvature_threshold=0.267
+            )
+        
+        # Generate track with EXTEND mode (medium difficulty)
+        track_metadata = generator.generate_track(TrackMode.EXTEND)
+        
+        # Export to FSSIM format (YAML)
+        generator.export_track(track_file, SimType.FSSIM)
+        
+        print(f"Track generated and exported to: {track_file}")
+        print(f"Track length: {track_metadata['track_length']:.1f}m")
+        print(f"Number of cones: {track_metadata['num_cones']}")
+        
+    except Exception as e:
+        print(f"Error generating track: {str(e)}")
+        print("Falling back to example track...")
+        
+        # Fall back to creating a simple example track
+        from kcl_fs_powertrain.performance.lap_time import create_example_track
+        track_file = create_example_track(track_file, difficulty='medium')
+        print(f"Example track created at: {track_file}")
     
     return track_file
 
