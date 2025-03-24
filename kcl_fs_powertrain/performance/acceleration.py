@@ -119,6 +119,15 @@ class AccelerationSimulator:
         Returns:
             Dictionary with simulation results
         """
+        # Check if we have cached results with the current mass
+        # Add the mass to the cache key
+        vehicle_mass = self.vehicle.mass
+        cache_key = f"accel_{use_launch_control}_{optimized_shifts}_{vehicle_mass}"
+        
+        if cache_key in self.results_cache:
+            logger.info("Using cached acceleration results")
+            return self.results_cache[cache_key]
+        
         # For simple acceleration simulations, leverage the vehicle's built-in method
         if not use_launch_control and not optimized_shifts:
             # Use the vehicle's standard method
