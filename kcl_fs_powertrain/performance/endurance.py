@@ -16,6 +16,7 @@ from typing import Dict, List, Tuple, Optional, Union, Callable
 import logging
 import time
 import random
+import types
 from enum import Enum, auto
 
 # Import from other modules
@@ -565,14 +566,12 @@ class EnduranceSimulator:
                 original_power = self.vehicle.engine.get_power
                 # Make a copy of the original function
                 original_power_func = self.vehicle.engine.get_power
-                
-                # Create a wrapper function
-                def modified_power_func(rpm, throttle=1.0):
-                    original_power = original_power_func(rpm, throttle)
-                    return original_power * thermal_factor
-                
-                # Replace the original function with our wrapper
-                self.vehicle.engine.get_power = modified_power_func
+
+                def modified_power_func(self, rpm, throttle=1.0):
+                    return original_power_func(rpm, throttle) * thermal_factor
+
+                # Bind method to engine instance
+                self.vehicle.engine.get_power = types.MethodType(modified_power_func, self.vehicle.engine)
             
             # Simulate the lap
             try:
@@ -1031,11 +1030,12 @@ class EnduranceSimulator:
                 'lap_times': results['lap_times']
             },
             'scores': {
-                'endurance_score': score['endurance_score'],
-                'efficiency_score': score['efficiency_score'],
-                'total_score': score['total_score'],
-                'max_possible': score['max_endurance_score'] + score['max_efficiency_score']
+                'endurance_score': score.get('endurance_score', 0.0),
+                'efficiency_score': score.get('efficiency_score', 0.0),
+                'total_score': score.get('total_score', 0.0),
+                'max_possible': score.get('max_endurance_score', 0.0) + score.get('max_efficiency_score', 0.0)
             },
+
             'reliability': {
                 'events': results['reliability_events'],
                 'component_wear': results['component_wear']

@@ -28,17 +28,17 @@ class SimType(Enum):
     GPX = 3         # GPX track format
 
 class FSTrackGenerator:
-    def __init__(self, base_dir: str, visualize: bool = False):
+    def __init__(self, base_dir: str, visualize: bool = False, track_width: float = 3.0, min_length: float = 200, max_length: float = 300, curvature_threshold: float = (1.0 / 3.75), straight_threshold: float = 1.0 / 20.0, length_start_area: float = 6.0, n_points: int = 60, n_regions: int = 20, max_bound: float = 200, min_bound: float = 0, cone_spacing: float = 4.0):
         # Scale factor for generation (will be scaled down in output)
         self.SCALE_FACTOR = 2.0  # Generate at 2x size, then scale down
         
         # Formula Student Track parameters
-        self.TRACK_WIDTH = 3.0        # meters - standard FSG track width
-        self.MIN_LENGTH = 200          # meters
-        self.MAX_LENGTH = 300         # meters 
-        self.CURVATURE_THRESHOLD = 1.0 / 3.75  # Original curvature threshold
-        self.STRAIGHT_THRESHOLD = 1.0 / 20.0
-        self.LENGTH_START_AREA = 6.0  # meters
+        self.TRACK_WIDTH = track_width       # meters - standard FSG track width
+        self.MIN_LENGTH = min_length         # meters
+        self.MAX_LENGTH = max_length        # meters 
+        self.CURVATURE_THRESHOLD = curvature_threshold  # Original curvature threshold
+        self.STRAIGHT_THRESHOLD = straight_threshold
+        self.LENGTH_START_AREA = length_start_area # meters
 
         # Generation parameters (scaled up)
         self.N_POINTS = 60          # Keep high number of points for detail
@@ -657,9 +657,3 @@ def generate_multiple_tracks(
     
     return tracks
 
-
-# The code is too long to include in this script, so you'll need to:
-# 1. Open this file at kcl_fs_powertrain/track_generator/generator.py
-# 2. Copy the original track generator code from track_generator.py
-# 3. Update the imports to use the new module structure
-# 4. Remove the if __name__ == "__main__" section

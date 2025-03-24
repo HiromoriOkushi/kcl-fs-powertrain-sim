@@ -270,7 +270,7 @@ class LapTimeSimulator:
         air_density = 1.225  # kg/m³
         
         # Get maximum engine power
-        max_power = self.vehicle.engine.max_power_hp * 745.7  # Convert hp to watts
+        max_power = self.vehicle.engine.max_power * 745.7  # Convert hp to watts
         
         # Calculate maximum speed (solving: P = F_drag * v and F_drag = 0.5 * rho * Cd * A * v²)
         # This gives v³ = 2 * P / (rho * Cd * A)
@@ -315,7 +315,7 @@ class LapTimeSimulator:
         drag_force = 0.5 * air_density * self.vehicle.drag_coefficient * self.vehicle.frontal_area * speed**2
         
         # Calculate rolling resistance
-        rolling_resistance = self.vehicle.mass * 9.81 * self.vehicle.rolling_resistance_coefficient
+        rolling_resistance = self.vehicle.mass * 9.81 * self.vehicle.rolling_resistance
         
         # Net force
         net_force = tractive_force - drag_force - rolling_resistance
@@ -1874,10 +1874,11 @@ def create_example_track(output_file: str, difficulty: str = 'medium') -> str:
         
         # Create track generator
         generator = FSTrackGenerator(
-            track_width=3.0,
-            min_length=min_length,
-            max_length=max_length,
-            curvature_threshold=curvature_threshold
+        base_dir=os.path.dirname(output_file),
+        track_width=3.0,
+        min_length=min_length,
+        max_length=max_length,
+        curvature_threshold=curvature_threshold
         )
         
         # Generate track
