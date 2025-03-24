@@ -610,8 +610,22 @@ class LapTimeSimulator:
         speed = results['speed']
         lateral_g = results['lateral_g']
         
+        # Calculate track length - use last distance value or calculate from track_data
+        if 'distance' in results and len(results['distance']) > 0:
+            track_length = results['distance'][-1]  # Use the last distance point
+        elif 'length' in self.track_data:
+            track_length = self.track_data['length']
+        elif 'distance' in self.track_data and len(self.track_data['distance']) > 0:
+            track_length = self.track_data['distance'][-1]
+        else:
+            # Fallback - calculate from points
+            points = self.track_data['points']
+            track_length = 0
+            for i in range(1, len(points)):
+                track_length += np.linalg.norm(points[i] - points[i-1])
+        
         # Calculate average speed
-        avg_speed = self.track_data['length'] / self.lap_time
+        avg_speed = track_length / self.lap_time
         
         # Calculate maximum speed
         max_speed = np.max(speed)
@@ -641,7 +655,7 @@ class LapTimeSimulator:
             time_in_corners = sum(s['time'] for s in self.sector_times 
                                 if s['type'] in ['left_turn', 'right_turn'])
             time_in_straights = sum(s['time'] for s in self.sector_times 
-                                  if s['type'] == 'straight')
+                                if s['type'] == 'straight')
         else:
             # Approximate based on lateral G
             corner_mask = lateral_g >= 0.4
@@ -671,9 +685,14 @@ class LapTimeSimulator:
             # If thermally limited, estimate improvement with better cooling
             potential_improvement += 0.05 * self.lap_time
         
+        # Store track length for future reference
+        if 'length' not in self.track_data:
+            self.track_data['length'] = track_length
+        
         # Compile metrics
         metrics = {
             'lap_time': self.lap_time,
+            'track_length': track_length,
             'avg_speed': avg_speed,
             'avg_speed_kph': avg_speed * 3.6,
             'max_speed': max_speed,
