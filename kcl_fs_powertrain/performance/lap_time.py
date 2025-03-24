@@ -1199,28 +1199,38 @@ class LapTimeSimulator:
             'all_evaluations': all_evaluations
         }
         
-        return resultsspeed_profile = None
-            self.lap_time = None
-            self.time_profile = None
+        return results
+    
+    def _plot_lap_time_comparison(self, comparison_results: List[Dict], save_path: str):
+        """
+        Plot comparison of lap times for different vehicle configurations.
+        
+        Args:
+            comparison_results: List of comparison result dictionaries
+            save_path: Path to save the plot
+        """        
+        speed_profile = None
+        self.lap_time = None
+        self.time_profile = None
             
-            # Recalculate speed profile and simulate lap
-            self.calculate_speed_profile()
-            lap_results = self.simulate_lap(include_thermal=include_thermal)
+        # Recalculate speed profile and simulate lap
+        self.calculate_speed_profile()
+        lap_results = self.simulate_lap(include_thermal=include_thermal)
+        
+        #Analyze performance metrics
+        lap_metrics = self.analyze_lap_performance(lap_results)
             
-            # Analyze performance metrics
-            lap_metrics = self.analyze_lap_performance(lap_results)
+        # Store results with label
+        comparison_result = {
+            'label': label,
+            'lap_time': self.lap_time,
+            'results': lap_results,
+            'metrics': lap_metrics
+        }
             
-            # Store results with label
-            comparison_result = {
-                'label': label,
-                'lap_time': self.lap_time,
-                'results': lap_results,
-                'metrics': lap_metrics
-            }
+        comparison_results.append(comparison_result)
             
-            comparison_results.append(comparison_result)
-            
-            logger.info(f"Configuration '{label}' lap time: {self.lap_time:.3f}s")
+        logger.info(f"Configuration '{label}' lap time: {self.lap_time:.3f}s")
         
         # Restore original vehicle
         self.vehicle = original_vehicle
