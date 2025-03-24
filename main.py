@@ -2130,8 +2130,7 @@ def main():
         vehicle,
         accel_results,
         lap_results,
-        endurance_results,
-        output_dir
+        endurance_results
     )
     
     # Compare different cooling configurations
