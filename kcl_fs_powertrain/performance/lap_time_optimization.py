@@ -13,7 +13,8 @@ import logging
 from typing import Dict, Optional, Tuple, List, Literal
 
 from ..core.vehicle import Vehicle
-from ..core.track_integration import TrackProfile, create_example_track
+from ..core.track_integration import TrackProfile
+from .lap_time import create_example_track
 from .lap_time import LapTimeSimulator, create_lap_time_simulator, run_fs_lap_simulation
 from .optimal_lap_time import OptimalLapTimeOptimizer, run_advanced_lap_optimization
 
