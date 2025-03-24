@@ -422,7 +422,7 @@ class LapTimeSimulator:
         drag_force = 0.5 * air_density * self.vehicle.drag_coefficient * self.vehicle.frontal_area * speed**2
         
         # Calculate rolling resistance
-        rolling_resistance = self.vehicle.mass * 9.81 * self.vehicle.rolling_resistance_coefficient
+        rolling_resistance = self.vehicle.mass * 9.81 * self.vehicle.rolling_resistance
         
         # Net force
         net_force = tractive_force - drag_force - rolling_resistance

@@ -567,10 +567,12 @@ class EnduranceSimulator:
                 original_power_func = self.vehicle.engine.get_power
                 
                 # Create a wrapper function
-                def modified_power_func(rpm, throttle=1.0):
-                    original_power = original_power_func(rpm, throttle)
+                # Create a wrapper function that accepts all parameters
+                def modified_power_func(*args, **kwargs):
+                    # Call the original function with all arguments
+                    original_power = original_power_func(*args, **kwargs)
                     return original_power * thermal_factor
-                
+                                
                 # Replace the original function with our wrapper
                 self.vehicle.engine.get_power = modified_power_func
             
@@ -701,6 +703,7 @@ class EnduranceSimulator:
         
         # Endurance scoring formula (actual formula may vary by competition)
         max_endurance_score = 275.0
+        max_efficiency_score = 75.0
         
         if fastest_time is None:
             # No reference time, assume this is the fastest
@@ -745,7 +748,7 @@ class EnduranceSimulator:
             'total_score': total_score,
             'max_endurance_score': max_endurance_score,
             'max_efficiency_score': max_efficiency_score,
-            'status': 'Finished',
+            'status': 'Finished' if results['completed'] else 'DNF',
             'fastest_time_factor': 1.0 if fastest_time is None else (fastest_time / results['total_time'])
         }
     
