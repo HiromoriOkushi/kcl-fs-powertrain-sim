@@ -15,7 +15,7 @@ kcl-fs-powertrain-sim/
 │
 ├── kcl_fs_powertrain/                  
 │   ├── __init__.py                     🔄 Placeholder created
-│   ├── main.py                         🔄 Placeholder created
+│   ├── main.py                         ✅ Implemented
 │   ├── config.py                       ❌ Not implemented yet
 │   │
 │   ├── core/                           

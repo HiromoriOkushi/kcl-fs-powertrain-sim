@@ -122,7 +122,211 @@ def create_vehicle(config, cooling_config='standard'):
             # The vehicle object already has thermal systems initialized
             pass
         else:
+<<<<<<< Updated upstream
             # Set up thermal systems manually
+=======
+            # Default to main output directory
+            return self.output_dir
+    
+    def save_configuration(self):
+        """Save the complete configuration to a file for reference."""
+        # Create a simplified version of the config for saving
+        # (avoid circular references and non-serializable objects)
+        save_config = {
+            'simulation_settings': self.simulation_settings,
+            'optimization_settings': self.optimization_settings,
+            'paths': self.default_paths,
+            'output_dir': self.output_dir,
+            'output_paths': self.config['output_paths'],
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # Save the configuration
+        config_path = os.path.join(self.output_dir, 'simulation_config.yaml')
+        try:
+            with open(config_path, 'w') as f:
+                yaml.dump(save_config, f, default_flow_style=False)
+                
+            print(f"Configuration saved to: {config_path}")
+        except Exception as e:
+            print(f"Warning: Could not save configuration to {config_path}: {str(e)}")
+    
+    def _ensure_directory_exists(self, file_path: str):
+        """
+        Ensure that the directory for a file exists before writing to it.
+        
+        Args:
+            file_path: Path to the file that will be written
+        """
+        directory = os.path.dirname(file_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+    def export_results(self) -> None:
+        """Export the simulation results to files."""
+        if not hasattr(self, 'results') or not self.results or 'results' not in self.results:
+            print("No results to export")
+            return
+
+        # Export results as CSV
+        results = self.results['results']
+
+        if 'time' in results and 'speed' in results:
+            self._create_dataframe_and_export(results)
+
+    def _create_dataframe_and_export(self, results):
+        """
+        Create a DataFrame from results and export it to CSV.
+        
+        Args:
+            results: Dictionary containing simulation results
+        """
+        df = pd.DataFrame({
+            'time': results['time'],
+            'speed': results['speed'],
+            'acceleration': results.get('acceleration', [0] * len(results['time'])),
+            'distance': results.get('distance', [0] * len(results['time'])),
+            'engine_rpm': results.get('engine_rpm', [0] * len(results['time'])),
+            'gear': results.get('gear', [0] * len(results['time'])),
+            'wheel_slip': results.get('wheel_slip', [0] * len(results['time']))
+        })
+
+        csv_path = self._export_dataframe_to_csv("acceleration_data.csv", df)
+        
+        # Export metrics
+        if hasattr(self, 'results') and 'metrics' in self.results:
+            metrics = self.results['metrics']
+            metrics_df = pd.DataFrame([metrics])
+            metrics_path = self._export_dataframe_to_csv("acceleration_metrics.csv", metrics_df)
+            print(f"Acceleration metrics exported to: {metrics_path}")
+        
+        print(f"Acceleration data exported to: {csv_path}")
+
+    def _export_dataframe_to_csv(self, filename: str, df: pd.DataFrame) -> str:
+        """
+        Export a DataFrame to a CSV file.
+        
+        Args:
+            filename: Name of the CSV file
+            df: DataFrame to export
+            
+        Returns:
+            str: Path to the exported CSV file
+        """
+        csv_path = os.path.join(self.output_dir, filename)
+
+        # Ensure the directory exists
+        self._ensure_directory_exists(csv_path)
+
+        df.to_csv(csv_path, index=False)
+
+        return csv_path
+
+# =========================================================================
+# Vehicle Factory
+# =========================================================================
+
+class VehicleFactory:
+    """Factory class for creating and configuring vehicle models."""
+    
+    @staticmethod
+    def create_vehicle(config: Dict, cooling_config: str = 'standard') -> Any:
+        """
+        Create and configure a Formula Student vehicle with specified configuration.
+        
+        Args:
+            config: Configuration dictionary
+            cooling_config: Type of cooling configuration ('standard', 'optimized', 'minimal', or 'custom')
+            
+        Returns:
+            Vehicle: Configured Formula Student vehicle
+        """
+        # Create a default Formula Student vehicle
+        vehicle = create_formula_student_vehicle()
+
+        # Load engine configuration if specified
+        if 'engine' in config and config['engine'] and 'paths' in config and 'engine' in config['paths']:
+            try:
+                # Check if engine_config file exists
+                engine_config_path = config['paths']['engine']
+                if os.path.exists(engine_config_path):
+                    # Update engine parameters from config file
+                    vehicle.engine.load_config(engine_config_path)
+                    print(f"Engine configured from: {engine_config_path}")
+            except Exception as e:
+                print(f"Warning: Could not load engine configuration: {str(e)}")
+
+        # Load transmission configuration if specified
+        if 'transmission' in config and config['transmission'] and 'paths' in config and 'transmission' in config['paths']:
+            try:
+                # Check if transmission_config file exists
+                transmission_config_path = config['paths']['transmission']
+                if os.path.exists(transmission_config_path):
+                    # Update transmission parameters from config file
+                    # This is a placeholder - in practice, you would need to create
+                    # an appropriate method on the vehicle or drivetrain object
+                    if hasattr(vehicle, 'drivetrain') and hasattr(vehicle.drivetrain, 'load_config'):
+                        vehicle.drivetrain.load_config(transmission_config_path)
+                    print(f"Transmission configured from: {transmission_config_path}")
+            except Exception as e:
+                print(f"Warning: Could not load transmission configuration: {str(e)}")
+
+        # Load shift strategy configuration if specified
+        if 'shift_strategy' in config and config['shift_strategy'] and 'paths' in config and 'shift_strategy' in config['paths']:
+            try:
+                # Check if shift_strategy file exists
+                shift_config_path = config['paths']['shift_strategy']
+                if os.path.exists(shift_config_path):
+                    # Update shift strategy parameters from config file
+                    if hasattr(vehicle, 'drivetrain') and hasattr(vehicle.drivetrain, 'strategy_manager'):
+                        # Assume the strategy manager has a load_config method
+                        vehicle.drivetrain.strategy_manager.load_config(shift_config_path)
+                    print(f"Shift strategy configured from: {shift_config_path}")
+            except Exception as e:
+                print(f"Warning: Could not load shift strategy configuration: {str(e)}")
+                
+        # Configure cooling system based on the specified configuration
+        if cooling_config == 'custom':
+            print("Using custom cooling configuration from config files")
+            # Try to load cooling configuration from config files
+            try:
+                # Create thermal configuration
+                thermal_config = ThermalConfig()
+                if 'paths' in config and 'thermal' in config['paths'] and os.path.exists(config['paths']['thermal']):
+                    thermal_config.load_from_file(config['paths']['thermal'])
+
+                # Create engine heat model with this configuration
+                heat_model = EngineHeatModel(thermal_config, vehicle.engine)
+
+                # Create cooling system
+                cooling_system = CoolingSystem()
+
+                # Create side pod system if config available
+                if 'paths' in config and 'side_pod' in config['paths'] and os.path.exists(config['paths']['side_pod']):
+                    with open(config['paths']['side_pod'], 'r') as f:
+                        side_pod_data = yaml.safe_load(f)
+                        # Simplified creation - in a real implementation this would use the config file
+                        side_pod_system = create_standard_side_pod_system()
+                else:
+                    side_pod_system = create_standard_side_pod_system()
+
+                # Assign to vehicle
+                vehicle.engine.heat_model = heat_model
+                vehicle.cooling_system = cooling_system
+                vehicle.side_pod_system = side_pod_system
+
+            except Exception as e:
+                print(f"Warning: Could not load custom cooling configuration: {str(e)}")
+                print("Falling back to standard cooling configuration")
+
+                # Fall back to standard configuration
+                cooling_system = create_formula_student_cooling_system()
+                vehicle.cooling_system = cooling_system
+
+        elif cooling_config == 'minimal':
+            print("Using minimal weight cooling configuration")
+            # Create minimal cooling setup (prioritizing weight)
+>>>>>>> Stashed changes
             cooling_system = create_formula_student_cooling_system()
             vehicle.cooling_system = cooling_system
             
@@ -1765,5 +1969,9 @@ def analyze_weight_sensitivity(vehicle, track_file, output_dir, weight_range=Non
     return results
 
 if __name__ == "__main__":
+<<<<<<< Updated upstream
     main()
 
+=======
+    sys.exit(main())
+>>>>>>> Stashed changes

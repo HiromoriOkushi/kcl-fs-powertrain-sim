@@ -1,6 +1,77 @@
 # KCL Formula Student Powertrain Repository Tree
 
 ## kcl_fs_powertrain (Main Package)
+#/main.py
+- **ConfigurationManager**
+  - `__init__`: Initializes configuration manager with default settings and paths
+  - `load_configurations`: Loads all configuration files and creates config dictionary
+  - `_ensure_output_directory`: Ensures main output directory exists
+  - `_apply_command_line_overrides`: Applies command-line argument overrides to configuration
+  - `_create_output_directories`: Creates all necessary output directories for analyses
+  - `get_output_path`: Gets output directory path for a specific analysis type
+  - `save_configuration`: Saves the complete configuration to a file for reference
+  - `_ensure_directory_exists`: Ensures directory exists before writing a file
+  - `export_results`: Exports simulation results to files
+  - `_create_dataframe_and_export`: Creates DataFrame from results and exports to CSV
+  - `_export_dataframe_to_csv`: Exports a DataFrame to a CSV file
+- **VehicleFactory**
+  - `create_vehicle`: Creates and configures Formula Student vehicle with specified configuration
+- **TrackManager**
+  - `__init__`: Initializes track manager with configuration
+  - `create_example_track`: Creates a sample track for testing with specified difficulty
+  - `generate_tracks`: Generates multiple Formula Student tracks with specified mode
+  - `load_track`: Loads a track from file
+  - `get_available_tracks`: Gets list of available track files
+- **EventSimulator** (Base Class)
+  - `__init__`: Initializes event simulator with vehicle model and config
+  - `run`: Abstract method for running event simulation
+  - `visualize_results`: Abstract method for visualizing results
+  - `export_results`: Abstract method for exporting results
+- **AccelerationEventSimulator**
+  - `__init__`: Initializes acceleration simulator with configuration
+  - `run`: Runs acceleration simulation with launch control and optimized shifts
+  - `visualize_results`: Creates visualization of acceleration results
+  - `export_results`: Exports acceleration results to CSV files
+- **LapTimeEventSimulator**
+  - `__init__`: Initializes lap time simulator with track file
+  - `run`: Runs lap time simulation with thermal effects
+  - `visualize_results`: Creates visualization of lap time results and track layout
+  - `export_results`: Exports lap time data and metrics to CSV files
+- **EnduranceEventSimulator**
+  - `__init__`: Initializes endurance simulator with track file and lap count
+  - `run`: Runs endurance simulation with thermal effects
+  - `visualize_results`: Creates visualization of endurance results
+  - `export_results`: Exports endurance lap data and summary to CSV files
+- **AnalysisManager**
+  - `__init__`: Initializes analysis manager with vehicle, config and track
+  - `run_weight_sensitivity_analysis`: Analyzes effect of weight on performance metrics
+  - `run_cooling_comparison`: Compares different cooling system configurations
+  - `_create_cooling_comparison_plot`: Creates cooling configuration comparison plot
+  - `run_lap_optimization`: Runs lap time optimization using selected method
+  - `calculate_optimal_racing_lines`: Calculates and visualizes optimal racing lines
+  - `_plot_racing_lines`: Creates racing line comparison visualization
+  - `analyze_performance_tradeoffs`: Analyzes tradeoffs between weight, lap time, and thermal performance
+- **ReportGenerator**
+  - `__init__`: Initializes report generator with configuration
+  - `generate_summary_report`: Creates comprehensive summary of all simulation results
+  - `_flatten_dict`: Converts nested dictionary to flat structure for CSV export
+- **SimulationManager**
+  - `__init__`: Initializes simulation manager with command-line arguments
+  - `setup`: Sets up simulation environment, configuration and track manager
+  - `_copy_script_to_output`: Copies simulation script to output directory for reference
+  - `create_vehicle`: Creates vehicle model using vehicle factory
+  - `create_track`: Creates or generates track using track manager
+  - `run_event_simulations`: Runs enabled event simulations (acceleration, lap time, endurance)
+  - `run_performance_analyses`: Runs enabled performance analyses
+  - `generate_report`: Generates comprehensive report of all simulation results
+  - `print_conclusion`: Prints overall conclusion with key findings and recommendations
+  - `run`: Orchestrates complete simulation process from setup to reporting
+- **Thermal Analysis Functions**
+  - `analyze_thermal_performance`: Analyzes thermal performance across different events
+- **Main Program Functions**
+  - `parse_arguments`: Parses command-line arguments for simulation control
+  - `main`: Entry point that creates and runs simulation manager
+
 
 ### core/
 - **track_integration.py**
@@ -59,7 +130,6 @@
   - `RacingLine._calculate_time_profile`: Calculates time profile based on speed profile
   - `RacingLine.visualize`: Visualizes the racing line
   - `RacingLine.get_stats`: Gets racing line statistics
-  
   - `create_example_track`: Creates an example track for testing
   - `load_track_from_config`: Loads track from configuration file
 
