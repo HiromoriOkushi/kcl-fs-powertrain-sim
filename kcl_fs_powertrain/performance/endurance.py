@@ -414,27 +414,101 @@ class EnduranceSimulator:
         Returns:
             Updated thermal state dictionary
         """
+        # Initialize default temperatures
+        default_engine_temp = 95.0
+        default_coolant_temp = 90.0
+        default_oil_temp = 85.0
+        ambient_temp = 25.0  # °C
+        
         # Extract final thermal state from lap results
-        if 'engine_temp' in lap_results:
-            engine_temp = lap_results['engine_temp'][-1]
-            coolant_temp = lap_results.get('coolant_temp', [90.0])[-1]  # Default if not available
-            oil_temp = lap_results.get('oil_temp', [85.0])[-1]  # Default if not available
-        else:
-            # Use reasonable defaults if thermal simulation wasn't enabled
-            engine_temp = 95.0
-            coolant_temp = 90.0
-            oil_temp = 85.0
+        try:
+            # Extract engine temperature
+            if 'engine_temp' in lap_results and isinstance(lap_results['engine_temp'], (list, np.ndarray)):
+                if len(lap_results['engine_temp']) > 0:
+                    engine_temp = float(lap_results['engine_temp'][-1])  # Take last value
+                else:
+                    engine_temp = default_engine_temp
+            elif 'temperatures' in lap_results and isinstance(lap_results['temperatures'], dict):
+                if 'engine_temp' in lap_results['temperatures']:
+                    temps = lap_results['temperatures']['engine_temp']
+                    if isinstance(temps, (list, np.ndarray)) and len(temps) > 0:
+                        engine_temp = float(temps[-1])
+                    else:
+                        engine_temp = float(temps) if isinstance(temps, (int, float)) else default_engine_temp
+                else:
+                    engine_temp = default_engine_temp
+            else:
+                engine_temp = default_engine_temp
+                
+            # Extract coolant temperature
+            if 'coolant_temp' in lap_results and isinstance(lap_results['coolant_temp'], (list, np.ndarray)):
+                if len(lap_results['coolant_temp']) > 0:
+                    coolant_temp = float(lap_results['coolant_temp'][-1])
+                else:
+                    coolant_temp = default_coolant_temp
+            elif 'temperatures' in lap_results and isinstance(lap_results['temperatures'], dict):
+                if 'coolant_temp' in lap_results['temperatures']:
+                    temps = lap_results['temperatures']['coolant_temp']
+                    if isinstance(temps, (list, np.ndarray)) and len(temps) > 0:
+                        coolant_temp = float(temps[-1])
+                    else:
+                        coolant_temp = float(temps) if isinstance(temps, (int, float)) else default_coolant_temp
+                else:
+                    coolant_temp = default_coolant_temp
+            else:
+                coolant_temp = default_coolant_temp
+                
+            # Extract oil temperature
+            if 'oil_temp' in lap_results and isinstance(lap_results['oil_temp'], (list, np.ndarray)):
+                if len(lap_results['oil_temp']) > 0:
+                    oil_temp = float(lap_results['oil_temp'][-1])
+                else:
+                    oil_temp = default_oil_temp
+            elif 'temperatures' in lap_results and isinstance(lap_results['temperatures'], dict):
+                if 'oil_temp' in lap_results['temperatures']:
+                    temps = lap_results['temperatures']['oil_temp']
+                    if isinstance(temps, (list, np.ndarray)) and len(temps) > 0:
+                        oil_temp = float(temps[-1])
+                    else:
+                        oil_temp = float(temps) if isinstance(temps, (int, float)) else default_oil_temp
+                else:
+                    oil_temp = default_oil_temp
+            else:
+                oil_temp = default_oil_temp
+        
+        except Exception as e:
+            # If any error occurs during extraction, use default values
+            logger.warning(f"Error extracting thermal data: {str(e)}. Using default values.")
+            engine_temp = default_engine_temp
+            coolant_temp = default_coolant_temp
+            oil_temp = default_oil_temp
+        
+        # Validate temperatures before calculation - ensure they're physically reasonable
+        # Lowest reasonable temperature is ambient, highest is well below boiling of coolant
+        engine_temp = max(ambient_temp, min(engine_temp, 150.0))
+        coolant_temp = max(ambient_temp, min(coolant_temp, 150.0))
+        oil_temp = max(ambient_temp, min(oil_temp, 150.0))
+        
+        # Log pre-cooling temperatures for debugging
+        logger.debug(f"Pre-cooling temperatures - Engine: {engine_temp:.1f}°C, Coolant: {coolant_temp:.1f}°C, Oil: {oil_temp:.1f}°C")
         
         # Calculate cooling during recovery period
-        
-        # Simple thermal model: exponential cooling toward ambient temperature
-        ambient_temp = 25.0  # °C
         cooling_rate = 0.02  # Cooling rate constant
         
         # Cooling equation: T(t) = T_ambient + (T_initial - T_ambient) * e^(-kt)
+        # This models Newton's law of cooling - temperature approaches ambient exponentially
         engine_temp_after = ambient_temp + (engine_temp - ambient_temp) * np.exp(-cooling_rate * recovery_time)
         coolant_temp_after = ambient_temp + (coolant_temp - ambient_temp) * np.exp(-cooling_rate * recovery_time)
         oil_temp_after = ambient_temp + (oil_temp - ambient_temp) * np.exp(-cooling_rate * recovery_time)
+        
+        # Final validation to ensure temperatures remain physical
+        # Temperatures should never drop below ambient (would violate thermodynamics)
+        engine_temp_after = max(ambient_temp, min(engine_temp_after, 150.0))
+        coolant_temp_after = max(ambient_temp, min(coolant_temp_after, 150.0))
+        oil_temp_after = max(ambient_temp, min(oil_temp_after, 150.0))
+        
+        # Log post-cooling temperatures for verification
+        logger.debug(f"After {recovery_time:.1f}s cooling - Engine: {engine_temp_after:.1f}°C, Coolant: {coolant_temp_after:.1f}°C, Oil: {oil_temp_after:.1f}°C")
         
         # Create updated thermal state
         thermal_state = {
