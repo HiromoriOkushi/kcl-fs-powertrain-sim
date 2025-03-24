@@ -1288,15 +1288,6 @@ def analyze_results(accel_results, lap_results, endurance_results):
 def compare_cooling_configurations(config, vehicle_base, track_file, output_dir):
     """
     Compare different cooling system configurations for thermal performance.
-    
-    Args:
-        config: Configuration dictionary
-        vehicle_base: Base vehicle model (will be copied and modified)
-        track_file: Path to track file
-        output_dir: Directory to save results
-        
-    Returns:
-        dict: Comparison results
     """
     print("\n--- Cooling Configuration Comparison ---")
     
@@ -1331,51 +1322,70 @@ def compare_cooling_configurations(config, vehicle_base, track_file, output_dir)
         sim_time = time.time() - start_time
         
         print(f"  Lap simulation completed in {sim_time:.2f}s")
-        print(f"  Lap Time: {lap_results['lap_time']:.3f}s")
+        print(f"  Lap Time: {lap_results.get('lap_time', 0):.3f}s")
         
-        # Extract thermal data
-        thermal_data = None
-        if 'results' in lap_results and 'engine_temp' in lap_results['results']:
-            thermal_data = {
-                'distance': lap_results['results'].get('distance', []),
-                'engine_temp': lap_results['results'].get('engine_temp', []),
-                'coolant_temp': lap_results['results'].get('coolant_temp', []) if 'coolant_temp' in lap_results['results'] else None
-            }
-        
-        # Calculate performance metrics
+        # Initialize basic metrics
         metrics = {
             'configuration': config_name,
             'description': config_desc,
-            'lap_time': lap_results['lap_time'],
-            'max_speed': lap_results['metrics'].get('max_speed_kph', 0),
-            'avg_speed': lap_results['metrics'].get('avg_speed_kph', 0),
-            'thermal_limited': lap_results['metrics'].get('thermal_limited', False)
+            'lap_time': lap_results.get('lap_time', 0)
         }
         
-        # Add thermal metrics if available
-        if thermal_data and len(thermal_data['engine_temp']) > 0:
+        # Safely extract additional metrics from different possible locations
+        if 'metrics' in lap_results and isinstance(lap_results['metrics'], dict):
+            # Standard expected structure
             metrics.update({
-                'max_engine_temp': max(thermal_data['engine_temp']),
-                'avg_engine_temp': sum(thermal_data['engine_temp']) / len(thermal_data['engine_temp']),
-                'temp_rise': max(thermal_data['engine_temp']) - thermal_data['engine_temp'][0]
+                'max_speed': lap_results['metrics'].get('max_speed_kph', 0),
+                'avg_speed': lap_results['metrics'].get('avg_speed_kph', 0),
+                'thermal_limited': lap_results['metrics'].get('thermal_limited', False)
+            })
+        else:
+            # Alternative: try to extract directly from lap_results or its 'results' field
+            results_data = lap_results.get('results', lap_results)
+            metrics.update({
+                'max_speed': results_data.get('max_speed_kph', 
+                             results_data.get('max_speed', 0) * 3.6 if isinstance(results_data, dict) else 0),
+                'avg_speed': results_data.get('avg_speed_kph', 
+                            results_data.get('avg_speed', 0) * 3.6 if isinstance(results_data, dict) else 0),
+                'thermal_limited': results_data.get('thermal_limited', False) if isinstance(results_data, dict) else False
+            })
+        
+        # Extract thermal data if available
+        thermal_data = None
+        if isinstance(lap_results.get('results', {}), dict) and 'engine_temp' in lap_results['results']:
+            results_data = lap_results['results']
+            thermal_data = {
+                'distance': results_data.get('distance', []),
+                'engine_temp': results_data.get('engine_temp', []),
+                'coolant_temp': results_data.get('coolant_temp', None)
+            }
+        
+        # Add thermal metrics if available
+        if thermal_data and isinstance(thermal_data.get('engine_temp', []), (list, np.ndarray)) and len(thermal_data['engine_temp']) > 0:
+            engine_temp = thermal_data['engine_temp']
+            metrics.update({
+                'max_engine_temp': max(engine_temp),
+                'avg_engine_temp': sum(engine_temp) / len(engine_temp),
+                'temp_rise': max(engine_temp) - engine_temp[0] if len(engine_temp) > 0 else 0
             })
             
-            if thermal_data['coolant_temp'] is not None:
+            if thermal_data.get('coolant_temp') is not None and len(thermal_data['coolant_temp']) > 0:
+                coolant_temp = thermal_data['coolant_temp']
                 metrics.update({
-                    'max_coolant_temp': max(thermal_data['coolant_temp']),
-                    'avg_coolant_temp': sum(thermal_data['coolant_temp']) / len(thermal_data['coolant_temp'])
+                    'max_coolant_temp': max(coolant_temp),
+                    'avg_coolant_temp': sum(coolant_temp) / len(coolant_temp)
                 })
         
         # Add to results list
         results.append(metrics)
         
         # Save the thermal data for plotting
-        if thermal_data and len(thermal_data['distance']) > 0:
+        if thermal_data and len(thermal_data.get('distance', [])) > 0:
             np.savez(
                 os.path.join(comparison_dir, f"{config_name}_thermal_data.npz"),
                 distance=thermal_data['distance'],
                 engine_temp=thermal_data['engine_temp'],
-                coolant_temp=thermal_data['coolant_temp'] if thermal_data['coolant_temp'] is not None else []
+                coolant_temp=thermal_data['coolant_temp'] if thermal_data.get('coolant_temp') is not None else []
             )
     
     # Create comparison plot
