@@ -431,13 +431,22 @@ class EnduranceSimulator:
         coolant_temp_after = ambient_temp + (coolant_temp - ambient_temp) * np.exp(-cooling_rate * recovery_time)
         oil_temp_after = ambient_temp + (oil_temp - ambient_temp) * np.exp(-cooling_rate * recovery_time)
         
-        # Create updated thermal state
         thermal_state = {
             'engine_temp': engine_temp_after,
             'coolant_temp': coolant_temp_after,
             'oil_temp': oil_temp_after
-        }
-        
+            }
+        # Add validation for reasonable temperature ranges
+        for key in thermal_state:
+            if thermal_state[key] > 200 or thermal_state[key] < 20:
+                # If temperature is unreasonable, use a sensible default
+                if key == 'engine_temp':
+                    thermal_state[key] = 95.0
+                elif key == 'coolant_temp':
+                    thermal_state[key] = 85.0
+                elif key == 'oil_temp':
+                    thermal_state[key] = 80.0
+                    
         return thermal_state
     
     def _apply_thermal_state(self, thermal_state: Dict):

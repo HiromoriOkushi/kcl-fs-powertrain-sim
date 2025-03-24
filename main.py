@@ -1383,6 +1383,9 @@ def compare_cooling_configurations(config, vehicle_base, track_file, output_dir)
         # Simulate lap
         start_time = time.time()
         lap_results = lap_simulator.simulate_lap(include_thermal=True)
+        # Calculate performance metrics
+        metrics = lap_simulator.analyze_lap_performance(lap_results)
+        lap_results['metrics'] = metrics  # Add metrics to the results dictionary
         sim_time = time.time() - start_time
         
         print(f"  Lap simulation completed in {sim_time:.2f}s")
@@ -1402,9 +1405,9 @@ def compare_cooling_configurations(config, vehicle_base, track_file, output_dir)
             'configuration': config_name,
             'description': config_desc,
             'lap_time': lap_results['lap_time'],
-            'max_speed': lap_results['metrics'].get('max_speed_kph', 0),
-            'avg_speed': lap_results['metrics'].get('avg_speed_kph', 0),
-            'thermal_limited': lap_results['metrics'].get('thermal_limited', False)
+            'max_speed': max(lap_results.get('speed', [0])) * 3.6 if 'speed' in lap_results else 0,  # Convert m/s to km/h
+            'avg_speed': (lap_results.get('distance', [0])[-1] / lap_results.get('time', [1])[-1]) * 3.6 if 'distance' in lap_results and 'time' in lap_results else 0,
+            'thermal_limited': lap_results.get('thermal_limited', False)
         }
         
         # Add thermal metrics if available
