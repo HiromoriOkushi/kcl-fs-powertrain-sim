@@ -15,6 +15,7 @@ import pandas as pd
 import time
 import yaml
 from datetime import datetime
+from typing import Dict, Any
 
 # Add project root to Python path for imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -37,7 +38,7 @@ from kcl_fs_powertrain.thermal.electric_compressor import ElectricCompressor, Co
 from kcl_fs_powertrain.performance.weight_sensitivity import WeightSensitivityAnalyzer
 from kcl_fs_powertrain.performance.lap_time_optimization import run_lap_optimization, compare_optimization_methods
 from kcl_fs_powertrain.performance.optimal_lap_time import OptimalLapTimeOptimizer, run_advanced_lap_optimization
-from kcl_fs_powertrain.core.track_integration import TrackProfile, calculate_optimal_racing_line
+from kcl_fs_powertrain.core.track_integration import TrackProfile, calculate_optimal_racing_lines
 
 def load_configurations():
     """
@@ -122,9 +123,305 @@ def create_vehicle(config, cooling_config='standard'):
             # The vehicle object already has thermal systems initialized
             pass
         else:
-<<<<<<< Updated upstream
             # Set up thermal systems manually
-=======
+            cooling_system = create_formula_student_cooling_system()
+            vehicle.cooling_system = cooling_system
+            
+            # Add side pod cooling if possible
+            try:
+                side_pod_system = create_standard_side_pod_system()
+                vehicle.side_pod_system = side_pod_system
+            except Exception as e:
+                print(f"Note: Could not initialize side pod system: {str(e)}")
+    
+    elif cooling_config == 'optimized':
+        print("Using optimized cooling configuration")
+        # Create an optimized cooling setup with both side pods and rear radiator
+        cooling_system = create_formula_student_cooling_system()
+        side_pod_system = create_cooling_optimized_side_pod_system()
+        rear_radiator = create_optimized_rear_radiator_system()
+        cooling_assist = create_high_performance_cooling_assist_system()
+        
+        # Assign to vehicle
+        vehicle.cooling_system = cooling_system
+        vehicle.side_pod_system = side_pod_system
+        vehicle.rear_radiator = rear_radiator
+        vehicle.cooling_assist = cooling_assist
+        
+        # Update engine thermal model with optimized cooling
+        if hasattr(vehicle.engine, 'heat_model'):
+            vehicle.engine.heat_model.combustion_efficiency = 0.32  # Slight improvement
+    
+    elif cooling_config == 'minimal':
+        print("Using minimal weight cooling configuration")
+        # Create minimal cooling setup (prioritizing weight)
+        cooling_system = create_formula_student_cooling_system()
+        
+        # Use a single radiator with lightweight configuration
+        from kcl_fs_powertrain.thermal.cooling_system import Radiator, RadiatorType
+        radiator = Radiator(
+            radiator_type=RadiatorType.SINGLE_CORE_ALUMINUM,
+            core_area=0.14,  # Smaller radiator
+            core_thickness=0.03,
+            fin_density=16,
+            tube_rows=1  # Single row for weight reduction
+        )
+        cooling_system.radiator = radiator
+        
+        # Assign to vehicle
+        vehicle.cooling_system = cooling_system
+    
+    elif cooling_config == 'custom':
+        print("Using custom cooling configuration from config files")
+        # Try to load cooling configuration from config files
+        try:
+            # Create thermal configuration
+            thermal_config = ThermalConfig()
+            if os.path.exists(config['thermal_config']):
+                thermal_config.load_from_file(config['thermal_config'])
+            
+            # Create engine heat model with this configuration
+            heat_model = EngineHeatModel(thermal_config, vehicle.engine)
+            
+            # Create cooling system
+            cooling_system = CoolingSystem()
+            
+            # Create side pod system if config available
+            if os.path.exists(config['side_pod_config']):
+                with open(config['side_pod_config'], 'r') as f:
+                    side_pod_data = yaml.safe_load(f)
+                    # Simplified creation - in a real implementation this would use the config file
+                    side_pod_system = create_standard_side_pod_system()
+            else:
+                side_pod_system = create_standard_side_pod_system()
+            
+            # Assign to vehicle
+            vehicle.engine.heat_model = heat_model
+            vehicle.cooling_system = cooling_system
+            vehicle.side_pod_system = side_pod_system
+            
+        except Exception as e:
+            print(f"Warning: Could not load custom cooling configuration: {str(e)}")
+            print("Falling back to standard cooling configuration")
+            
+            # Fall back to standard configuration
+            cooling_system = create_formula_student_cooling_system()
+            vehicle.cooling_system = cooling_system
+    
+    # Set thermal limits if available in config
+    if 'thermal_limits' in config:
+        try:
+            limits = config['thermal_limits']
+            
+            if 'engine' in limits:
+                vehicle.engine_warning_temp = limits['engine'].get('warning_temp', 110.0)
+                vehicle.engine_critical_temp = limits['engine'].get('critical_temp', 120.0)
+                vehicle.engine_shutdown_temp = limits['engine'].get('shutdown_temp', 125.0)
+            
+            if 'coolant' in limits:
+                vehicle.coolant_warning_temp = limits['coolant'].get('warning_temp', 95.0)
+                vehicle.coolant_critical_temp = limits['coolant'].get('critical_temp', 105.0)
+            
+            print(f"Thermal limits set - Engine warning: {vehicle.engine_warning_temp}°C, critical: {vehicle.engine_critical_temp}°C")
+            
+        except Exception as e:
+            print(f"Warning: Could not set thermal limits: {str(e)}")
+    
+    # Print vehicle specifications
+    specs = vehicle.get_vehicle_specs()
+    print("\nVehicle Specifications:")
+    print(f"  Engine: {specs['engine']['make']} {specs['engine']['model']}")
+    print(f"  Max Power: {specs['engine']['max_power_hp']} hp @ {specs['engine']['max_power_rpm']} RPM")
+    print(f"  Max Torque: {specs['engine']['max_torque_nm']} Nm @ {specs['engine']['max_torque_rpm']} RPM")
+    print(f"  Mass: {specs['vehicle']['mass']} kg")
+    print(f"  Drag Coefficient: {specs['vehicle']['drag_coefficient']}")
+    print(f"  Gear Ratios: {specs['drivetrain']['transmission_ratios']}")
+    
+    # Print cooling system info if available
+    if hasattr(vehicle, 'cooling_system'):
+        print("\nCooling System Information:")
+        if hasattr(vehicle.cooling_system, 'radiator'):
+            radiator = vehicle.cooling_system.radiator
+            print(f"  Radiator: {radiator.__class__.__name__}, type: {getattr(radiator, 'radiator_type', 'Unknown').name if hasattr(radiator, 'radiator_type') else 'Unknown'}")
+            print(f"  Radiator Area: {getattr(radiator, 'core_area', 0.0):.3f} m²")
+        
+        if hasattr(vehicle, 'side_pod_system'):
+            print("  Side Pod Cooling: Enabled")
+        
+        if hasattr(vehicle, 'rear_radiator'):
+            print("  Rear Radiator: Enabled")
+        
+        if hasattr(vehicle, 'cooling_assist'):
+            print("  Electric Cooling Assist: Enabled")
+    
+    return vehicle
+
+# Configuration Manager class
+class ConfigurationManager:
+    """Manager class for handling simulation configurations and output directories."""
+    
+    def __init__(self, config_path=None, command_line_args=None):
+        """
+        Initializes configuration manager with default settings and paths.
+        
+        Args:
+            config_path: Path to configuration file (optional)
+            command_line_args: Command line arguments (optional)
+        """
+        self.default_paths = {
+            'engine': os.path.join('configs', 'engine', 'cbr600f4i.yaml'),
+            'thermal': os.path.join('configs', 'thermal', 'cooling_system.yaml'),
+            'transmission': os.path.join('configs', 'transmission', 'gearing.yaml'),
+            'shift_strategy': os.path.join('configs', 'transmission', 'shift_strategy.yaml'),
+            'output': os.path.join('data', 'output'),
+        }
+        
+        self.simulation_settings = {
+            'time_step': 0.01,  # s
+            'max_time': 30.0,   # s
+            'acceleration_distance': 75.0,  # m
+            'endurance_laps': 3,  # Number of laps for endurance simulation
+        }
+        
+        self.optimization_settings = {
+            'enable_weight_sensitivity': True,
+            'enable_lap_optimization': True,
+            'optimization_iterations': 10
+        }
+        
+        # Load configuration from file if provided
+        self.config = {}
+        if config_path and os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                self.config = yaml.safe_load(f)
+        
+        # Create timestamp for unique output directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.output_dir = os.path.join(self.default_paths['output'], f'simulation_{timestamp}')
+        
+        # Apply command line overrides if provided
+        if command_line_args:
+            self._apply_command_line_overrides(command_line_args)
+        
+        # Create output directories
+        self._ensure_output_directory()
+    
+    def load_configurations(self):
+        """
+        Loads all configuration files and creates a complete configuration dictionary.
+        
+        Returns:
+            dict: Complete configuration dictionary
+        """
+        # Initialize configuration dict with default paths
+        config = {
+            'paths': self.default_paths,
+            'simulation_settings': self.simulation_settings,
+            'optimization_settings': self.optimization_settings,
+            'output_dir': self.output_dir,
+        }
+        
+        # Add output paths for different analysis types
+        config['output_paths'] = {
+            'acceleration': os.path.join(self.output_dir, 'acceleration'),
+            'lap_time': os.path.join(self.output_dir, 'lap_time'),
+            'endurance': os.path.join(self.output_dir, 'endurance'),
+            'thermal': os.path.join(self.output_dir, 'thermal'),
+            'weight_sensitivity': os.path.join(self.output_dir, 'weight_sensitivity'),
+            'lap_optimization': os.path.join(self.output_dir, 'lap_optimization')
+        }
+        
+        # Create output directories
+        self._create_output_directories(config['output_paths'])
+        
+        # Load individual configuration files if they exist
+        try:
+            # Engine configuration
+            engine_config_path = self.default_paths['engine']
+            if os.path.exists(engine_config_path):
+                with open(engine_config_path, 'r') as f:
+                    config['engine'] = yaml.safe_load(f)
+                print(f"Engine configuration loaded from: {engine_config_path}")
+            
+            # Thermal configuration
+            thermal_config_path = self.default_paths['thermal']
+            if os.path.exists(thermal_config_path):
+                with open(thermal_config_path, 'r') as f:
+                    config['thermal'] = yaml.safe_load(f)
+                print(f"Thermal configuration loaded from: {thermal_config_path}")
+            
+            # Transmission configuration
+            transmission_config_path = self.default_paths['transmission']
+            if os.path.exists(transmission_config_path):
+                with open(transmission_config_path, 'r') as f:
+                    config['transmission'] = yaml.safe_load(f)
+                print(f"Transmission configuration loaded from: {transmission_config_path}")
+            
+            # Shift strategy configuration
+            shift_strategy_config_path = self.default_paths['shift_strategy']
+            if os.path.exists(shift_strategy_config_path):
+                with open(shift_strategy_config_path, 'r') as f:
+                    config['shift_strategy'] = yaml.safe_load(f)
+                print(f"Shift strategy configuration loaded from: {shift_strategy_config_path}")
+            
+        except Exception as e:
+            print(f"Warning: Error loading configuration files: {str(e)}")
+        
+        # Save the loaded configuration
+        self.config = config
+        
+        # Save configuration to output directory for reference
+        self.save_configuration()
+        
+        return config
+    
+    def _ensure_output_directory(self):
+        """Ensures main output directory exists."""
+        os.makedirs(self.output_dir, exist_ok=True)
+        print(f"Output directory created: {self.output_dir}")
+    
+    def _apply_command_line_overrides(self, args):
+        """
+        Applies command-line argument overrides to configuration.
+        
+        Args:
+            args: Command line arguments
+        """
+        if hasattr(args, 'output_dir') and args.output_dir:
+            self.output_dir = args.output_dir
+        
+        if hasattr(args, 'time_step') and args.time_step:
+            self.simulation_settings['time_step'] = args.time_step
+        
+        if hasattr(args, 'max_time') and args.max_time:
+            self.simulation_settings['max_time'] = args.max_time
+        
+        if hasattr(args, 'endurance_laps') and args.endurance_laps:
+            self.simulation_settings['endurance_laps'] = args.endurance_laps
+    
+    def _create_output_directories(self, output_paths):
+        """
+        Creates all necessary output directories for analyses.
+        
+        Args:
+            output_paths: Dictionary of output paths
+        """
+        for path in output_paths.values():
+            os.makedirs(path, exist_ok=True)
+    
+    def get_output_path(self, analysis_type=None):
+        """
+        Gets output directory path for a specific analysis type.
+        
+        Args:
+            analysis_type: Type of analysis ('acceleration', 'lap_time', etc.)
+            
+        Returns:
+            str: Output directory path
+        """
+        if analysis_type and 'output_paths' in self.config and analysis_type in self.config['output_paths']:
+            return self.config['output_paths'][analysis_type]
+        else:
             # Default to main output directory
             return self.output_dir
     
@@ -326,138 +623,105 @@ class VehicleFactory:
         elif cooling_config == 'minimal':
             print("Using minimal weight cooling configuration")
             # Create minimal cooling setup (prioritizing weight)
->>>>>>> Stashed changes
             cooling_system = create_formula_student_cooling_system()
-            vehicle.cooling_system = cooling_system
             
-            # Add side pod cooling if possible
-            try:
-                side_pod_system = create_standard_side_pod_system()
-                vehicle.side_pod_system = side_pod_system
-            except Exception as e:
-                print(f"Note: Could not initialize side pod system: {str(e)}")
-    
-    elif cooling_config == 'optimized':
-        print("Using optimized cooling configuration")
-        # Create an optimized cooling setup with both side pods and rear radiator
-        cooling_system = create_formula_student_cooling_system()
-        side_pod_system = create_cooling_optimized_side_pod_system()
-        rear_radiator = create_optimized_rear_radiator_system()
-        cooling_assist = create_high_performance_cooling_assist_system()
-        
-        # Assign to vehicle
-        vehicle.cooling_system = cooling_system
-        vehicle.side_pod_system = side_pod_system
-        vehicle.rear_radiator = rear_radiator
-        vehicle.cooling_assist = cooling_assist
-        
-        # Update engine thermal model with optimized cooling
-        if hasattr(vehicle.engine, 'heat_model'):
-            vehicle.engine.heat_model.combustion_efficiency = 0.32  # Slight improvement
-    
-    elif cooling_config == 'minimal':
-        print("Using minimal weight cooling configuration")
-        # Create minimal cooling setup (prioritizing weight)
-        cooling_system = create_formula_student_cooling_system()
-        
-        # Use a single radiator with lightweight configuration
-        from kcl_fs_powertrain.thermal.cooling_system import Radiator, RadiatorType
-        radiator = Radiator(
-            radiator_type=RadiatorType.SINGLE_CORE_ALUMINUM,
-            core_area=0.14,  # Smaller radiator
-            core_thickness=0.03,
-            fin_density=16,
-            tube_rows=1  # Single row for weight reduction
-        )
-        cooling_system.radiator = radiator
-        
-        # Assign to vehicle
-        vehicle.cooling_system = cooling_system
-    
-    elif cooling_config == 'custom':
-        print("Using custom cooling configuration from config files")
-        # Try to load cooling configuration from config files
-        try:
-            # Create thermal configuration
-            thermal_config = ThermalConfig()
-            if os.path.exists(config['thermal_config']):
-                thermal_config.load_from_file(config['thermal_config'])
-            
-            # Create engine heat model with this configuration
-            heat_model = EngineHeatModel(thermal_config, vehicle.engine)
-            
-            # Create cooling system
-            cooling_system = CoolingSystem()
-            
-            # Create side pod system if config available
-            if os.path.exists(config['side_pod_config']):
-                with open(config['side_pod_config'], 'r') as f:
-                    side_pod_data = yaml.safe_load(f)
-                    # Simplified creation - in a real implementation this would use the config file
-                    side_pod_system = create_standard_side_pod_system()
-            else:
-                side_pod_system = create_standard_side_pod_system()
+            # Use a single radiator with lightweight configuration
+            from kcl_fs_powertrain.thermal.cooling_system import Radiator, RadiatorType
+            radiator = Radiator(
+                radiator_type=RadiatorType.SINGLE_CORE_ALUMINUM,
+                core_area=0.14,  # Smaller radiator
+                core_thickness=0.03,
+                fin_density=16,
+                tube_rows=1  # Single row for weight reduction
+            )
+            cooling_system.radiator = radiator
             
             # Assign to vehicle
-            vehicle.engine.heat_model = heat_model
+            vehicle.cooling_system = cooling_system
+            
+        elif cooling_config == 'optimized':
+            print("Using optimized cooling configuration")
+            # Create an optimized cooling setup with both side pods and rear radiator
+            cooling_system = create_formula_student_cooling_system()
+            side_pod_system = create_cooling_optimized_side_pod_system()
+            rear_radiator = create_optimized_rear_radiator_system()
+            cooling_assist = create_high_performance_cooling_assist_system()
+            
+            # Assign to vehicle
             vehicle.cooling_system = cooling_system
             vehicle.side_pod_system = side_pod_system
+            vehicle.rear_radiator = rear_radiator
+            vehicle.cooling_assist = cooling_assist
             
-        except Exception as e:
-            print(f"Warning: Could not load custom cooling configuration: {str(e)}")
-            print("Falling back to standard cooling configuration")
-            
-            # Fall back to standard configuration
-            cooling_system = create_formula_student_cooling_system()
-            vehicle.cooling_system = cooling_system
-    
-    # Set thermal limits if available in config
-    if 'thermal_limits' in config:
-        try:
-            limits = config['thermal_limits']
-            
-            if 'engine' in limits:
-                vehicle.engine_warning_temp = limits['engine'].get('warning_temp', 110.0)
-                vehicle.engine_critical_temp = limits['engine'].get('critical_temp', 120.0)
-                vehicle.engine_shutdown_temp = limits['engine'].get('shutdown_temp', 125.0)
-            
-            if 'coolant' in limits:
-                vehicle.coolant_warning_temp = limits['coolant'].get('warning_temp', 95.0)
-                vehicle.coolant_critical_temp = limits['coolant'].get('critical_temp', 105.0)
-            
-            print(f"Thermal limits set - Engine warning: {vehicle.engine_warning_temp}°C, critical: {vehicle.engine_critical_temp}°C")
-            
-        except Exception as e:
-            print(f"Warning: Could not set thermal limits: {str(e)}")
-    
-    # Print vehicle specifications
-    specs = vehicle.get_vehicle_specs()
-    print("\nVehicle Specifications:")
-    print(f"  Engine: {specs['engine']['make']} {specs['engine']['model']}")
-    print(f"  Max Power: {specs['engine']['max_power_hp']} hp @ {specs['engine']['max_power_rpm']} RPM")
-    print(f"  Max Torque: {specs['engine']['max_torque_nm']} Nm @ {specs['engine']['max_torque_rpm']} RPM")
-    print(f"  Mass: {specs['vehicle']['mass']} kg")
-    print(f"  Drag Coefficient: {specs['vehicle']['drag_coefficient']}")
-    print(f"  Gear Ratios: {specs['drivetrain']['transmission_ratios']}")
-    
-    # Print cooling system info if available
-    if hasattr(vehicle, 'cooling_system'):
-        print("\nCooling System Information:")
-        if hasattr(vehicle.cooling_system, 'radiator'):
-            radiator = vehicle.cooling_system.radiator
-            print(f"  Radiator: {radiator.__class__.__name__}, type: {getattr(radiator, 'radiator_type', 'Unknown').name if hasattr(radiator, 'radiator_type') else 'Unknown'}")
-            print(f"  Radiator Area: {getattr(radiator, 'core_area', 0.0):.3f} m²")
+            # Update engine thermal model with optimized cooling
+            if hasattr(vehicle.engine, 'heat_model'):
+                vehicle.engine.heat_model.combustion_efficiency = 0.32  # Slight improvement
         
-        if hasattr(vehicle, 'side_pod_system'):
-            print("  Side Pod Cooling: Enabled")
+        else:  # standard configuration
+            print("Using standard cooling configuration")
+            # Use the standard cooling system
+            if hasattr(vehicle, '_initialize_thermal_systems'):
+                # The vehicle object already has thermal systems initialized
+                pass
+            else:
+                # Set up thermal systems manually
+                cooling_system = create_formula_student_cooling_system()
+                vehicle.cooling_system = cooling_system
+                
+                # Add side pod cooling if possible
+                try:
+                    side_pod_system = create_standard_side_pod_system()
+                    vehicle.side_pod_system = side_pod_system
+                except Exception as e:
+                    print(f"Note: Could not initialize side pod system: {str(e)}")
         
-        if hasattr(vehicle, 'rear_radiator'):
-            print("  Rear Radiator: Enabled")
+        # Set thermal limits if available in config
+        if 'thermal_limits' in config:
+            try:
+                limits = config['thermal_limits']
+                
+                if 'engine' in limits:
+                    vehicle.engine_warning_temp = limits['engine'].get('warning_temp', 110.0)
+                    vehicle.engine_critical_temp = limits['engine'].get('critical_temp', 120.0)
+                    vehicle.engine_shutdown_temp = limits['engine'].get('shutdown_temp', 125.0)
+                
+                if 'coolant' in limits:
+                    vehicle.coolant_warning_temp = limits['coolant'].get('warning_temp', 95.0)
+                    vehicle.coolant_critical_temp = limits['coolant'].get('critical_temp', 105.0)
+                
+                print(f"Thermal limits set - Engine warning: {vehicle.engine_warning_temp}°C, critical: {vehicle.engine_critical_temp}°C")
+                
+            except Exception as e:
+                print(f"Warning: Could not set thermal limits: {str(e)}")
         
-        if hasattr(vehicle, 'cooling_assist'):
-            print("  Electric Cooling Assist: Enabled")
-    
-    return vehicle
+        # Print vehicle specifications
+        specs = vehicle.get_vehicle_specs()
+        print("\nVehicle Specifications:")
+        print(f"  Engine: {specs['engine']['make']} {specs['engine']['model']}")
+        print(f"  Max Power: {specs['engine']['max_power_hp']} hp @ {specs['engine']['max_power_rpm']} RPM")
+        print(f"  Max Torque: {specs['engine']['max_torque_nm']} Nm @ {specs['engine']['max_torque_rpm']} RPM")
+        print(f"  Mass: {specs['vehicle']['mass']} kg")
+        print(f"  Drag Coefficient: {specs['vehicle']['drag_coefficient']}")
+        print(f"  Gear Ratios: {specs['drivetrain']['transmission_ratios']}")
+        
+        # Print cooling system info if available
+        if hasattr(vehicle, 'cooling_system'):
+            print("\nCooling System Information:")
+            if hasattr(vehicle.cooling_system, 'radiator'):
+                radiator = vehicle.cooling_system.radiator
+                print(f"  Radiator: {radiator.__class__.__name__}, type: {getattr(radiator, 'radiator_type', 'Unknown').name if hasattr(radiator, 'radiator_type') else 'Unknown'}")
+                print(f"  Radiator Area: {getattr(radiator, 'core_area', 0.0):.3f} m²")
+            
+            if hasattr(vehicle, 'side_pod_system'):
+                print("  Side Pod Cooling: Enabled")
+            
+            if hasattr(vehicle, 'rear_radiator'):
+                print("  Rear Radiator: Enabled")
+            
+            if hasattr(vehicle, 'cooling_assist'):
+                print("  Electric Cooling Assist: Enabled")
+        
+        return vehicle
 
 def create_test_track(output_dir):
     """
@@ -1414,138 +1678,6 @@ def export_results(accel_results, lap_results, endurance_results, output_dir):
         print(f"Error exporting results: {str(e)}")
         return False
 
-def main():
-    """Main function to run the complete simulation example."""
-    print("KCL Formula Student - Full Race Simulation Example")
-    print("=================================================")
-    
-    # Load configurations
-    config = load_configurations()
-    output_dir = config['output_dir']
-    
-    # Create vehicle with standard cooling configuration
-    print("\n=== Creating Vehicle with Standard Cooling Configuration ===")
-    vehicle = create_vehicle(config, cooling_config='standard')
-    
-    # Create test track
-    track_file = create_test_track(output_dir)
-    
-    # Run acceleration test
-    accel_results = run_acceleration_test(vehicle, output_dir)
-    
-    # Run lap simulation
-    lap_results = run_lap_simulation(vehicle, track_file, output_dir)
-    
-    # Run endurance simulation
-    endurance_results = run_endurance_simulation(
-        vehicle, 
-        track_file, 
-        output_dir,
-        laps=config['simulation_settings']['endurance_laps']
-    )
-    
-    # Perform thermal analysis
-    thermal_analysis = analyze_thermal_performance(
-        vehicle,
-        accel_results,
-        lap_results,
-        endurance_results,
-        output_dir
-    )
-    
-    # Compare different cooling configurations
-    print("\n=== Comparing Different Cooling Configurations ===")
-    cooling_comparison = compare_cooling_configurations(
-        config,
-        vehicle,
-        track_file,
-        output_dir
-    )
-    
-    # Run weight sensitivity analysis (if enabled)
-    weight_sensitivity_results = None
-    if config.get('optimization_settings', {}).get('enable_weight_sensitivity', False):
-        print("\n=== Performing Weight Sensitivity Analysis ===")
-        weight_range = config.get('optimization_settings', {}).get('weight_range', [180, 250])
-        weight_sensitivity_results = analyze_weight_sensitivity(
-            vehicle,
-            track_file,
-            output_dir,
-            weight_range=tuple(weight_range),
-            num_points=5
-        )
-    
-    # Perform lap time optimization (if enabled)
-    lap_optimization_results = None
-    if config.get('optimization_settings', {}).get('enable_lap_optimization', False):
-        print("\n=== Performing Lap Time Optimization ===")
-        lap_optimization_results = optimize_lap_time(
-            vehicle,
-            track_file,
-            output_dir,
-            method='advanced',
-            config_file=config.get('lap_time_optimization_config')
-        )
-    
-    # Calculate optimal racing lines
-    racing_line_results = calculate_optimal_racing_lines(
-        vehicle,
-        track_file,
-        output_dir
-    )
-    
-    # Analyze performance tradeoffs
-    tradeoff_analysis = analyze_performance_tradeoffs(
-        weight_sensitivity_results,
-        lap_optimization_results,
-        cooling_comparison
-    )
-    
-    # Analyze results
-    analysis = analyze_results(accel_results, lap_results, endurance_results)
-    
-    # Plot summary results
-    plot_results(accel_results, lap_results, endurance_results, output_dir)
-    
-    # Export results
-    export_results(accel_results, lap_results, endurance_results, output_dir)
-    
-    # Print overall conclusion
-    print("\n=== Overall Conclusion ===")
-    
-    # Add thermal performance conclusion
-    if 'cooling_effectiveness' in thermal_analysis and 'status' in thermal_analysis['cooling_effectiveness']:
-        print(f"Thermal Performance: {thermal_analysis['cooling_effectiveness']['status']}")
-    
-    # Add cooling comparison conclusion if available
-    if cooling_comparison and 'results' in cooling_comparison:
-        results = cooling_comparison['results']
-        if results and all('composite_score' in r for r in results):
-            best_config = max(results, key=lambda r: r['composite_score'])
-            print(f"Recommended Cooling Configuration: {best_config['description']}")
-    
-    # Add weight sensitivity conclusion if available
-    if weight_sensitivity_results and 'lap_reduction_target' in weight_sensitivity_results:
-        target = weight_sensitivity_results['lap_reduction_target']
-        if target:
-            print(f"Optimal Weight Target: {target.get('target_weight', 0):.1f} kg "
-                 f"({target.get('required_weight_reduction', 0):.1f} kg reduction)")
-    
-    # Add lap optimization conclusion if available
-    if lap_optimization_results and 'results' in lap_optimization_results:
-        results = lap_optimization_results['results']
-        if isinstance(results, dict) and 'lap_time' in results:
-            print(f"Optimized Lap Time: {results['lap_time']:.3f}s")
-    
-    # Add performance tradeoff recommendations
-    if tradeoff_analysis and 'recommendations' in tradeoff_analysis:
-        print("\nKey Recommendations:")
-        for i, rec in enumerate(tradeoff_analysis['recommendations'][:2], 1):  # Show top 2 recommendations
-            print(f"  {i}. {rec}")
-    
-    print("\nSimulation completed successfully!")
-    print(f"Results saved to: {output_dir}")
-
 def analyze_performance_tradeoffs(weight_results, lap_results, cooling_results):
     """
     Analyze tradeoffs between weight, lap time, and thermal performance.
@@ -1677,7 +1809,9 @@ def analyze_performance_tradeoffs(weight_results, lap_results, cooling_results):
     for i, rec in enumerate(recommendations, 1):
         print(f"  {i}. {rec}")
     
-    return tradeoffsdef optimize_lap_time(vehicle, track_file, output_dir, method='advanced', config_file=None):
+    return tradeoffs
+
+def optimize_lap_time(vehicle, track_file, output_dir, method='advanced', config_file=None):
     """
     Optimize lap time using advanced numerical methods.
     
@@ -1850,6 +1984,7 @@ def calculate_optimal_racing_lines(vehicle, track_file, output_dir):
     except Exception as e:
         print(f"Error in racing line calculation: {str(e)}")
         return {'error': str(e)}
+
 def analyze_weight_sensitivity(vehicle, track_file, output_dir, weight_range=None, num_points=5):
     """
     Analyze the sensitivity of vehicle performance to weight changes.
@@ -1968,10 +2103,137 @@ def analyze_weight_sensitivity(vehicle, track_file, output_dir, weight_range=Non
     
     return results
 
-if __name__ == "__main__":
-<<<<<<< Updated upstream
-    main()
+def main():
+    """Main function to run the complete simulation example."""
+    print("KCL Formula Student - Full Race Simulation Example")
+    print("=================================================")
+    
+    # Load configurations
+    config = load_configurations()
+    output_dir = config['output_dir']
+    
+    # Create vehicle with standard cooling configuration
+    print("\n=== Creating Vehicle with Standard Cooling Configuration ===")
+    vehicle = create_vehicle(config, cooling_config='standard')
+    
+    # Create test track
+    track_file = create_test_track(output_dir)
+    
+    # Run acceleration test
+    accel_results = run_acceleration_test(vehicle, output_dir)
+    
+    # Run lap simulation
+    lap_results = run_lap_simulation(vehicle, track_file, output_dir)
+    
+    # Run endurance simulation
+    endurance_results = run_endurance_simulation(
+        vehicle, 
+        track_file, 
+        output_dir,
+        laps=config['simulation_settings']['endurance_laps']
+    )
+    
+    # Perform thermal analysis
+    thermal_analysis = analyze_thermal_performance(
+        vehicle,
+        accel_results,
+        lap_results,
+        endurance_results,
+        output_dir
+    )
+    
+    # Compare different cooling configurations
+    print("\n=== Comparing Different Cooling Configurations ===")
+    cooling_comparison = compare_cooling_configurations(
+        config,
+        vehicle,
+        track_file,
+        output_dir
+    )
+    
+    # Run weight sensitivity analysis (if enabled)
+    weight_sensitivity_results = None
+    if config.get('optimization_settings', {}).get('enable_weight_sensitivity', False):
+        print("\n=== Performing Weight Sensitivity Analysis ===")
+        weight_range = config.get('optimization_settings', {}).get('weight_range', [180, 250])
+        weight_sensitivity_results = analyze_weight_sensitivity(
+            vehicle,
+            track_file,
+            output_dir,
+            weight_range=tuple(weight_range),
+            num_points=5
+        )
+    
+    # Perform lap time optimization (if enabled)
+    lap_optimization_results = None
+    if config.get('optimization_settings', {}).get('enable_lap_optimization', False):
+        print("\n=== Performing Lap Time Optimization ===")
+        lap_optimization_results = optimize_lap_time(
+            vehicle,
+            track_file,
+            output_dir,
+            method='advanced',
+            config_file=config.get('lap_time_optimization_config')
+        )
+    
+    # Calculate optimal racing lines
+    racing_line_results = calculate_optimal_racing_lines(
+        vehicle,
+        track_file,
+        output_dir
+    )
+    
+    # Analyze performance tradeoffs
+    tradeoff_analysis = analyze_performance_tradeoffs(
+        weight_sensitivity_results,
+        lap_optimization_results,
+        cooling_comparison
+    )
+    
+    # Analyze results
+    analysis = analyze_results(accel_results, lap_results, endurance_results)
+    
+    # Plot summary results
+    plot_results(accel_results, lap_results, endurance_results, output_dir)
+    
+    # Export results
+    export_results(accel_results, lap_results, endurance_results, output_dir)
+    
+    # Print overall conclusion
+    print("\n=== Overall Conclusion ===")
+    
+    # Add thermal performance conclusion
+    if 'cooling_effectiveness' in thermal_analysis and 'status' in thermal_analysis['cooling_effectiveness']:
+        print(f"Thermal Performance: {thermal_analysis['cooling_effectiveness']['status']}")
+    
+    # Add cooling comparison conclusion if available
+    if cooling_comparison and 'results' in cooling_comparison:
+        results = cooling_comparison['results']
+        if results and all('composite_score' in r for r in results):
+            best_config = max(results, key=lambda r: r['composite_score'])
+            print(f"Recommended Cooling Configuration: {best_config['description']}")
+    
+    # Add weight sensitivity conclusion if available
+    if weight_sensitivity_results and 'lap_reduction_target' in weight_sensitivity_results:
+        target = weight_sensitivity_results['lap_reduction_target']
+        if target:
+            print(f"Optimal Weight Target: {target.get('target_weight', 0):.1f} kg "
+                 f"({target.get('required_weight_reduction', 0):.1f} kg reduction)")
+    
+    # Add lap optimization conclusion if available
+    if lap_optimization_results and 'results' in lap_optimization_results:
+        results = lap_optimization_results['results']
+        if isinstance(results, dict) and 'lap_time' in results:
+            print(f"Optimized Lap Time: {results['lap_time']:.3f}s")
+    
+    # Add performance tradeoff recommendations
+    if tradeoff_analysis and 'recommendations' in tradeoff_analysis:
+        print("\nKey Recommendations:")
+        for i, rec in enumerate(tradeoff_analysis['recommendations'][:2], 1):  # Show top 2 recommendations
+            print(f"  {i}. {rec}")
+    
+    print("\nSimulation completed successfully!")
+    print(f"Results saved to: {output_dir}")
 
-=======
-    sys.exit(main())
->>>>>>> Stashed changes
+if __name__ == "__main__":
+    main()
