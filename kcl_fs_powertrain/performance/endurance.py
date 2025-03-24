@@ -358,31 +358,29 @@ class EnduranceSimulator:
             power_profile = lap_results['power']
             time_profile = lap_results['time']
             
-            # Calculate total energy used
+            # Calculate total energy used (kWh)
             total_energy = 0.0
             for i in range(1, len(power_profile)):
                 dt = time_profile[i] - time_profile[i-1]
-                avg_power = (power_profile[i] + power_profile[i-1]) / 2
-                energy = avg_power * dt  # kWh
+                avg_power = (power_profile[i] + power_profile[i-1]) / 2.0
+                energy = avg_power * dt / 3600.0  # Convert to kWh
                 total_energy += energy
             
-            # Convert energy to fuel volume based on fuel properties
-            # Typical E85 energy content: ~29.2 MJ/kg, density ~0.781 kg/L
-            # So ~22.8 MJ/L
-            energy_density = 22.8  # MJ/L
+            # Assume a basic fuel efficiency of 0.25-0.3 kg/kWh (reasonable for race engines)
+            fuel_efficiency_kg_per_kwh = 0.3
             
-            # Convert kWh to MJ
-            total_energy_mj = total_energy * 3.6
+            # Calculate fuel mass in kg
+            fuel_mass = total_energy * fuel_efficiency_kg_per_kwh
             
-            if hasattr(self.vehicle.engine, 'thermal_efficiency'):
-                engine_efficiency = self.vehicle.engine.thermal_efficiency
-            else:
-                # Use a default thermal efficiency value for motorcycles
-                engine_efficiency = 0.30  # Typical efficiency for motorcycle engines
-                
-            fuel_volume = total_energy_mj / energy_density / engine_efficiency
+            # Convert to volume (assuming E85 density of ~0.78 kg/L)
+            fuel_density = 0.78  # kg/L
+            fuel_volume = fuel_mass / fuel_density
             
-            return fuel_volume
+            # Apply safety margin and add basic idle consumption
+            fuel_volume = fuel_volume * 1.1 + 0.05  # 10% safety margin + idle consumption
+            
+        return fuel_volume
+
         
         # Fallback method with rough estimate based on track length and vehicle efficiency
         track_length = lap_results.get('distance', [])[-1] / 1000  # km
