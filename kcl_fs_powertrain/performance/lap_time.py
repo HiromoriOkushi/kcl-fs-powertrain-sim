@@ -1201,36 +1201,62 @@ class LapTimeSimulator:
         
         return results
     
-    def _plot_lap_time_comparison(self, comparison_results: List[Dict], save_path: str):
+    def compare_vehicle_configs(self, vehicle_configs: List[Vehicle], 
+                          labels: List[str],
+                          include_thermal: bool = True,
+                          save_path: Optional[str] = None) -> Dict:
         """
-        Plot comparison of lap times for different vehicle configurations.
+        Compare lap times for different vehicle configurations.
         
         Args:
-            comparison_results: List of comparison result dictionaries
-            save_path: Path to save the plot
-        """        
-        speed_profile = None
-        self.lap_time = None
-        self.time_profile = None
+            vehicle_configs: List of vehicle models
+            labels: List of labels for each configuration
+            include_thermal: Whether to include thermal effects
+            save_path: Optional path to save the plot
             
-        # Recalculate speed profile and simulate lap
-        self.calculate_speed_profile()
-        lap_results = self.simulate_lap(include_thermal=include_thermal)
+        Returns:
+            Dictionary with comparison results
+        """
+        if not self.track_profile:
+            raise ValueError("No track loaded")
         
-        #Analyze performance metrics
-        lap_metrics = self.analyze_lap_performance(lap_results)
+        if len(vehicle_configs) != len(labels):
+            raise ValueError("Number of vehicle configs must match number of labels")
+        
+        # Save current vehicle
+        original_vehicle = self.vehicle
+        
+        # Results storage
+        comparison_results = []
+        
+        # Simulate each configuration
+        for vehicle, label in zip(vehicle_configs, labels):
+            # Set vehicle
+            self.vehicle = vehicle
             
-        # Store results with label
-        comparison_result = {
-            'label': label,
-            'lap_time': self.lap_time,
-            'results': lap_results,
-            'metrics': lap_metrics
-        }
+            # Reset simulation results
+            self.speed_profile = None
+            self.lap_time = None
+            self.time_profile = None
             
-        comparison_results.append(comparison_result)
+            # Recalculate speed profile and simulate lap
+            self.calculate_speed_profile()
+            lap_results = self.simulate_lap(include_thermal=include_thermal)
             
-        logger.info(f"Configuration '{label}' lap time: {self.lap_time:.3f}s")
+            # Analyze performance metrics
+            lap_metrics = self.analyze_lap_performance(lap_results)
+            
+            # Store results with label
+            comparison_result = {
+                'label': label,
+                'lap_time': self.lap_time,
+                'results': lap_results,
+                'metrics': lap_metrics
+            }
+            
+            comparison_results.append(comparison_result)
+            
+            logger.info(f"Configuration '{label}' lap time: {self.lap_time:.3f}s")
         
         # Restore original vehicle
         self.vehicle = original_vehicle
@@ -1250,7 +1276,7 @@ class LapTimeSimulator:
         }
         
         return comparison_data
-    
+
     def _plot_lap_time_comparison(self, comparison_results: List[Dict], save_path: str):
         """
         Plot comparison of lap times for different vehicle configurations.
