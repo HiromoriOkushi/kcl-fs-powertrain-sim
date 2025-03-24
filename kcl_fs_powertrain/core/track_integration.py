@@ -8,6 +8,7 @@ import yaml
 from typing import Dict, List, Tuple, Optional
 from ..track_generator.enums import SimType
 from ..track_generator.generator import FSTrackGenerator
+from ..utils.track_utils import preprocess_track_points
 
 class TrackProfile:
     """Track profile for powertrain simulation."""
@@ -652,26 +653,19 @@ class TrackProfile:
         
         print(f"Track exported to GPX format: {output_file}")
 
-    def get_track_data(self) -> Dict:
+    def get_track_data(self):
         """
-        Get track data dictionary for use in simulations.
+        Get processed track data.
         
         Returns:
-            Dictionary with track data
+            dict: Dictionary with track data
         """
-        if self.track_data is None:
-            raise ValueError("Track data not loaded")
+        # Preprocess track data if it hasn't been done already
+        if self.track_data and not getattr(self, '_track_data_preprocessed', False):
+            self.track_data = preprocess_track_points(self.track_data)
+            self._track_data_preprocessed = True
         
-        # Create deep copy to avoid modification
-        return {
-            'points': self.track_data['points'].copy(),
-            'distance': self.track_data['distance'].copy(),
-            'curvature': self.track_data['curvature'].copy() if 'curvature' in self.track_data else None,
-            'width': self.track_data['width'].copy() if 'width' in self.track_data else None,
-            'elevation': self.track_data['elevation'].copy() if 'elevation' in self.track_data else None,
-            'sections': self.sections.copy(),
-            'length': self.track_length
-        }
+        return self.track_data
 
 # Helper functions
 def generate_and_load_track(generation_params: Dict = None, output_path: str = None) -> TrackProfile:

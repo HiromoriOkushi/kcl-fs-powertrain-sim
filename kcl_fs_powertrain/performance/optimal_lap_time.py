@@ -18,6 +18,7 @@ import time
 from .lap_time import LapTimeSimulator, CorneringPerformance
 from ..core.vehicle import Vehicle
 from ..core.track_integration import TrackProfile
+from ..utils.track_utils import preprocess_track_points
 
 # Configure logging
 logging.basicConfig(
@@ -178,6 +179,9 @@ class OptimalLapTimeOptimizer:
     
     def _initialize_track_interpolation(self):
         """Initialize track centerline and width interpolation functions."""
+        # Preprocess track data to remove duplicates
+        self.track_data = preprocess_track_points(self.track_data)
+        
         # Get track points and width
         points = self.track_data['points']
         width = self.track_data.get('width', np.full(len(points), 3.0))
@@ -205,7 +209,7 @@ class OptimalLapTimeOptimizer:
         
         curvature = (dx * ddy - dy * ddx) / (dx**2 + dy**2)**(3/2)
         self.track_curvature_interp = interp1d(distances, curvature, kind='linear', bounds_error=False, fill_value='extrapolate')
-    
+        
     def _vehicle_dynamics_derivatives(self, state: VehicleState, controls: ControlInputs) -> np.ndarray:
         """
         Calculate the derivatives of the vehicle state for integration.

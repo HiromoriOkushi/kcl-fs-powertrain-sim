@@ -21,6 +21,7 @@ from ..core.vehicle import Vehicle
 from ..core.track_integration import TrackProfile, calculate_optimal_racing_line
 from ..transmission import CASSystem, ShiftDirection, StrategyType, ShiftStrategy
 from ..engine import TorqueCurve
+from ..utils.track_utils import preprocess_track_points
 
 # Configure logging
 logging.basicConfig(
@@ -103,6 +104,14 @@ class LapTimeSimulator:
             raise ValueError("No track loaded")
         
         try:
+            # Preprocess track data to remove duplicates
+            if self.track_data:
+                self.track_data = preprocess_track_points(self.track_data)
+            
+            # Ensure track profile data is also preprocessed
+            if hasattr(self.track_profile, 'track_data'):
+                self.track_profile.track_data = preprocess_track_points(self.track_profile.track_data)
+            
             # Use the optimal racing line function from track_integration
             self.racing_line = calculate_optimal_racing_line(self.track_profile)
             logger.info("Racing line optimized")
@@ -112,7 +121,7 @@ class LapTimeSimulator:
             # Fall back to centerline if racing line can't be calculated
             self.racing_line = self.track_data['points']
             return self.racing_line
-    
+        
     def calculate_speed_profile(self, use_optimized_shifts: bool = True) -> np.ndarray:
         """
         Calculate speed profile along the track.
