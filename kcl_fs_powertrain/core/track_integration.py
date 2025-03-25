@@ -5,10 +5,14 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import yaml
+import logging
+from scipy.interpolate import interp1d
 from typing import Dict, List, Tuple, Optional
 from ..track_generator.enums import SimType
 from ..track_generator.generator import FSTrackGenerator
 from ..utils.track_utils import preprocess_track_points
+
+logger = logging.getLogger("Track_Integration")
 
 class TrackProfile:
     """Track profile for powertrain simulation."""
@@ -718,90 +722,201 @@ def generate_and_load_track(generation_params: Dict = None, output_path: str = N
     
     return track_profile
 
-def calculate_optimal_racing_line(track_profile: TrackProfile) -> np.ndarray:
+def calculate_track_curvature(points):
     """
-    Calculate the optimal racing line for the track.
-    
-    This is a simplified implementation that doesn't consider all racing dynamics.
-    For a complete implementation, more advanced vehicle dynamics would be needed.
+    Calculate track curvature using a three-point method.
     
     Args:
-        track_profile: TrackProfile instance
+        points: Array of track points (x, y)
         
     Returns:
-        Numpy array of racing line points
+        Array of curvature values at each point
     """
-    if track_profile.track_data is None:
-        raise ValueError("Track data not loaded")
+    n_points = len(points)
+    curvature = np.zeros(n_points)
     
-    # Extract track data
-    track_points = track_profile.track_data['points']
-    track_width = track_profile.track_data.get('width', np.full(len(track_points), 3.0))
-    track_curvature = track_profile.track_data['curvature']
-    
-    # Initialize racing line points
-    racing_line = np.zeros_like(track_points)
-    
-    # Calculate direction vectors
-    directions = track_profile.track_data['directions']
-    
-    # Calculate normal vectors
-    normals = np.zeros_like(directions)
-    normals[:, 0] = -directions[:, 1]  # Normal = (-dy, dx)
-    normals[:, 1] = directions[:, 0]
-    
-    # Calculate racing line offset based on curvature
-    # Positive curvature (left turn) -> negative offset (inside)
-    # Negative curvature (right turn) -> positive offset (inside)
-    max_offset = track_width / 2 * 0.8  # Use 80% of max width for safety
-    
-    # Apply smoothing to curvature for racing line calculation
-    smoothed_curvature = np.zeros_like(track_curvature)
-    window_size = min(11, len(track_curvature))
-    
-    for i in range(len(track_curvature)):
-        # Get indices for window
-        half_window = window_size // 2
-        start_idx = max(0, i - half_window)
-        end_idx = min(len(track_curvature), i + half_window + 1)
+    for i in range(1, n_points - 1):
+        # Get three consecutive points
+        p1 = points[i-1]
+        p2 = points[i]
+        p3 = points[i+1]
         
-        # Calculate weighted average
-        weights = np.exp(-0.5 * np.arange(-half_window, half_window + 1)**2)
-        weights = weights[-(end_idx - start_idx):]  # Adjust for edge cases
+        # Calculate vectors
+        v1 = p2 - p1
+        v2 = p3 - p2
         
-        window = track_curvature[start_idx:end_idx]
-        if len(window) > 0:
-            smoothed_curvature[i] = np.sum(window * weights) / np.sum(weights)
-    
-    # Apply racing line strategy:
-    # - Go to outside before turn
-    # - Apex in the middle of the turn
-    # - Track out after the turn
-    for i in range(len(track_points)):
-        # Detect sections (turns)
-        is_in_turn = abs(smoothed_curvature[i]) > 0.01
+        # Calculate angle change
+        dot = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+        dot = np.clip(dot, -1.0, 1.0)  # Ensure valid input for arccos
+        angle = np.arccos(dot)
         
-        if is_in_turn:
-            # In a turn - drive on the inside
-            offset = -np.sign(smoothed_curvature[i]) * max_offset[i]
+        # Calculate distance
+        ds = (np.linalg.norm(v1) + np.linalg.norm(v2)) / 2
+        
+        # Determine sign of curvature (positive for right turns, negative for left)
+        cross = np.cross(np.append(v1, 0), np.append(v2, 0))[2]
+        sign = np.sign(cross)
+        
+        # Curvature is angle change per distance with sign
+        if ds > 1e-6:  # Avoid division by near-zero
+            curvature[i] = sign * angle / ds
         else:
-            # On a straight - look ahead for upcoming turns
-            look_ahead = min(20, len(track_points) - i - 1)
-            upcoming_curvature = 0.0
-            
-            for j in range(1, look_ahead + 1):
-                idx = (i + j) % len(track_points)
-                if abs(smoothed_curvature[idx]) > abs(upcoming_curvature):
-                    upcoming_curvature = smoothed_curvature[idx]
-            
-            # If approaching a turn, move to outside
-            if abs(upcoming_curvature) > 0.01:
-                offset = np.sign(upcoming_curvature) * max_offset[i]
-            else:
-                # No turn nearby - stay in the center
-                offset = 0.0
-        
-        # Apply offset to track centerline
-        racing_line[i] = track_points[i] + offset * normals[i]
+            curvature[i] = 0.0
     
-    return racing_line
+    # Handle endpoints - use the same curvature as the nearest computed point
+    curvature[0] = curvature[1]
+    curvature[-1] = curvature[-2]
+    
+    return curvature
+
+def smooth_array(array, window_size=5):
+    """
+    Apply a simple moving average smoothing to an array.
+    
+    Args:
+        array: NumPy array to be smoothed
+        window_size: Size of the smoothing window
+        
+    Returns:
+        Smoothed array
+    """
+    if window_size <= 1 or len(array) <= window_size:
+        return array
+    
+    # Create a padded version of the array for the convolution
+    padded = np.pad(array, (window_size//2, window_size//2), mode='edge')
+    
+    # Create smoothing kernel
+    kernel = np.ones(window_size) / window_size
+    
+    # Apply convolution
+    smoothed = np.convolve(padded, kernel, mode='valid')
+    
+    # Return an array of the same length as the input
+    return smoothed
+
+def calculate_optimal_racing_line(track_profile):
+    """
+    Calculate an optimized racing line for the track.
+    
+    Args:
+        track_profile: TrackProfile object containing track data
+        
+    Returns:
+        NumPy array of racing line points (x, y)
+    """
+    try:
+        # Get track data
+        track_data = track_profile.get_track_data()
+        
+        # Preprocess track data to remove duplicates or very close points
+        track_data = preprocess_track_points(track_data)
+        
+        # Extract track points and distances
+        points = track_data['points']
+        if 'distance' not in track_data:
+            # Calculate distances if not available
+            distances = np.zeros(len(points))
+            for i in range(1, len(points)):
+                distances[i] = distances[i-1] + np.linalg.norm(points[i] - points[i-1])
+            track_data['distance'] = distances
+        else:
+            distances = track_data['distance']
+        
+        # Ensure distances are strictly monotonic with no duplicates
+        distances = ensure_unique_values(distances)
+        
+        # Get track width, or use default if not available
+        width = track_data.get('width', np.full(len(points), 3.0))
+        
+        # Simple optimization approach: smooth the centerline slightly
+        # and adjust the position based on curvature
+        
+        # Calculate or get track curvature
+        if 'curvature' not in track_data:
+            # Calculate curvature (simple 3-point method)
+            curvature = calculate_track_curvature(points)
+            track_data['curvature'] = curvature
+        else:
+            curvature = track_data['curvature']
+        
+        # Create racing line positions (-1 to 1, where 0 is centerline)
+        # Based on the rule: move to inside of corners, stay near centerline on straights
+        racing_line_positions = -np.tanh(curvature * 5.0) * 0.7
+        
+        # Smooth the racing line positions to avoid abrupt changes
+        racing_line_positions = smooth_array(racing_line_positions, window_size=5)
+        
+        # Create a dense set of points for a smoother line
+        # Ensure we have unique distance values for interpolation
+        dense_distances = np.linspace(0, distances[-1], 500)
+        
+        # Create position interpolator
+        position_interp = interp1d(
+            distances, racing_line_positions, 
+            kind='cubic', bounds_error=False, fill_value='extrapolate'
+        )
+        
+        # Calculate dense positions
+        dense_positions = position_interp(dense_distances)
+        
+        # Calculate x and y coordinates of racing line
+        x_interp = interp1d(
+            distances, points[:, 0], 
+            kind='cubic', bounds_error=False, fill_value='extrapolate'
+        )
+        
+        y_interp = interp1d(
+            distances, points[:, 1], 
+            kind='cubic', bounds_error=False, fill_value='extrapolate'
+        )
+        
+        width_interp = interp1d(
+            distances, width, 
+            kind='linear', bounds_error=False, fill_value='extrapolate'
+        )
+        
+        # Sample the centerline at dense distances
+        centerline_x = x_interp(dense_distances)
+        centerline_y = y_interp(dense_distances)
+        track_width = width_interp(dense_distances)
+        
+        # Create racing line points
+        racing_line = np.zeros((len(dense_distances), 2))
+        
+        # Calculate racing line offset from centerline
+        for i in range(len(dense_distances)):
+            # Get track direction (tangent vector)
+            if i < len(dense_distances) - 1:
+                dx = centerline_x[i+1] - centerline_x[i]
+                dy = centerline_y[i+1] - centerline_y[i]
+            else:
+                dx = centerline_x[i] - centerline_x[i-1]
+                dy = centerline_y[i] - centerline_y[i-1]
+            
+            # Normalize direction
+            length = np.sqrt(dx**2 + dy**2)
+            if length > 1e-6:
+                dx /= length
+                dy /= length
+            
+            # Calculate normal vector (perpendicular to direction)
+            nx = -dy
+            ny = dx
+            
+            # Calculate racing line point
+            racing_line[i, 0] = centerline_x[i] + nx * dense_positions[i] * track_width[i] / 2
+            racing_line[i, 1] = centerline_y[i] + ny * dense_positions[i] * track_width[i] / 2
+        
+        logger.info("Racing line optimized successfully")
+        return racing_line
+    except Exception as e:
+        logger.error(f"Error in racing line calculation: {str(e)}")
+        # Fallback to centerline if racing line calculation fails
+        if track_data and 'points' in track_data:
+            logger.warning("Falling back to track centerline for racing line")
+            return track_data['points']
+        else:
+            raise
+        
+    
