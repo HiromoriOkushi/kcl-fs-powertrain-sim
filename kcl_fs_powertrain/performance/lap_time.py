@@ -88,6 +88,8 @@ class LapTimeSimulator:
         try:
             self.track_profile = TrackProfile(track_file)
             self.track_data = self.track_profile.get_track_data()
+            # Preprocess track data to remove duplicates
+            self.track_data = preprocess_track_points(self.track_data)
             logger.info(f"Loaded track from {track_file}")
         except Exception as e:
             logger.error(f"Error loading track: {str(e)}")

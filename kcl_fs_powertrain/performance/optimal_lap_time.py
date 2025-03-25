@@ -18,7 +18,7 @@ import time
 from .lap_time import LapTimeSimulator, CorneringPerformance
 from ..core.vehicle import Vehicle
 from ..core.track_integration import TrackProfile
-from ..utils.track_utils import preprocess_track_points
+from ..utils.track_utils import preprocess_track_points, ensure_unique_values
 
 # Configure logging
 logging.basicConfig(
@@ -193,6 +193,9 @@ class OptimalLapTimeOptimizer:
             width = np.append(width, width[0])
             distances = np.append(distances, distances[-1] + np.linalg.norm(points[0] - points[-1]))
         
+        # Ensure distances are unique for interpolation
+        distances = ensure_unique_values(distances)
+        
         # Create interpolation functions
         self.track_x_interp = interp1d(distances, points[:, 0], kind='cubic', bounds_error=False, fill_value='extrapolate')
         self.track_y_interp = interp1d(distances, points[:, 1], kind='cubic', bounds_error=False, fill_value='extrapolate')
@@ -200,16 +203,7 @@ class OptimalLapTimeOptimizer:
         
         # Store track length
         self.track_length = distances[-1]
-        
-        # Calculate track curvature
-        dx = np.gradient(points[:, 0], distances)
-        dy = np.gradient(points[:, 1], distances)
-        ddx = np.gradient(dx, distances)
-        ddy = np.gradient(dy, distances)
-        
-        curvature = (dx * ddy - dy * ddx) / (dx**2 + dy**2)**(3/2)
-        self.track_curvature_interp = interp1d(distances, curvature, kind='linear', bounds_error=False, fill_value='extrapolate')
-        
+    
     def _vehicle_dynamics_derivatives(self, state: VehicleState, controls: ControlInputs) -> np.ndarray:
         """
         Calculate the derivatives of the vehicle state for integration.
@@ -395,7 +389,8 @@ class OptimalLapTimeOptimizer:
         
         # Create distance points along track
         distances = np.linspace(0, self.track_length, self.num_control_points)
-        
+        # Ensure distances are unique
+        distances = ensure_unique_values(distances)
         # Interpolate track positions for a dense set of points
         dense_distances = np.linspace(0, self.track_length, 500)
         position_interp = interp1d(distances, track_positions, kind='cubic',

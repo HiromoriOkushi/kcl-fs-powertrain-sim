@@ -44,11 +44,21 @@ def preprocess_track_points(track_data):
         distances = np.array(distances)
     
     # Find indices where distances are too close (potential duplicates)
+    # or where x or y coordinates are duplicates
     min_distance_threshold = 1e-6
     duplicate_indices = []
     
     for i in range(1, len(distances)):
+        # Check if distance is too small
         if distances[i] - distances[i-1] < min_distance_threshold:
+            duplicate_indices.append(i)
+            continue
+        
+        # Check if x or y coordinates are too close or duplicated
+        x_diff = abs(points[i, 0] - points[i-1, 0])
+        y_diff = abs(points[i, 1] - points[i-1, 1])
+        
+        if x_diff < min_distance_threshold or y_diff < min_distance_threshold:
             duplicate_indices.append(i)
     
     if not duplicate_indices:
@@ -76,3 +86,44 @@ def preprocess_track_points(track_data):
     logger.info(f"Track preprocessing: removed {len(duplicate_indices)} duplicate/close points")
     
     return processed_data
+
+def ensure_unique_values(x, y=None, min_sep=1e-10):
+    """
+    Ensure x values are unique by adding small increments to duplicates.
+    
+    Args:
+        x: Array of x values
+        y: Optional array of y values (will be adjusted if x is changed)
+        min_sep: Minimum separation between consecutive values
+        
+    Returns:
+        Tuple of (x_unique, y_adjusted) or just x_unique if y is None
+    """
+    if len(x) <= 1:
+        return x if y is None else (x, y)
+    
+    x = np.array(x)
+    if y is not None:
+        y = np.array(y)
+    
+    # Find indices where x values are too close or identical
+    too_close = np.where(np.diff(x) < min_sep)[0]
+    
+    if len(too_close) == 0:
+        return x if y is None else (x, y)
+    
+    x_unique = x.copy()
+    
+    # Add small increments to duplicates
+    for i in too_close:
+        x_unique[i+1] = x_unique[i] + min_sep
+    
+    # Adjust any subsequent points that might now be too close
+    for i in range(len(too_close), len(x)-1):
+        if x_unique[i+1] <= x_unique[i]:
+            x_unique[i+1] = x_unique[i] + min_sep
+    
+    if y is None:
+        return x_unique
+    else:
+        return x_unique, y
