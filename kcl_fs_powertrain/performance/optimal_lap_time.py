@@ -187,10 +187,45 @@ class OptimalLapTimeOptimizer:
         width = self.track_data.get('width', np.full(len(points), 3.0))
         distances = self.track_data['distance']
         
+        # Calculate curvature if not present in track data
+        if 'curvature' not in self.track_data:
+            # Calculate curvature (simple 3-point method)
+            curvature = np.zeros(len(points))
+            for i in range(1, len(points) - 1):
+                # Get three consecutive points
+                p1 = points[i-1]
+                p2 = points[i]
+                p3 = points[i+1]
+                
+                # Calculate vectors
+                v1 = p2 - p1
+                v2 = p3 - p2
+                
+                # Calculate angle change
+                dot = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+                dot = np.clip(dot, -1.0, 1.0)  # Ensure valid input for arccos
+                angle = np.arccos(dot)
+                
+                # Calculate distance
+                ds = (np.linalg.norm(v1) + np.linalg.norm(v2)) / 2
+                
+                # Curvature is angle change per distance
+                curvature[i] = angle / ds
+                
+            # Handle endpoints
+            curvature[0] = curvature[1]
+            curvature[-1] = curvature[-2]
+            
+            # Store in track data
+            self.track_data['curvature'] = curvature
+        else:
+            curvature = self.track_data['curvature']
+        
         # Ensure track is closed (last point connects to first)
         if np.linalg.norm(points[0] - points[-1]) > 1e-3:
             points = np.vstack([points, points[0]])
             width = np.append(width, width[0])
+            curvature = np.append(curvature, curvature[0])
             distances = np.append(distances, distances[-1] + np.linalg.norm(points[0] - points[-1]))
         
         # Ensure distances are unique for interpolation
@@ -200,6 +235,7 @@ class OptimalLapTimeOptimizer:
         self.track_x_interp = interp1d(distances, points[:, 0], kind='cubic', bounds_error=False, fill_value='extrapolate')
         self.track_y_interp = interp1d(distances, points[:, 1], kind='cubic', bounds_error=False, fill_value='extrapolate')
         self.track_width_interp = interp1d(distances, width, kind='linear', bounds_error=False, fill_value='extrapolate')
+        self.track_curvature_interp = interp1d(distances, curvature, kind='linear', bounds_error=False, fill_value='extrapolate')
         
         # Store track length
         self.track_length = distances[-1]
