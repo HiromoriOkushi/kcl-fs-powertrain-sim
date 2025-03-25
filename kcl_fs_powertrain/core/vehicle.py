@@ -87,6 +87,12 @@ class Vehicle:
         self.rear_radiator = None
         self.cooling_assist = None
         
+        self.engine_temperature = 25.0  # °C
+        self.coolant_temperature = 25.0  # °C
+        self.oil_temperature = 25.0  # °C
+        self.thermal_factor = 1.0  # Performance multiplier based on temperature
+        self.engine.thermal_factor = 1.0  # Initialize thermal performance factor
+        
         # Current state
         self.current_gear = 0  # Neutral
         self.current_speed = 0.0  # m/s
@@ -288,7 +294,120 @@ class Vehicle:
                 logger.info("Shifting systems initialized")
         except Exception as e:
             logger.error(f"Error initializing shifting systems: {str(e)}")
-    
+    def update_thermal_state(self, dt: float):
+        """
+        Update the vehicle's thermal state based on engine operation and cooling system.
+        
+        Args:
+            dt: Time step in seconds
+        """
+        if not hasattr(self, 'engine') or self.engine is None:
+            return
+        
+        # Get the current operating conditions
+        engine_rpm = self.current_engine_rpm
+        throttle = self.current_throttle
+        
+        # Calculate heat generation based on operating conditions
+        # More heat is generated at higher RPM and throttle settings
+        rpm_factor = min(1.0, engine_rpm / self.engine.redline)
+        heat_factor = 0.2 + 0.8 * rpm_factor * throttle
+        
+        # Base heat generation (in Watts)
+        base_heat = 20000  # 20 kW at maximum
+        heat_generated = base_heat * heat_factor
+        
+        # Calculate cooling effectiveness based on cooling system and vehicle speed
+        cooling_effectiveness = 0.3  # Base cooling (natural convection)
+        
+        # Add radiator cooling effect if available
+        if hasattr(self, 'cooling_system') and self.cooling_system is not None:
+            # Calculate vehicle speed effect
+            speed_factor = min(1.0, self.current_speed / 20.0)  # Normalized to 20 m/s
+            
+            # Get radiator type factor
+            rad_type_factor = 1.0  # Default
+            if hasattr(self.cooling_system, 'radiator') and hasattr(self.cooling_system.radiator, 'radiator_type'):
+                rad_type = self.cooling_system.radiator.radiator_type.name
+                if rad_type == "DOUBLE_CORE_ALUMINUM":
+                    rad_type_factor = 1.3
+                elif rad_type == "SINGLE_CORE_COPPER":
+                    rad_type_factor = 1.2
+                elif rad_type == "SINGLE_CORE_ALUMINUM":
+                    rad_type_factor = 1.0
+                    
+            # Get radiator size factor
+            rad_size_factor = 1.0  # Default
+            if hasattr(self.cooling_system.radiator, 'core_area'):
+                reference_size = 0.15  # m²
+                rad_size_factor = min(1.5, max(0.6, self.cooling_system.radiator.core_area / reference_size))
+            
+            # Calculate radiator effectiveness
+            radiator_effectiveness = 0.6 * rad_type_factor * rad_size_factor
+            
+            # Side pod effect
+            side_pod_factor = 1.0
+            if hasattr(self, 'side_pod_system') and self.side_pod_system is not None:
+                side_pod_factor = 1.2  # 20% improvement with side pods
+            
+            # Rear radiator effect
+            rear_rad_factor = 1.0
+            if hasattr(self, 'rear_radiator') and self.rear_radiator is not None:
+                rear_rad_factor = 1.15  # 15% improvement with rear radiator
+            
+            # Electric cooling assist effect
+            assist_factor = 1.0
+            if hasattr(self, 'cooling_assist') and self.cooling_assist is not None:
+                # More impact at low speeds
+                assist_effect = max(0.0, 0.3 - 0.015 * self.current_speed)
+                assist_factor = 1.0 + assist_effect
+            
+            # Calculate vehicle speed cooling effect
+            speed_cooling = 0.3 * speed_factor
+            
+            # Calculate fan cooling effect
+            fan_cooling = 0.0
+            if hasattr(self.cooling_system, 'cooling_fan'):
+                fan_duty = self.cooling_system.cooling_fan.current_duty_cycle
+                fan_cooling = 0.15 * fan_duty * (1.0 - min(1.0, speed_factor * 1.5))
+            
+            # Combine all cooling effects
+            cooling_effectiveness = (speed_cooling + fan_cooling) * radiator_effectiveness * side_pod_factor * rear_rad_factor * assist_factor
+        
+        # Heat dissipation based on cooling effectiveness and temperature difference
+        ambient_temp = 25.0  # Default ambient temperature (°C)
+        temp_diff = self.engine.engine_temperature - ambient_temp
+        heat_dissipated = cooling_effectiveness * temp_diff * 500  # Scaling factor for heat transfer
+        
+        # Net heat = generated - dissipated
+        net_heat = heat_generated - heat_dissipated
+        
+        # Temperature change (simplified model)
+        engine_thermal_mass = 50000  # J/°C, thermal mass of engine block and coolant
+        temp_change = net_heat * dt / engine_thermal_mass
+        
+        # Update engine temperature
+        new_temp = self.engine.engine_temperature + temp_change
+        
+        # Limit temperature rise rate
+        max_rate = 5.0 * dt  # Maximum temperature change per time step (°C)
+        if abs(temp_change) > max_rate:
+            temp_change = np.sign(temp_change) * max_rate
+            new_temp = self.engine.engine_temperature + temp_change
+        
+        # Update engine thermal state
+        self.engine.engine_temperature = new_temp
+        self.engine.coolant_temperature = new_temp - 5.0  # Coolant slightly cooler than engine
+        self.engine.oil_temperature = new_temp - 10.0  # Oil typically cooler than coolant
+        
+        # If temperature exceeds critical, apply performance penalty
+        if hasattr(self, 'engine_critical_temp') and new_temp > self.engine_critical_temp:
+            self.engine.thermal_factor = 0.7  # Severe performance loss at critical temperature
+        elif hasattr(self, 'engine_warning_temp') and new_temp > self.engine_warning_temp:
+            self.engine.thermal_factor = 0.9  # Moderate performance loss at warning temperature
+        else:
+            self.engine.thermal_factor = 1.0  # No penalty at normal temperature
+            
     def _initialize_thermal_systems(self):
         """Initialize additional thermal systems (side pods, rear radiator, etc.)."""
         try:
@@ -333,6 +452,9 @@ class Vehicle:
             self.engine.throttle_position,
             self.engine.engine_temperature
         )
+         # Apply thermal factor if it exists
+        if hasattr(self.engine, 'thermal_factor'):
+            self.current_engine_torque *= self.engine.thermal_factor
         
         # Update engine thermal state if cooling system exists
         if self.cooling_system:

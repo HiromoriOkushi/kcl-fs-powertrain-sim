@@ -146,50 +146,62 @@ class Radiator:
         return fin_area + tube_area
     
     def calculate_heat_rejection(self, coolant_temp: float, ambient_temp: float, 
-                               coolant_flow_rate: float, air_flow_rate: float) -> float:
+                            vehicle_speed: float) -> float:
         """
-        Calculate heat rejected by the radiator under given conditions.
+        Calculate heat rejection rate from the cooling system.
         
         Args:
             coolant_temp: Coolant temperature in °C
-            ambient_temp: Ambient air temperature in °C
-            coolant_flow_rate: Coolant flow rate in L/min
-            air_flow_rate: Air flow rate through radiator in m³/s
+            ambient_temp: Ambient temperature in °C
+            vehicle_speed: Vehicle speed in m/s
             
         Returns:
             Heat rejection rate in watts (W)
         """
-        # Update effectiveness based on flow rates
-        self._update_effectiveness(coolant_flow_rate, air_flow_rate)
+        # Update system state
+        self.update_thermostat(coolant_temp)
+        self.update_fan(coolant_temp)
+        self.calculate_radiator_airflow(vehicle_speed)
         
-        # Calculate temperature difference
-        delta_t = coolant_temp - ambient_temp
+        # Calculate heat transfer through radiator
+        # Q = ṁ·cp·ε·(Thot - Tcold)
+        # where ṁ is mass flow rate, cp is specific heat of air
         
-        # Calculate coolant properties
-        coolant_density = 1000  # kg/m³ for water-based coolant
-        coolant_specific_heat = 3900  # J/(kg·K) for typical coolant
-        
-        # Convert coolant flow from L/min to kg/s
-        coolant_mass_flow = coolant_flow_rate * (coolant_density / 60000)
-        
-        # Calculate air properties
+        # Air properties
         air_density = 1.2  # kg/m³
-        air_specific_heat = 1005  # J/(kg·K)
+        air_specific_heat = 1005.0  # J/kg·K
         
-        # Calculate air mass flow
-        air_mass_flow = air_flow_rate * air_density
+        # Air mass flow rate
+        air_mass_flow = air_density * self.radiator_airflow
         
-        # Calculate capacity rates
-        c_coolant = coolant_mass_flow * coolant_specific_heat
-        c_air = air_mass_flow * air_specific_heat
+        # Temperature difference
+        temp_diff = max(0, coolant_temp - ambient_temp)
         
-        # Use minimum capacity rate for heat transfer calculation
-        c_min = min(c_coolant, c_air)
+        # Effectiveness is modulated by thermostat position and radiator characteristics
+        effective_radiator = self.radiator_effectiveness * self.thermostat_position
         
-        # Calculate heat rejection using effectiveness-NTU method
-        heat_rejection = self.current_effectiveness * c_min * delta_t
+        # Adjust effectiveness based on radiator type and properties
+        if hasattr(self, 'radiator') and hasattr(self.radiator, 'radiator_type'):
+            # Enhance effectiveness based on radiator type
+            if self.radiator.radiator_type.name == "DOUBLE_CORE_ALUMINUM":
+                effective_radiator *= 1.2  # 20% better performance
+            elif self.radiator.radiator_type.name == "SINGLE_CORE_COPPER":
+                effective_radiator *= 1.15  # 15% better performance
+            elif self.radiator.radiator_type.name == "SINGLE_CORE_ALUMINUM":
+                # Standard performance, no adjustment
+                pass
+            
+            # Scale by radiator size
+            if hasattr(self.radiator, 'core_area'):
+                # Base size reference
+                reference_size = 0.15  # m²
+                size_factor = min(1.5, max(0.5, self.radiator.core_area / reference_size))
+                effective_radiator *= size_factor
         
-        return max(0, heat_rejection)  # Can't reject heat if delta_t <= 0
+        # Heat rejection (W)
+        heat_rejection = air_mass_flow * air_specific_heat * effective_radiator * temp_diff
+        
+        return heat_rejection
     
     def _update_effectiveness(self, coolant_flow_rate: float, air_flow_rate: float):
         """

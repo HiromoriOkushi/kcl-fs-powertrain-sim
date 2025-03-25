@@ -293,10 +293,41 @@ class MotorcycleEngine:
         # At partial throttle, torque doesn't scale linearly
         throttle_factor = throttle ** 0.8  # Slight nonlinearity
         
-        # Temperature effects
-        # Too cold = reduced performance, optimal around 90°C, too hot = reduced
-        temp_factor = 0.5 + 0.5 * np.exp(-0.001 * (engine_temp - 90) ** 2)
-        temp_factor = min(1.0, temp_factor)  # Cap at 1.0
+        # Temperature effects - ENHANCED MODEL
+        # Define temperature ranges
+        optimal_temp = 90.0
+        cold_threshold = 60.0
+        warning_temp = 105.0
+        critical_temp = 115.0
+        
+        # Cold engine penalty (more significant at lower temps)
+        if engine_temp < cold_threshold:
+            cold_factor = 0.7 + 0.3 * (engine_temp / cold_threshold)
+        elif engine_temp < optimal_temp:
+            # Slight penalty for below optimal but above cold threshold
+            cold_factor = 0.95 + 0.05 * ((engine_temp - cold_threshold) / (optimal_temp - cold_threshold))
+        else:
+            cold_factor = 1.0
+        
+        # Hot engine penalty (more aggressive with temperature)
+        if engine_temp <= optimal_temp:
+            hot_factor = 1.0
+        elif engine_temp <= warning_temp:
+            # Gradual decrease from optimal to warning
+            temp_range = warning_temp - optimal_temp
+            temp_above_optimal = engine_temp - optimal_temp
+            hot_factor = 1.0 - 0.1 * (temp_above_optimal / temp_range)
+        elif engine_temp <= critical_temp:
+            # Steeper decrease from warning to critical
+            temp_range = critical_temp - warning_temp
+            temp_above_warning = engine_temp - warning_temp
+            hot_factor = 0.9 - 0.3 * (temp_above_warning / temp_range)
+        else:
+            # Severe penalty above critical temperature
+            hot_factor = 0.6 - 0.1 * min(0.5, (engine_temp - critical_temp) / 10.0)
+        
+        # Combined temperature factor
+        temp_factor = min(cold_factor, hot_factor)
         
         # Apply all factors
         actual_torque = base_torque * throttle_factor * temp_factor
