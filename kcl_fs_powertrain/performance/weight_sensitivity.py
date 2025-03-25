@@ -391,9 +391,9 @@ class WeightSensitivityAnalyzer:
         return sensitivity_results
     
     def calculate_weight_reduction_targets(self, 
-                                        performance_target: float,
-                                        sensitivity: Optional[float] = None,
-                                        performance_type: str = 'acceleration') -> Dict:
+                                    performance_target: float,
+                                    sensitivity: Optional[float] = None,
+                                    performance_type: str = 'acceleration') -> Dict:
         """
         Calculate required weight reduction to reach a performance target.
         
@@ -403,7 +403,7 @@ class WeightSensitivityAnalyzer:
             performance_type: Type of performance ('acceleration' or 'lap_time')
             
         Returns:
-            Dictionary with weight reduction targets
+            Dictionary with weight reduction targets or empty dict if required data is missing
         """
         # Get current performance and sensitivity
         if performance_type == 'acceleration':
@@ -411,17 +411,27 @@ class WeightSensitivityAnalyzer:
                 logger.error("Acceleration sensitivity not analyzed. Call analyze_acceleration_sensitivity first.")
                 return {}
                 
-            current_performance = self.acceleration_sensitivity['time_to_60mph'][0]
+            # Check if we have valid time_to_60mph data
+            if not self.acceleration_sensitivity['time_75m'] or self.acceleration_sensitivity['time_75m'][0] is None:
+                logger.error("No valid acceleration time data available. Cannot calculate reduction targets.")
+                return {}
+                
+            current_performance = self.acceleration_sensitivity['time_75m'][0]  # Use 75m time instead of time_to_60mph
             if sensitivity is None:
-                sensitivity = self.acceleration_sensitivity['sensitivity_60mph']
+                sensitivity = self.acceleration_sensitivity['sensitivity_75m']
             
-            performance_name = "0-60 mph time"
+            performance_name = "75m acceleration time"
             
         elif performance_type == 'lap_time':
             if not self.lap_time_sensitivity:
                 logger.error("Lap time sensitivity not analyzed. Call analyze_lap_time_sensitivity first.")
                 return {}
                 
+            # Check if we have valid lap_times data
+            if not self.lap_time_sensitivity['lap_times'] or self.lap_time_sensitivity['lap_times'][0] is None:
+                logger.error("No valid lap time data available. Cannot calculate reduction targets.")
+                return {}
+            
             current_performance = self.lap_time_sensitivity['lap_times'][0]
             if sensitivity is None:
                 sensitivity = self.lap_time_sensitivity['sensitivity_lap_time']
@@ -462,11 +472,11 @@ class WeightSensitivityAnalyzer:
         
         logger.info(f"Weight reduction target calculation for {performance_name}:")
         logger.info(f"Current: {current_performance:.3f} s, Target: {performance_target:.3f} s, "
-                   f"Required improvement: {required_improvement:.3f} s")
+                f"Required improvement: {required_improvement:.3f} s")
         logger.info(f"Required weight reduction: {required_weight_reduction:.1f} kg "
-                   f"({required_weight_reduction / current_weight * 100:.1f}%)")
+                f"({required_weight_reduction / current_weight * 100:.1f}%)")
         logger.info(f"Target weight: {target_weight:.1f} kg "
-                   f"(achievable: {'Yes' if is_achievable else 'No'})")
+                f"(achievable: {'Yes' if is_achievable else 'No'})")
         
         return result
     

@@ -1882,17 +1882,26 @@ def analyze_performance_tradeoffs(weight_results, lap_results, cooling_results):
     # Extract data for analysis
     # Weight vs Lap Time tradeoff
     if (weight_results and 'lap_sensitivity' in weight_results and 
-            'lap_times' in weight_results['lap_sensitivity']):
+            'lap_times' in weight_results['lap_sensitivity'] and
+            weight_results['lap_sensitivity']['lap_times']):
         
         weights = weight_results['lap_sensitivity']['weights']
         lap_times = weight_results['lap_sensitivity']['lap_times']
         
-        # Calculate time improvement per kg
-        if len(weights) > 1 and len(lap_times) > 1:
-            time_per_kg = (lap_times[-1] - lap_times[0]) / (weights[-1] - weights[0])
+        # Filter out None values
+        valid_weights = []
+        valid_times = []
+        for w, t in zip(weights, lap_times):
+            if t is not None:
+                valid_weights.append(w)
+                valid_times.append(t)
+        
+        # Calculate time improvement per kg if we have at least 2 valid data points
+        if len(valid_weights) > 1 and len(valid_times) > 1:
+            time_per_kg = (valid_times[-1] - valid_times[0]) / (valid_weights[-1] - valid_weights[0])
             tradeoffs['weight_vs_lap_time'] = {
                 'time_per_kg': time_per_kg,
-                'percent_improvement_per_kg': (time_per_kg / lap_times[0]) * 100
+                'percent_improvement_per_kg': (time_per_kg / valid_times[0]) * 100
             }
             
             print(f"Weight vs Lap Time Tradeoff:")
@@ -1912,7 +1921,10 @@ def analyze_performance_tradeoffs(weight_results, lap_results, cooling_results):
                 std_config = next((cfg for cfg in cooling_configs if cfg['configuration'] == 'standard'), None)
                 min_config = next((cfg for cfg in cooling_configs if cfg['configuration'] == 'minimal'), None)
                 
-                if std_config and min_config and 'max_engine_temp' in std_config and 'max_engine_temp' in min_config:
+                if (std_config and min_config and 
+                    'max_engine_temp' in std_config and 'max_engine_temp' in min_config and
+                    std_config['max_engine_temp'] is not None and min_config['max_engine_temp'] is not None):
+                    
                     # Estimate weight difference between configurations (this is approximate)
                     weight_diff = 5.0  # Assume ~5kg difference between standard and minimal
                     temp_diff = min_config['max_engine_temp'] - std_config['max_engine_temp']
@@ -1933,15 +1945,19 @@ def analyze_performance_tradeoffs(weight_results, lap_results, cooling_results):
     if cooling_results and 'results' in cooling_results and cooling_results['results']:
         cooling_configs = cooling_results['results']
         
-        if len(cooling_configs) >= 2:
+        # Filter out configs with missing data
+        valid_configs = []
+        for cfg in cooling_configs:
+            if ('lap_time' in cfg and cfg['lap_time'] is not None and
+                'max_engine_temp' in cfg and cfg['max_engine_temp'] is not None):
+                valid_configs.append(cfg)
+        
+        if len(valid_configs) >= 2:
             # Find the configs with the best lap time and the best thermal performance
-            best_lap_config = min(cooling_configs, key=lambda x: x.get('lap_time', float('inf')))
-            best_thermal_config = min(cooling_configs, key=lambda x: x.get('max_engine_temp', float('inf')))
+            best_lap_config = min(valid_configs, key=lambda x: x['lap_time'])
+            best_thermal_config = min(valid_configs, key=lambda x: x['max_engine_temp'])
             
-            if (best_lap_config != best_thermal_config and 
-                'lap_time' in best_lap_config and 'lap_time' in best_thermal_config and
-                'max_engine_temp' in best_lap_config and 'max_engine_temp' in best_thermal_config):
-                
+            if best_lap_config != best_thermal_config:
                 lap_time_diff = best_thermal_config['lap_time'] - best_lap_config['lap_time']
                 temp_diff = best_lap_config['max_engine_temp'] - best_thermal_config['max_engine_temp']
                 
@@ -1977,11 +1993,15 @@ def analyze_performance_tradeoffs(weight_results, lap_results, cooling_results):
             recommendations.append("The standard cooling configuration offers the best balance between performance and reliability.")
     
     # Overall vehicle configuration recommendation
-    if weight_results and 'lap_reduction_target' in weight_results:
+    if weight_results and 'lap_reduction_target' in weight_results and weight_results['lap_reduction_target']:
         lap_reduction = weight_results['lap_reduction_target']
-        if lap_reduction and lap_reduction.get('is_achievable', False):
+        if lap_reduction.get('is_achievable', False):
             target_weight = lap_reduction.get('target_weight', 0)
             recommendations.append(f"Target vehicle weight of {target_weight:.1f}kg is recommended to achieve optimal lap time.")
+    
+    # Add a fallback recommendation if no specific ones were generated
+    if not recommendations:
+        recommendations.append("Based on limited data, focus on balanced development of powertrain, weight reduction, and thermal management.")
     
     tradeoffs['recommendations'] = recommendations
     
@@ -2215,7 +2235,6 @@ def analyze_weight_sensitivity(vehicle, track_file, output_dir, weight_range=Non
     )
     
     # Skip weight distribution sensitivity as the method doesn't exist
-    # This method doesn't exist in the WeightSensitivityAnalyzer class
     distribution_sensitivity = {}
     print("Weight distribution sensitivity analysis not available in this version")
     
@@ -2226,26 +2245,35 @@ def analyze_weight_sensitivity(vehicle, track_file, output_dir, weight_range=Non
     report = analyzer.generate_weight_sensitivity_report(save_dir=weight_dir)
     
     # Calculate weight reduction targets for specific performance goals
-    # Example: Target a 4.0s acceleration time (or closest to current minus 10%)
-    current_accel_time = accel_sensitivity['time_75m'][0]
-    accel_target = min(4.0, current_accel_time * 0.9)  # 10% improvement or 4.0s, whichever is better
+    accel_reduction = None
+    lap_reduction = None
     
-    # Example: Target a lap time improvement of 7%
-    current_lap_time = lap_sensitivity['lap_times'][0]
-    lap_target = current_lap_time * 0.93  # 7% improvement
+    # Check if we have valid acceleration time data
+    if accel_sensitivity and 'time_75m' in accel_sensitivity and accel_sensitivity['time_75m'] and accel_sensitivity['time_75m'][0] is not None:
+        current_accel_time = accel_sensitivity['time_75m'][0]
+        accel_target = min(4.0, current_accel_time * 0.9)  # 10% improvement or 4.0s, whichever is better
+        
+        # Calculate required reductions
+        accel_reduction = analyzer.calculate_weight_reduction_targets(
+            accel_target, 
+            sensitivity=accel_sensitivity['sensitivity_75m'],
+            performance_type='acceleration'
+        )
+    else:
+        print("Skipping acceleration weight reduction target calculation due to missing data")
     
-    # Calculate required reductions
-    accel_reduction = analyzer.calculate_weight_reduction_targets(
-        accel_target, 
-        sensitivity=accel_sensitivity['sensitivity_75m'],
-        performance_type='acceleration'
-    )
-    
-    lap_reduction = analyzer.calculate_weight_reduction_targets(
-        lap_target,
-        sensitivity=lap_sensitivity['sensitivity_lap_time'],
-        performance_type='lap_time'
-    )
+    # Check if we have valid lap time data
+    if lap_sensitivity and 'lap_times' in lap_sensitivity and lap_sensitivity['lap_times'] and lap_sensitivity['lap_times'][0] is not None:
+        current_lap_time = lap_sensitivity['lap_times'][0]
+        lap_target = current_lap_time * 0.93  # 7% improvement
+        
+        lap_reduction = analyzer.calculate_weight_reduction_targets(
+            lap_target,
+            sensitivity=lap_sensitivity['sensitivity_lap_time'],
+            performance_type='lap_time'
+        )
+    else:
+        print("Skipping lap time weight reduction target calculation due to missing data")
     
     # Print key findings
     print("\nWeight Sensitivity Key Findings:")
@@ -2258,12 +2286,16 @@ def analyze_weight_sensitivity(vehicle, track_file, output_dir, weight_range=Non
         print(f"    Required weight reduction: {accel_reduction['required_weight_reduction']:.1f} kg")
         print(f"    Target weight: {accel_reduction['target_weight']:.1f} kg")
         print(f"    Achievable: {'Yes' if accel_reduction['is_achievable'] else 'No'}")
+    else:
+        print("  No acceleration weight reduction targets calculated")
     
     if lap_reduction:
         print(f"  To achieve {lap_target:.2f}s lap time:")
         print(f"    Required weight reduction: {lap_reduction['required_weight_reduction']:.1f} kg")
         print(f"    Target weight: {lap_reduction['target_weight']:.1f} kg")
         print(f"    Achievable: {'Yes' if lap_reduction['is_achievable'] else 'No'}")
+    else:
+        print("  No lap time weight reduction targets calculated")
     
     # Return combined results
     results = {
