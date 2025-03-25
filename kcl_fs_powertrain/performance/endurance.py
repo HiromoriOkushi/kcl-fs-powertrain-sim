@@ -17,6 +17,7 @@ import logging
 import time
 import random
 import types
+import time
 from enum import Enum, auto
 
 # Import from other modules
@@ -32,7 +33,6 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("Endurance_Simulation")
-
 
 class ReliabilityEvent(Enum):
     """Enumeration of possible reliability events during endurance."""
@@ -301,85 +301,68 @@ class EnduranceSimulator:
             # No direct component for fuel system in our model
             self.component_wear['engine'] += 0.02
     
-    def _calculate_fuel_consumption(self, lap_results: Dict) -> float:
+    def _calculate_fuel_consumption(self, lap_result):
         """
         Calculate fuel consumption for a lap.
         
         Args:
-            lap_results: Results from lap_simulator.simulate_lap()
+            lap_result: Results from lap_simulator.simulate_lap()
             
         Returns:
             Fuel consumption in liters
         """
         # Initialize fuel consumption calculator if not present
-        if not hasattr(self, 'fuel_calculator'):
-            # Try to get fuel properties from vehicle if available
-            if hasattr(self.vehicle, 'fuel_system') and hasattr(self.vehicle.fuel_system, 'fuel_properties'):
-                fuel_properties = self.vehicle.fuel_system.fuel_properties
-            else:
-                # Use default fuel system from the engine if available
-                from ..engine.fuel_systems import FuelProperties, FuelType
-                fuel_properties = FuelProperties(FuelType.E85)
-            
-            self.fuel_calculator = FuelConsumption(fuel_properties, self.vehicle.engine)
+        if not hasattr(self, '_base_fuel_consumption'):
+            # Calculate a reasonable base consumption
+            engine_displacement = getattr(self.vehicle.engine, 'displacement', 0.6)  # Default 600cc
+            self._base_fuel_consumption = 0.3  # Base consumption in L/km
         
-        # Extract power profile from lap results
-        if 'power' not in lap_results and 'engine_rpm' in lap_results and 'time' in lap_results:
-            # Calculate power from RPM and assumed load
-            rpm_profile = lap_results['engine_rpm']
-            time_profile = lap_results['time']
-            
-            # Assume load based on throttle or calculate from speed changes
-            if 'throttle' in lap_results:
-                load_profile = lap_results['throttle']
-            else:
-                # Rough estimate from speed profile
-                speed_profile = lap_results['speed']
-                load_profile = np.zeros_like(speed_profile)
-                for i in range(1, len(speed_profile)):
-                    # Positive acceleration = higher load
-                    if speed_profile[i] > speed_profile[i-1]:
-                        load_profile[i] = 0.7 + 0.3 * min(1.0, (speed_profile[i] - speed_profile[i-1]) / 2.0)
-                    else:
-                        load_profile[i] = 0.2  # Coasting or braking
-            
-            # Calculate power at each point
-            power_profile = np.zeros_like(rpm_profile)
-            for i, (rpm, load) in enumerate(zip(rpm_profile, load_profile)):
-                if rpm > 0:
-                    torque = self.vehicle.engine.get_torque(rpm) * load
-                    power_profile[i] = torque * rpm * 2 * np.pi / 60 / 1000  # kW
-            
-            # Add to lap results
-            lap_results['power'] = power_profile
+        # Get track length
+        track_length = 0
+        if hasattr(self.lap_simulator, 'track_profile') and hasattr(self.lap_simulator.track_profile, 'length'):
+            track_length = self.lap_simulator.track_profile.length / 1000.0  # Convert to km
+        elif 'distance' in lap_result and len(lap_result['distance']) > 0:
+            track_length = lap_result['distance'][-1] / 1000.0  # Last distance point, convert to km
+        else:
+            track_length = 1.0  # Default 1km if unknown
         
-        # Use vehicle's power profile to calculate fuel consumption
-        if 'power' in lap_results and 'time' in lap_results:
-            power_profile = lap_results['power']
-            time_profile = lap_results['time']
-            
-            # Calculate total energy used (kWh)
-            total_energy = 0.0
-            for i in range(1, len(power_profile)):
-                dt = time_profile[i] - time_profile[i-1]
-                avg_power = (power_profile[i] + power_profile[i-1]) / 2.0
-                energy = avg_power * dt / 3600.0  # Convert to kWh
-                total_energy += energy
-            
-            # Assume a basic fuel efficiency of 0.25-0.3 kg/kWh (reasonable for race engines)
-            fuel_efficiency_kg_per_kwh = 0.3
-            
-            # Calculate fuel mass in kg
-            fuel_mass = total_energy * fuel_efficiency_kg_per_kwh
-            
-            # Convert to volume (assuming E85 density of ~0.78 kg/L)
-            fuel_density = 0.78  # kg/L
-            fuel_volume = fuel_mass / fuel_density
-            
-            # Apply safety margin and add basic idle consumption
-            fuel_volume = fuel_volume * 1.1 + 0.05  # 10% safety margin + idle consumption
-            
-        return fuel_volume
+        # Base consumption for this lap
+        base_consumption = track_length * self._base_fuel_consumption
+        
+        # ---------- Apply variability factors ----------
+        
+        # 1. Engine temperature effect (hotter engine = more fuel)
+        temp_factor = 1.0
+        if hasattr(self.vehicle.engine, 'engine_temperature'):
+            temp = self.vehicle.engine.engine_temperature
+            # Efficiency decreases as temp increases above optimal (around 90°C)
+            if temp > 90:
+                temp_factor = 1.0 + (temp - 90) * 0.002  # +2% per 10°C above optimal
+            elif temp < 80:
+                # Cold engine is less efficient
+                temp_factor = 1.0 + (80 - temp) * 0.001  # +1% per 10°C below optimal
+        
+        # 2. Driving aggression factor - varies by lap and previous events
+        aggression_factor = 1.0
+        if hasattr(self, 'reliability_events') and len(self.reliability_events) > 0:
+            # Check if there was an event in the previous lap
+            last_event = self.reliability_events[-1]
+            if last_event != ReliabilityEvent.NONE:
+                # Driver becomes more cautious after an event
+                aggression_factor = 0.95  # 5% better fuel economy
+        
+        # 3. Lap variation - accounts for different lines, tire wear
+        lap_count = len(getattr(self, 'lap_times', []))
+        # Tire degradation increases consumption slightly each lap
+        tire_factor = 1.0 + min(0.05, lap_count * 0.01)  # Up to +5% over time
+        
+        # 4. Random variation (±3%)
+        random_factor = 0.97 + random.random() * 0.06
+        
+        # Calculate final consumption with all factors
+        fuel_consumption = base_consumption * temp_factor * aggression_factor * tire_factor * random_factor
+        
+        return fuel_consumption
 
         
         # Fallback method with rough estimate based on track length and vehicle efficiency
@@ -398,56 +381,49 @@ class EnduranceSimulator:
         
         return fuel_volume
     
-    def _update_thermal_state(self, lap_results: Dict, recovery_time: float) -> Dict:
-        """
-        Update thermal state after a lap and recovery period.
+    def _update_thermal_state(self, lap_result, recovery_time):
+        """Update thermal state after a lap and recovery period."""
         
-        Args:
-            lap_results: Results from lap simulation
-            recovery_time: Time in seconds for cooling between laps
-            
-        Returns:
-            Updated thermal state dictionary
-        """
-        # Extract final thermal state from lap results
-        if 'engine_temp' in lap_results:
-            engine_temp = lap_results['engine_temp'][-1]
-            coolant_temp = lap_results.get('coolant_temp', [90.0])[-1]  # Default if not available
-            oil_temp = lap_results.get('oil_temp', [85.0])[-1]  # Default if not available
+        # Extract final temperatures from lap results if available
+        if 'engine_temp' in lap_result and len(lap_result['engine_temp']) > 0:
+            engine_temp = lap_result['engine_temp'][-1]
+            coolant_temp = lap_result.get('coolant_temp', [90.0])[-1]
+            oil_temp = lap_result.get('oil_temp', [85.0])[-1]
         else:
-            # Use reasonable defaults if thermal simulation wasn't enabled
-            engine_temp = 95.0
-            coolant_temp = 90.0
-            oil_temp = 85.0
+            # Estimate temperatures based on previous state
+            if hasattr(self.vehicle.engine, 'engine_temperature'):
+                engine_temp = self.vehicle.engine.engine_temperature
+                # Some natural heating for longer simulations
+                engine_temp += 5.0  # Each lap adds some heat
+                engine_temp = min(130.0, engine_temp)  # Cap at reasonable max
+            else:
+                engine_temp = 90.0 + len(self.lap_times) * 2.0  # Progressive heating
+                
+            coolant_temp = engine_temp - 5.0  # Typically slightly lower than engine
+            oil_temp = engine_temp - 10.0  # Oil typically runs cooler than block
         
-        # Calculate cooling during recovery period
+        # Apply cooling during recovery
+        ambient_temp = 25.0
+        cooling_rate = 0.01  # Per second
         
-        # Simple thermal model: exponential cooling toward ambient temperature
-        ambient_temp = 25.0  # °C
-        cooling_rate = 0.02  # Cooling rate constant
-        
-        # Cooling equation: T(t) = T_ambient + (T_initial - T_ambient) * e^(-kt)
+        # Exponential cooling formula: T(t) = Tambient + (Tinitial - Tambient) * e^(-kt)
         engine_temp_after = ambient_temp + (engine_temp - ambient_temp) * np.exp(-cooling_rate * recovery_time)
         coolant_temp_after = ambient_temp + (coolant_temp - ambient_temp) * np.exp(-cooling_rate * recovery_time)
         oil_temp_after = ambient_temp + (oil_temp - ambient_temp) * np.exp(-cooling_rate * recovery_time)
         
-        thermal_state = {
+        # Apply new temperature to engine
+        if hasattr(self.vehicle.engine, 'engine_temperature'):
+            self.vehicle.engine.engine_temperature = engine_temp_after
+        if hasattr(self.vehicle.engine, 'coolant_temperature'):
+            self.vehicle.engine.coolant_temperature = coolant_temp_after
+        if hasattr(self.vehicle.engine, 'oil_temperature'):
+            self.vehicle.engine.oil_temperature = oil_temp_after
+        
+        return {
             'engine_temp': engine_temp_after,
             'coolant_temp': coolant_temp_after,
             'oil_temp': oil_temp_after
-            }
-        # Add validation for reasonable temperature ranges
-        for key in thermal_state:
-            if thermal_state[key] > 200 or thermal_state[key] < 20:
-                # If temperature is unreasonable, use a sensible default
-                if key == 'engine_temp':
-                    thermal_state[key] = 95.0
-                elif key == 'coolant_temp':
-                    thermal_state[key] = 85.0
-                elif key == 'oil_temp':
-                    thermal_state[key] = 80.0
-                    
-        return thermal_state
+        }
     
     def _apply_thermal_state(self, thermal_state: Dict):
         """
@@ -510,6 +486,7 @@ class EnduranceSimulator:
         Returns:
             Dictionary with complete simulation results
         """
+        
         if not self.lap_simulator.track_profile:
             raise ValueError("No track loaded for simulation")
         
@@ -522,11 +499,20 @@ class EnduranceSimulator:
         self.component_wear = {component: 0.0 for component in self.component_wear_rates}
         
         # Initial thermal state (ambient temperature)
+
         thermal_state = {
             'engine_temp': 25.0,  # Starting from cold
             'coolant_temp': 25.0,
             'oil_temp': 25.0
         }
+
+        # Apply initial thermal state to engine if it has temperature properties
+        if hasattr(self.vehicle.engine, 'engine_temperature'):
+            self.vehicle.engine.engine_temperature = thermal_state['engine_temp']
+        if hasattr(self.vehicle.engine, 'coolant_temperature'):
+            self.vehicle.engine.coolant_temperature = thermal_state['coolant_temp']
+        if hasattr(self.vehicle.engine, 'oil_temperature'):
+            self.vehicle.engine.oil_temperature = thermal_state['oil_temp']
         
         # Initial fuel level
         remaining_fuel = self.current_fuel_level
