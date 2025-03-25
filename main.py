@@ -552,6 +552,10 @@ class VehicleFactory:
                     print(f"Engine configured from: {engine_config_path}")
             except Exception as e:
                 print(f"Warning: Could not load engine configuration: {str(e)}")
+                
+        if hasattr(vehicle, 'engine'):
+            vehicle.engine.thermal_factor = 1.0  # Initialize thermal performance factor
+            vehicle.engine.engine_temperature = 60.0  # Starting temperature in °C
 
         # Load transmission configuration if specified
         if 'transmission' in config and config['transmission'] and 'paths' in config and 'transmission' in config['paths']:
@@ -1441,6 +1445,21 @@ def compare_cooling_configurations(config, vehicle_base, track_file, output_dir)
         # Simulate lap
         start_time = time.time()
         lap_results = lap_simulator.simulate_lap(include_thermal=True)
+        
+        if 'engine_temp' in lap_results.get('results', {}):
+            max_temp = max(lap_results['results']['engine_temp'])
+            avg_temp = np.mean(lap_results['results']['engine_temp'])
+            thermal_limited = lap_results.get('thermal_limited', False)
+        else:
+            max_temp = "N/A"
+            avg_temp = "N/A"
+            thermal_limited = False
+
+        # Store in results dict
+        record['max_engine_temp'] = max_temp
+        record['avg_engine_temp'] = avg_temp
+        record['thermal_limited'] = thermal_limited
+        
         # Calculate performance metrics
         metrics = lap_simulator.analyze_lap_performance(lap_results)
         lap_results['metrics'] = metrics  # Add metrics to the results dictionary

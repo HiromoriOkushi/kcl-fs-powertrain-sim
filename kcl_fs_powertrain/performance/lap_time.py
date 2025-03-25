@@ -483,41 +483,63 @@ class LapTimeSimulator:
             
             lateral_g_points[current_dist_idx + 1] = lateral_g
             
-            # Update thermal state if included
+            # Update thermal state if thermal simulation is enabled
             if include_thermal:
-                # Calculate engine load
-                if engine_rpm > 0 and self.vehicle.engine.max_torque > 0:
-                    # Calculate current torque demand
-                    current_torque = self.vehicle.engine.get_torque(engine_rpm)
-                    max_torque = self.vehicle.engine.get_torque(self.vehicle.engine.max_torque_rpm)
-                    
-                    engine_load = min(1.0, current_torque / max_torque)
-                else:
-                    engine_load = 0.5  # Default if not calculable
+                # Use current track position as a progress indicator (0-1)
+                progress = current_distance / track_length
                 
-                # Update thermal state based on engine model's capabilities
-                if hasattr(self.vehicle.engine, 'update_thermal_state'):
-                    thermal_state = self.vehicle.engine.update_thermal_state(
-                        engine_rpm,
-                        1.0,  # Full throttle assumption for worst-case
-                        ambient_temp=25.0,  # Default ambient temperature
-                        cooling_effectiveness=0.8,  # Assuming 80% cooling effectiveness
-                        dt=segment_time
-                    )
-                    
-                    # Store thermal data
-                    engine_temp_points[current_dist_idx + 1] = thermal_state.get('engine_temp', 0)
-                    coolant_temp_points[current_dist_idx + 1] = thermal_state.get('coolant_temp', 0)
-                    oil_temp_points[current_dist_idx + 1] = thermal_state.get('oil_temp', 0)
-                    
-                    # Calculate power reduction factor due to temperature
-                    # This is a simplified model - in reality, this would depend on the engine's thermal characteristics
-                    optimal_temp = 90.0  # Optimal engine temperature
-                    engine_temp = thermal_state.get('engine_temp', optimal_temp)
-                    
-                    power_factor = 0.5 + 0.5 * np.exp(-0.001 * (engine_temp - optimal_temp) ** 2)
-                    power_factor = min(1.0, power_factor)  # Cap at 1.0
-                    power_factor_points[current_dist_idx + 1] = power_factor
+                # More heat is generated in corners due to engine load
+                local_curvature = abs(current_curvature)
+                heat_factor = 1.0 + 2.0 * local_curvature  # Generate more heat in corners
+                
+                # Get cooling effectiveness based on vehicle configuration
+                cooling_effectiveness = 0.5  # Default value
+                
+                # Apply cooling system type effect (make this impact significant)
+                if hasattr(self.vehicle, 'cooling_system') and hasattr(self.vehicle.cooling_system, 'radiator'):
+                    rad_type = self.vehicle.cooling_system.radiator.radiator_type.name
+                    if rad_type == "DOUBLE_CORE_ALUMINUM":
+                        cooling_effectiveness = 0.8  # 80% effectiveness
+                    elif rad_type == "SINGLE_CORE_COPPER":
+                        cooling_effectiveness = 0.7  # 70% effectiveness
+                    elif rad_type == "SINGLE_CORE_ALUMINUM":
+                        cooling_effectiveness = 0.5  # 50% effectiveness (worst)
+                
+                # Apply side pods effect
+                if hasattr(self.vehicle, 'side_pod_system') and self.vehicle.side_pod_system is not None:
+                    cooling_effectiveness *= 1.2  # 20% improvement
+                
+                # Apply rear radiator effect
+                if hasattr(self.vehicle, 'rear_radiator') and self.vehicle.rear_radiator is not None:
+                    cooling_effectiveness *= 1.15  # 15% improvement
+                
+                # Current temperature affects engine performance directly
+                # Update engine temperature based on heat and cooling
+                base_temp_rise = 0.2 * heat_factor  # Base temperature rise per step
+                cooling_effect = 0.15 * cooling_effectiveness * current_speed / 20.0  # Cooling increases with speed
+                
+                # Net temperature change 
+                temp_change = base_temp_rise - cooling_effect
+                
+                # Update engine temperature (prevent NaN by clamping values)
+                if not hasattr(self.vehicle.engine, 'engine_temperature'):
+                    self.vehicle.engine.engine_temperature = 60.0  # Initialize if not present
+                
+                self.vehicle.engine.engine_temperature = min(150.0, max(60.0, 
+                                                                        self.vehicle.engine.engine_temperature + temp_change))
+                
+                # Update thermal factor - this directly affects engine torque
+                if self.vehicle.engine.engine_temperature < 80.0:  # Cold
+                    self.vehicle.engine.thermal_factor = 0.9
+                elif self.vehicle.engine.engine_temperature < 100.0:  # Optimal
+                    self.vehicle.engine.thermal_factor = 1.0
+                elif self.vehicle.engine.engine_temperature < 110.0:  # Hot
+                    self.vehicle.engine.thermal_factor = 0.9
+                elif self.vehicle.engine.engine_temperature < 120.0:  # Very hot
+                    self.vehicle.engine.thermal_factor = 0.8
+                else:  # Overheating
+                    self.vehicle.engine.thermal_factor = 0.65
+                    thermal_limited = True
             
             # Move to next point
             current_time = next_time
