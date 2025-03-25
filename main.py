@@ -1446,13 +1446,21 @@ def compare_cooling_configurations(config, vehicle_base, track_file, output_dir)
         start_time = time.time()
         lap_results = lap_simulator.simulate_lap(include_thermal=True)
         
-        if 'engine_temp' in lap_results.get('results', {}):
+        # Initialize record dictionary for this configuration
+        record = {
+            'configuration': config_name,
+            'description': config_desc,
+            'lap_time': lap_results['lap_time']
+        }
+        
+        if 'engine_temp' in lap_results.get('results', {}) and len(lap_results['results']['engine_temp']) > 0:
             max_temp = max(lap_results['results']['engine_temp'])
             avg_temp = np.mean(lap_results['results']['engine_temp'])
             thermal_limited = lap_results.get('thermal_limited', False)
         else:
-            max_temp = "N/A"
-            avg_temp = "N/A"
+            # Use numeric placeholders instead of strings for missing data
+            max_temp = None
+            avg_temp = None
             thermal_limited = False
 
         # Store in results dict
@@ -1477,31 +1485,29 @@ def compare_cooling_configurations(config, vehicle_base, track_file, output_dir)
                 'coolant_temp': lap_results['results'].get('coolant_temp', []) if 'coolant_temp' in lap_results['results'] else None
             }
         
-        # Calculate performance metrics
-        metrics = {
-            'configuration': config_name,
-            'description': config_desc,
-            'lap_time': lap_results['lap_time'],
+        # Update performance metrics
+        record.update({
             'max_speed': max(lap_results.get('speed', [0])) * 3.6 if 'speed' in lap_results else 0,  # Convert m/s to km/h
             'avg_speed': (lap_results.get('distance', [0])[-1] / lap_results.get('time', [1])[-1]) * 3.6 if 'distance' in lap_results and 'time' in lap_results else 0,
             'thermal_limited': lap_results.get('thermal_limited', False)
-        }
+        })
+        
         # Add thermal metrics if available
         if thermal_data and len(thermal_data['engine_temp']) > 0:
-            metrics.update({
+            record.update({
                 'max_engine_temp': max(thermal_data['engine_temp']),
                 'avg_engine_temp': sum(thermal_data['engine_temp']) / len(thermal_data['engine_temp']),
                 'temp_rise': max(thermal_data['engine_temp']) - thermal_data['engine_temp'][0]
             })
             
             if thermal_data['coolant_temp'] is not None:
-                metrics.update({
+                record.update({
                     'max_coolant_temp': max(thermal_data['coolant_temp']),
                     'avg_coolant_temp': sum(thermal_data['coolant_temp']) / len(thermal_data['coolant_temp'])
                 })
         
         # Add to results list
-        results.append(metrics)
+        results.append(record)
         
         # Save the thermal data for plotting
         if thermal_data and len(thermal_data['distance']) > 0:
@@ -1528,25 +1534,51 @@ def compare_cooling_configurations(config, vehicle_base, track_file, output_dir)
     # Maximum engine temperature
     if all('max_engine_temp' in r for r in results):
         plt.subplot(2, 2, 2)
-        max_temps = [r['max_engine_temp'] for r in results]
-        plt.bar(names, max_temps, color=['blue', 'green', 'red'])
-        plt.ylabel('Maximum Engine Temperature (°C)')
-        plt.title('Maximum Temperature Comparison')
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
         
-        # Add warning temperature line if available
-        warning_temp = config.get('thermal_limits', {}).get('engine', {}).get('warning_temp', 110.0)
-        plt.axhline(y=warning_temp, color='orange', linestyle='--', alpha=0.7, label=f'Warning ({warning_temp}°C)')
-        plt.legend()
+        # Handle None values for plotting by replacing with zeros and keeping track of which ones were None
+        valid_indices = []
+        valid_temps = []
+        valid_names = []
+        
+        for i, r in enumerate(results):
+            if r['max_engine_temp'] is not None:
+                valid_indices.append(i)
+                valid_temps.append(r['max_engine_temp'])
+                valid_names.append(names[i])
+        
+        # Only create the plot if we have valid data
+        if valid_temps:
+            plt.bar(valid_names, valid_temps, color=[['blue', 'green', 'red'][i] for i in valid_indices])
+            plt.ylabel('Maximum Engine Temperature (°C)')
+            plt.title('Maximum Temperature Comparison')
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            
+            # Add warning temperature line if available
+            warning_temp = config.get('thermal_limits', {}).get('engine', {}).get('warning_temp', 110.0)
+            plt.axhline(y=warning_temp, color='orange', linestyle='--', alpha=0.7, label=f'Warning ({warning_temp}°C)')
+            plt.legend()
     
     # Temperature rise
     if all('temp_rise' in r for r in results):
         plt.subplot(2, 2, 3)
-        temp_rises = [r['temp_rise'] for r in results]
-        plt.bar(names, temp_rises, color=['blue', 'green', 'red'])
-        plt.ylabel('Temperature Rise (°C)')
-        plt.title('Temperature Rise Comparison')
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        
+        # Handle None values for plotting
+        valid_indices = []
+        valid_rises = []
+        valid_names = []
+        
+        for i, r in enumerate(results):
+            if r['temp_rise'] is not None:
+                valid_indices.append(i)
+                valid_rises.append(r['temp_rise'])
+                valid_names.append(names[i])
+        
+        # Only create the plot if we have valid data
+        if valid_rises:
+            plt.bar(valid_names, valid_rises, color=[['blue', 'green', 'red'][i] for i in valid_indices])
+            plt.ylabel('Temperature Rise (°C)')
+            plt.title('Temperature Rise Comparison')
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
     
     # Thermal profiles
     plt.subplot(2, 2, 4)
@@ -1574,21 +1606,43 @@ def compare_cooling_configurations(config, vehicle_base, track_file, output_dir)
     print("-" * 80)
     
     for r in results:
-        print(f"{r['configuration']:<15} | {r['lap_time']:<10.3f} | {r.get('max_engine_temp', 'N/A'):<10} | {str(r['thermal_limited']):<15} | {r.get('temp_rise', 'N/A'):<10.1}")
+        # Format max_engine_temp appropriately - show N/A if it's None
+        max_temp_str = f"{r.get('max_engine_temp'):.1f}" if r.get('max_engine_temp') is not None else "N/A"
+        temp_rise_str = f"{r.get('temp_rise'):.1f}" if r.get('temp_rise') is not None else "N/A"
+        
+        print(f"{r['configuration']:<15} | {r['lap_time']:<10.3f} | {max_temp_str:<10} | {str(r['thermal_limited']):<15} | {temp_rise_str:<10}")
     
     print("-" * 80)
     
     # Determine best configuration based on a weighted score
     # (30% lap time, 70% thermal performance)
     if all('max_engine_temp' in r for r in results):
+        # First check if all max_engine_temp values are numeric (not strings like "N/A")
+        numeric_temps = []
         for r in results:
-            lap_time_score = min(lap_times) / r['lap_time']
-            thermal_score = 1.0 - (r['max_engine_temp'] / max(r['max_engine_temp'] for r in results))
-            r['composite_score'] = 0.3 * lap_time_score + 0.7 * thermal_score
+            try:
+                # Convert to float if possible and keep track of numeric values
+                temp = float(r['max_engine_temp'])
+                numeric_temps.append(temp)
+                r['max_engine_temp_numeric'] = temp
+            except (ValueError, TypeError):
+                # Handle case where max_engine_temp is not a number
+                r['max_engine_temp_numeric'] = None
         
-        # Find the best configuration
-        best_config = max(results, key=lambda r: r['composite_score'])
-        print(f"\nBest overall configuration: {best_config['configuration']} (score: {best_config['composite_score']:.3f})")
+        # Only calculate scores if we have numeric temperature values
+        if numeric_temps and all(r['max_engine_temp_numeric'] is not None for r in results):
+            max_temp = max(r['max_engine_temp_numeric'] for r in results)
+            
+            for r in results:
+                lap_time_score = min(lap_times) / r['lap_time']
+                thermal_score = 1.0 - (r['max_engine_temp_numeric'] / max_temp)
+                r['composite_score'] = 0.3 * lap_time_score + 0.7 * thermal_score
+            
+            # Find the best configuration
+            best_config = max(results, key=lambda r: r['composite_score'])
+            print(f"\nBest overall configuration: {best_config['configuration']} (score: {best_config['composite_score']:.3f})")
+        else:
+            print("\nCould not determine best configuration due to missing temperature data")
     
     # Save comparison results
     pd.DataFrame(results).to_csv(os.path.join(comparison_dir, 'cooling_comparison.csv'), index=False)
