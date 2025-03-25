@@ -80,6 +80,9 @@ class WeightSensitivityAnalyzer:
         """
         logger.info(f"Analyzing acceleration sensitivity from {weight_range[0]:.1f} to {weight_range[1]:.1f} kg")
         
+        # Clear the acceleration simulator's cache to force fresh calculations
+        self.acceleration_simulator.results_cache = {}
+        
         # Generate weight points
         weight_points = np.linspace(weight_range[0], weight_range[1], num_points)
         
@@ -109,17 +112,43 @@ class WeightSensitivityAnalyzer:
             time_to_100kph.append(results['time_to_100kph'])
             time_75m.append(results['finish_time'])
             
-            logger.info(f"Weight: {weight:.1f} kg, 0-60 mph: {results['time_to_60mph']:.3f} s, "
-                    f"0-100 kph: {results['time_to_100kph']:.3f} s, 75m: {results['finish_time']:.3f} s")
+            # Safely format None values for logging
+            time_60mph_str = f"{results['time_to_60mph']:.3f}" if results['time_to_60mph'] is not None else "N/A"
+            time_100kph_str = f"{results['time_to_100kph']:.3f}" if results['time_to_100kph'] is not None else "N/A"
+            time_75m_str = f"{results['finish_time']:.3f}" if results['finish_time'] is not None else "N/A"
+            
+            logger.info(f"Weight: {weight:.1f} kg, 0-60 mph: {time_60mph_str} s, "
+                    f"0-100 kph: {time_100kph_str} s, 75m: {time_75m_str} s")
         
         # Restore original weight
         self.vehicle.mass = original_weight
         
-        # Calculate sensitivity coefficients
-        # We'll use linear regression to find the slope (seconds per kg)
-        time_to_60mph_slope = self._calculate_sensitivity_coefficient(weights, time_to_60mph)
-        time_to_100kph_slope = self._calculate_sensitivity_coefficient(weights, time_to_100kph)
-        time_75m_slope = self._calculate_sensitivity_coefficient(weights, time_75m)
+        # Filter out None values for sensitivity calculations
+        valid_weights_60mph = []
+        valid_times_60mph = []
+        for w, t in zip(weights, time_to_60mph):
+            if t is not None:
+                valid_weights_60mph.append(w)
+                valid_times_60mph.append(t)
+                
+        valid_weights_100kph = []
+        valid_times_100kph = []
+        for w, t in zip(weights, time_to_100kph):
+            if t is not None:
+                valid_weights_100kph.append(w)
+                valid_times_100kph.append(t)
+                
+        valid_weights_75m = []
+        valid_times_75m = []
+        for w, t in zip(weights, time_75m):
+            if t is not None:
+                valid_weights_75m.append(w)
+                valid_times_75m.append(t)
+        
+        # Calculate sensitivity coefficients using only valid (non-None) values
+        time_to_60mph_slope = self._calculate_sensitivity_coefficient(valid_weights_60mph, valid_times_60mph) if valid_times_60mph else 0
+        time_to_100kph_slope = self._calculate_sensitivity_coefficient(valid_weights_100kph, valid_times_100kph) if valid_times_100kph else 0
+        time_75m_slope = self._calculate_sensitivity_coefficient(valid_weights_75m, valid_times_75m) if valid_times_75m else 0
         
         # Calculate percentage improvements per 10kg if baseline values are valid
         seconds_per_10kg_60mph = time_to_60mph_slope * 10
@@ -130,14 +159,14 @@ class WeightSensitivityAnalyzer:
         percent_improvement_per_10kg_100kph = 0
         percent_improvement_per_10kg_75m = 0
         
-        if time_to_60mph and time_to_60mph[0] > 0:
-            percent_improvement_per_10kg_60mph = (seconds_per_10kg_60mph / time_to_60mph[0]) * 100
+        if valid_times_60mph:
+            percent_improvement_per_10kg_60mph = (seconds_per_10kg_60mph / valid_times_60mph[0]) * 100
         
-        if time_to_100kph and time_to_100kph[0] > 0:
-            percent_improvement_per_10kg_100kph = (seconds_per_10kg_100kph / time_to_100kph[0]) * 100
+        if valid_times_100kph:
+            percent_improvement_per_10kg_100kph = (seconds_per_10kg_100kph / valid_times_100kph[0]) * 100
             
-        if time_75m and time_75m[0] > 0:
-            percent_improvement_per_10kg_75m = (seconds_per_10kg_75m / time_75m[0]) * 100
+        if valid_times_75m:
+            percent_improvement_per_10kg_75m = (seconds_per_10kg_75m / valid_times_75m[0]) * 100
         
         # Store results
         sensitivity_results = {
@@ -479,8 +508,17 @@ class WeightSensitivityAnalyzer:
             times_60mph = self.acceleration_sensitivity['time_to_60mph']
             times_100kph = self.acceleration_sensitivity['time_to_100kph']
             
-            plt.plot(weights, times_60mph, 'b-o', label='0-60 mph')
-            plt.plot(weights, times_100kph, 'r-o', label='0-100 kph')
+            # Filter out None values for plotting
+            valid_60mph_data = [(w, t) for w, t in zip(weights, times_60mph) if t is not None]
+            valid_100kph_data = [(w, t) for w, t in zip(weights, times_100kph) if t is not None]
+            
+            if valid_60mph_data:
+                valid_weights_60mph, valid_times_60mph = zip(*valid_60mph_data)
+                plt.plot(valid_weights_60mph, valid_times_60mph, 'b-o', label='0-60 mph')
+            
+            if valid_100kph_data:
+                valid_weights_100kph, valid_times_100kph = zip(*valid_100kph_data)
+                plt.plot(valid_weights_100kph, valid_times_100kph, 'r-o', label='0-100 kph')
             
             plt.xlabel('Weight (kg)')
             plt.ylabel('Time (s)')
@@ -488,32 +526,38 @@ class WeightSensitivityAnalyzer:
             plt.grid(True)
             plt.legend()
             
-            # Add trend line and equation
-            fit_60mph = np.polyfit(weights, times_60mph, 1)
-            fit_line_60mph = np.poly1d(fit_60mph)
-            plt.plot(weights, fit_line_60mph(weights), 'b--')
-            
-            equation_60mph = f"y = {fit_60mph[0]:.4f}x + {fit_60mph[1]:.2f}"
-            plt.text(weights[0], max(times_60mph), equation_60mph, color='b')
+            # Add trend line and equation if we have valid data
+            if valid_60mph_data:
+                fit_60mph = np.polyfit(valid_weights_60mph, valid_times_60mph, 1)
+                fit_line_60mph = np.poly1d(fit_60mph)
+                plt.plot(valid_weights_60mph, fit_line_60mph(valid_weights_60mph), 'b--')
+                
+                equation_60mph = f"y = {fit_60mph[0]:.4f}x + {fit_60mph[1]:.2f}"
+                plt.text(min(valid_weights_60mph), max(valid_times_60mph), equation_60mph, color='b')
             
             # Plot 75m time
             plt.subplot(2, 2, 2)
             times_75m = self.acceleration_sensitivity['time_75m']
             
-            plt.plot(weights, times_75m, 'g-o', label='75m Time')
+            # Filter out None values for plotting
+            valid_75m_data = [(w, t) for w, t in zip(weights, times_75m) if t is not None]
             
-            plt.xlabel('Weight (kg)')
-            plt.ylabel('Time (s)')
-            plt.title('75m Acceleration Time vs. Weight')
-            plt.grid(True)
-            
-            # Add trend line and equation
-            fit_75m = np.polyfit(weights, times_75m, 1)
-            fit_line_75m = np.poly1d(fit_75m)
-            plt.plot(weights, fit_line_75m(weights), 'g--')
-            
-            equation_75m = f"y = {fit_75m[0]:.4f}x + {fit_75m[1]:.2f}"
-            plt.text(weights[0], max(times_75m), equation_75m, color='g')
+            if valid_75m_data:
+                valid_weights_75m, valid_times_75m = zip(*valid_75m_data)
+                plt.plot(valid_weights_75m, valid_times_75m, 'g-o', label='75m Time')
+                
+                plt.xlabel('Weight (kg)')
+                plt.ylabel('Time (s)')
+                plt.title('75m Acceleration Time vs. Weight')
+                plt.grid(True)
+                
+                # Add trend line and equation
+                fit_75m = np.polyfit(valid_weights_75m, valid_times_75m, 1)
+                fit_line_75m = np.poly1d(fit_75m)
+                plt.plot(valid_weights_75m, fit_line_75m(valid_weights_75m), 'g--')
+                
+                equation_75m = f"y = {fit_75m[0]:.4f}x + {fit_75m[1]:.2f}"
+                plt.text(min(valid_weights_75m), max(valid_times_75m), equation_75m, color='g')
         
         # Plot lap time sensitivity if available
         if self.lap_time_sensitivity:
@@ -521,39 +565,49 @@ class WeightSensitivityAnalyzer:
             weights = self.lap_time_sensitivity['weights']
             lap_times = self.lap_time_sensitivity['lap_times']
             
-            plt.plot(weights, lap_times, 'm-o', label='Lap Time')
+            # Filter out None values for plotting (if any)
+            valid_lap_data = [(w, t) for w, t in zip(weights, lap_times) if t is not None]
             
-            plt.xlabel('Weight (kg)')
-            plt.ylabel('Time (s)')
-            plt.title('Lap Time vs. Weight')
-            plt.grid(True)
-            
-            # Add trend line and equation
-            fit_lap = np.polyfit(weights, lap_times, 1)
-            fit_line_lap = np.poly1d(fit_lap)
-            plt.plot(weights, fit_line_lap(weights), 'm--')
-            
-            equation_lap = f"y = {fit_lap[0]:.4f}x + {fit_lap[1]:.2f}"
-            plt.text(weights[0], max(lap_times), equation_lap, color='m')
+            if valid_lap_data:
+                valid_weights_lap, valid_times_lap = zip(*valid_lap_data)
+                plt.plot(valid_weights_lap, valid_times_lap, 'm-o', label='Lap Time')
+                
+                plt.xlabel('Weight (kg)')
+                plt.ylabel('Time (s)')
+                plt.title('Lap Time vs. Weight')
+                plt.grid(True)
+                
+                # Add trend line and equation
+                fit_lap = np.polyfit(valid_weights_lap, valid_times_lap, 1)
+                fit_line_lap = np.poly1d(fit_lap)
+                plt.plot(valid_weights_lap, fit_line_lap(valid_weights_lap), 'm--')
+                
+                equation_lap = f"y = {fit_lap[0]:.4f}x + {fit_lap[1]:.2f}"
+                plt.text(min(valid_weights_lap), max(valid_times_lap), equation_lap, color='m')
             
             # Plot average speed
             plt.subplot(2, 2, 4)
             avg_speeds = self.lap_time_sensitivity['avg_speeds']
             
-            plt.plot(weights, avg_speeds, 'c-o', label='Average Speed')
+            # Filter out None values for plotting (if any)
+            valid_speed_data = [(w, s) for w, s in zip(weights, avg_speeds) if s is not None]
             
-            plt.xlabel('Weight (kg)')
-            plt.ylabel('Speed (km/h)')
-            plt.title('Average Speed vs. Weight')
-            plt.grid(True)
-            
-            # Add trend line and equation
-            fit_speed = np.polyfit(weights, avg_speeds, 1)
-            fit_line_speed = np.poly1d(fit_speed)
-            plt.plot(weights, fit_line_speed(weights), 'c--')
-            
-            equation_speed = f"y = {fit_speed[0]:.4f}x + {fit_speed[1]:.2f}"
-            plt.text(weights[0], min(avg_speeds), equation_speed, color='c')
+            if valid_speed_data:
+                valid_weights_speed, valid_speeds = zip(*valid_speed_data)
+                plt.plot(valid_weights_speed, valid_speeds, 'c-o', label='Average Speed')
+                
+                plt.xlabel('Weight (kg)')
+                plt.ylabel('Speed (km/h)')
+                plt.title('Average Speed vs. Weight')
+                plt.grid(True)
+                
+                # Add trend line and equation
+                fit_speed = np.polyfit(valid_weights_speed, valid_speeds, 1)
+                fit_line_speed = np.poly1d(fit_speed)
+                plt.plot(valid_weights_speed, fit_line_speed(valid_weights_speed), 'c--')
+                
+                equation_speed = f"y = {fit_speed[0]:.4f}x + {fit_speed[1]:.2f}"
+                plt.text(min(valid_weights_speed), min(valid_speeds), equation_speed, color='c')
         
         plt.tight_layout()
         

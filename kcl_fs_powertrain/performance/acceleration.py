@@ -131,17 +131,14 @@ class AccelerationSimulator:
         # For simple acceleration simulations, leverage the vehicle's built-in method
         if not use_launch_control and not optimized_shifts:
             # Use the vehicle's standard method
-            return self.vehicle.simulate_acceleration_run(
+            result = self.vehicle.simulate_acceleration_run(
                 distance=self.distance,
                 max_time=self.max_time,
                 dt=self.time_step
             )
-        
-        # Check if we have cached results
-        cache_key = f"accel_{use_launch_control}_{optimized_shifts}"
-        if cache_key in self.results_cache:
-            logger.info("Using cached acceleration results")
-            return self.results_cache[cache_key]
+            # Cache the result with mass-specific key
+            self.results_cache[cache_key] = result
+            return result
         
         # Reset vehicle state
         self.vehicle.current_speed = 0.0
@@ -306,7 +303,7 @@ class AccelerationSimulator:
             'used_optimized_shifts': optimized_shifts
         }
         
-        # Cache results
+        # Cache results with mass-specific key
         self.results_cache[cache_key] = results
         
         logger.info(f"Acceleration simulation completed: time={finish_time:.2f}s, speed={finish_speed*2.23694:.1f}mph")
