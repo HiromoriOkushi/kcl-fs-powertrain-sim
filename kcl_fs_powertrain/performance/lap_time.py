@@ -387,6 +387,18 @@ class LapTimeSimulator:
         distances = self.track_data['distance']
         curvature = self.track_data['curvature']
         
+        # Calculate track length - add this before using track_length
+        if 'length' in self.track_data:
+            track_length = self.track_data['length']
+        elif len(distances) > 0:
+            track_length = distances[-1]  # Use the last distance point
+        else:
+            # Fallback - calculate from points
+            points = self.track_data['points']
+            track_length = 0
+            for i in range(1, len(points)):
+                track_length += np.linalg.norm(points[i] - points[i-1])
+        
         # Reset vehicle state
         self.vehicle.current_speed = 0.0
         self.vehicle.current_position = 0.0
@@ -474,9 +486,9 @@ class LapTimeSimulator:
                 acceleration_points[current_dist_idx] = accel
             
             # Calculate lateral acceleration based on curvature
-            curve = curvature[current_dist_idx]
-            if abs(curve) > 1e-6:
-                lateral_accel = next_speed**2 * abs(curve)
+            current_curvature = curvature[current_dist_idx]
+            if abs(current_curvature) > 1e-6:
+                lateral_accel = next_speed**2 * abs(current_curvature)
                 lateral_g = lateral_accel / 9.81
             else:
                 lateral_g = 0.0
@@ -540,6 +552,23 @@ class LapTimeSimulator:
                 else:  # Overheating
                     self.vehicle.engine.thermal_factor = 0.65
                     thermal_limited = True
+                
+                # Store thermal data
+                engine_temp_points[current_dist_idx + 1] = self.vehicle.engine.engine_temperature
+                
+                # Store coolant and oil temperatures if available
+                if hasattr(self.vehicle.engine, 'coolant_temperature'):
+                    coolant_temp_points[current_dist_idx + 1] = self.vehicle.engine.coolant_temperature
+                else:
+                    coolant_temp_points[current_dist_idx + 1] = self.vehicle.engine.engine_temperature - 5.0  # Estimate
+                    
+                if hasattr(self.vehicle.engine, 'oil_temperature'):
+                    oil_temp_points[current_dist_idx + 1] = self.vehicle.engine.oil_temperature
+                else:
+                    oil_temp_points[current_dist_idx + 1] = self.vehicle.engine.engine_temperature - 10.0  # Estimate
+                    
+                # Store power factor
+                power_factor_points[current_dist_idx + 1] = self.vehicle.engine.thermal_factor
             
             # Move to next point
             current_time = next_time
@@ -551,6 +580,9 @@ class LapTimeSimulator:
         
         # Calculate sector times
         self.calculate_sector_times()
+        
+        # Initialize thermal_limited flag
+        thermal_limited = False
         
         # Prepare results dictionary
         results = {
@@ -572,6 +604,7 @@ class LapTimeSimulator:
             results['coolant_temp'] = coolant_temp_points
             results['oil_temp'] = oil_temp_points
             results['power_factor'] = power_factor_points
+            results['thermal_limited'] = thermal_limited
         
         logger.info(f"Lap simulation completed - Lap time: {self.lap_time:.3f}s")
         
