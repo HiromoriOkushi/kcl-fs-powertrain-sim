@@ -10,7 +10,7 @@ from scipy.interpolate import interp1d
 from typing import Dict, List, Tuple, Optional
 from ..track_generator.enums import SimType
 from ..track_generator.generator import FSTrackGenerator
-from ..utils.track_utils import preprocess_track_points
+from ..utils.track_utils import preprocess_track_points, ensure_unique_values
 
 logger = logging.getLogger("Track_Integration")
 
