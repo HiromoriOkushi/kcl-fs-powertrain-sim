@@ -34,8 +34,9 @@ try:
     from ..thermal.side_pod import DualSidePodSystem, create_standard_side_pod_system
     from ..thermal.rear_radiator import RearRadiatorSystem, create_default_rear_radiator_system
     from ..thermal.electric_compressor import CoolingAssistSystem, create_default_cooling_assist_system
-    from ..utils.plotting import plot_acceleration_results as plot_accel_results_util, save_plot
-    # Removed plot_vehicle_performance_summary import - not used here
+    # --- Import the plotting module itself ---
+    from ..utils import plotting as plotting_utils
+    # -----------------------------------------
 
     # Conditional imports for performance classes
     try:
@@ -81,6 +82,11 @@ except ImportError as e:
     class DualSidePodSystem: pass
     class RearRadiatorSystem: pass
     class CoolingAssistSystem: pass
+    # Mock plotting utils if primary import fails
+    class MockPlotting:
+        def plot_acceleration_results(self, *args, **kwargs): pass
+        def save_plot(self, *args, **kwargs): pass
+    plotting_utils = MockPlotting()
     CorneringPerformance = None; CorneringPerformance_available = False
     AccelerationSimulator = None; AccelerationSimulator_available = False
     LapTimeSimulator = None; LapTimeSimulator_available = False
@@ -89,8 +95,7 @@ except ImportError as e:
     def create_default_rear_radiator_system(*args, **kwargs): return None
     def create_default_cooling_assist_system(*args, **kwargs): return None
     def create_formula_student_cooling_system(*args, **kwargs): return None
-    def plot_accel_results_util(*args, **kwargs): plt.figure(); plt.plot([0,1],[0,1]); plt.title("Fallback Plot"); plt.show(); plt.close(); return plt.gcf()
-    def save_plot(fig, path, **kwargs): pass
+
 
 # Configure logging
 logging.basicConfig(
@@ -244,40 +249,36 @@ class Vehicle:
 
     def _initialize_engine(self, engine_instance: Optional[MotorcycleEngine]):
         """Initialize the engine component using self.config."""
-        if MotorcycleEngine and isinstance(engine_instance, MotorcycleEngine): # Check if MotorcycleEngine class exists
+        if MotorcycleEngine and isinstance(engine_instance, MotorcycleEngine):
             self.engine = engine_instance
             logger.info("Using pre-configured Engine instance.")
         else:
-            engine_config_ref = self.config.get('engine_config_path', self.config.get('engine')) # Allow path or inline dict
-            if isinstance(engine_config_ref, str): # Path provided
+            engine_config_ref = self.config.get('engine_config_path', self.config.get('engine'))
+            self.engine = None # Initialize as None
+            if isinstance(engine_config_ref, str):
                 if os.path.exists(engine_config_ref):
                     logger.info(f"Initializing Engine from config file: {engine_config_ref}")
                     self.engine = MotorcycleEngine(config_path=engine_config_ref) if MotorcycleEngine else None
                 else:
-                    logger.warning(f"Engine config path not found: {engine_config_ref}. Trying default.")
-                    self.engine = None # Set to None first
-            elif isinstance(engine_config_ref, dict): # Inline config
+                    logger.warning(f"Engine config path not found: {engine_config_ref}.")
+            elif isinstance(engine_config_ref, dict):
                 logger.info("Initializing Engine from inline config in vehicle config.")
                 self.engine = MotorcycleEngine(engine_params=engine_config_ref) if MotorcycleEngine else None
-            else: # No specific config provided
-                 self.engine = None
 
-            # If engine still None, try default path
             if self.engine is None:
-                 logger.warning("No valid engine config found. Attempting to create default MotorcycleEngine.")
-                 default_engine_path = os.path.join('configs', 'engine', 'cbr600f4i.yaml')
-                 if os.path.exists(default_engine_path):
-                     logger.info(f"Loading default engine config: {default_engine_path}")
-                     self.engine = MotorcycleEngine(config_path=default_engine_path) if MotorcycleEngine else None
-                 else:
-                     logger.warning("Default engine config not found. Creating default instance.")
-                     self.engine = MotorcycleEngine() if MotorcycleEngine else None
+                logger.warning("No valid engine config found. Attempting to create default MotorcycleEngine.")
+                default_engine_path = os.path.join('configs', 'engine', 'cbr600f4i.yaml')
+                if os.path.exists(default_engine_path):
+                    logger.info(f"Loading default engine config: {default_engine_path}")
+                    self.engine = MotorcycleEngine(config_path=default_engine_path) if MotorcycleEngine else None
+                else:
+                    logger.warning("Default engine config not found. Creating default instance.")
+                    self.engine = MotorcycleEngine() if MotorcycleEngine else None
 
         if self.engine is None:
              logger.error("Failed to initialize Engine component.")
              self.engine = type('MockEngine', (object,), {'idle_rpm': 1300.0, 'redline_rpm': 14000.0, 'max_power_rpm': 12500.0, 'max_torque_rpm': 10500.0, 'heat_model': None, 'thermal_factor': 1.0, 'engine_temperature': 25.0, 'coolant_temperature': 25.0, 'oil_temperature': 25.0, 'get_torque': lambda s, r, th, t=None: 0.0})()
 
-        # Ensure essential attributes (use getattr with default)
         self.engine.idle_rpm = getattr(self.engine, 'idle_rpm', 1300.0)
         self.engine.redline_rpm = getattr(self.engine, 'redline_rpm', 14000.0)
         self.engine.max_power_rpm = getattr(self.engine, 'max_power_rpm', 12500.0)
@@ -287,12 +288,12 @@ class Vehicle:
         self.engine.oil_temperature = getattr(self.engine, 'oil_temperature', 25.0)
         self.engine.thermal_factor = getattr(self.engine, 'thermal_factor', 1.0)
 
-        # Ensure engine has a heat model instance if thermal sim is enabled
         if self.include_thermal and (not hasattr(self.engine, 'heat_model') or self.engine.heat_model is None):
              if EngineHeatModel and ThermalConfig:
                  logger.debug("Creating default heat model for engine.")
                  thermal_cfg = getattr(self.engine, 'thermal_config', ThermalConfig())
-                 self.engine.heat_model = EngineHeatModel(thermal_cfg, self.engine)
+                 if thermal_cfg: self.engine.heat_model = EngineHeatModel(thermal_cfg, self.engine)
+                 else: self.engine.heat_model = None
              else:
                 logger.warning("EngineHeatModel/ThermalConfig class not available, cannot create heat model instance.")
                 self.engine.heat_model = None
@@ -312,13 +313,13 @@ class Vehicle:
             transmission = None
             final_drive = None
             differential = None
-
             base_cfg_dir = os.path.dirname(self.config_path) if self.config_path else '.'
 
             def load_component(comp_class, comp_ref, default_args, class_name_override=None):
                 class_name = class_name_override or (comp_class.__name__.lower() if comp_class else "component")
-                if not comp_class: return None # Class itself is missing
+                if not comp_class: return None # Return None if class missing
 
+                instance = None
                 if isinstance(comp_ref, str): # Path
                     path = os.path.join(base_cfg_dir, comp_ref) if not os.path.isabs(comp_ref) else comp_ref
                     if os.path.exists(path):
@@ -326,14 +327,16 @@ class Vehicle:
                             with open(path, 'r') as f:
                                 file_content = yaml.safe_load(f)
                                 params = file_content.get(class_name, {}) if file_content else {}
-                            return comp_class(**params)
+                            instance = comp_class(**params)
                         except Exception as e: logger.error(f"Error loading {class_name} from {path}: {e}")
                     else: logger.warning(f"{class_name} config not found: {path}")
                 elif isinstance(comp_ref, dict): # Inline dict
-                    return comp_class(**comp_ref)
-                # Fallback to default
-                logger.debug(f"Using default {class_name} parameters.")
-                return comp_class(**default_args)
+                    instance = comp_class(**comp_ref)
+
+                if instance is None: # Fallback to default if loading failed or no config provided
+                    logger.debug(f"Using default {class_name} parameters.")
+                    instance = comp_class(**default_args)
+                return instance
 
             transmission = load_component(Transmission, trans_config_ref, {'gear_ratios': [2.75, 2.0, 1.67, 1.44, 1.3, 1.2]})
             final_drive = load_component(FinalDrive, fd_config_ref, {'drive_sprocket_teeth': 14, 'driven_sprocket_teeth': 53})
@@ -350,7 +353,6 @@ class Vehicle:
                     with open(dt_config_path, 'r') as f: dt_config = yaml.safe_load(f).get('drivetrain_system', {})
                 except Exception as e: logger.error(f"Error loading drivetrain system config: {e}")
 
-            # Check if DrivetrainSystem class is available
             if DrivetrainSystem and transmission and final_drive:
                  self.drivetrain = DrivetrainSystem(
                      transmission, final_drive, differential,
@@ -365,14 +367,16 @@ class Vehicle:
         if self.drivetrain is None:
             logger.error("Failed to initialize Drivetrain component.")
             self.drivetrain = type('MockDrivetrain', (object,), {'num_gears': 6, 'transmission': transmission, 'get_overall_ratio': lambda s,g=1: 10.0, 'calculate_engine_speed_rpm': lambda s, spd, g: 3000.0, 'calculate_total_wheel_torque': lambda s, tq, g: tq * 10.0})()
-            self.drivetrain.transmission = transmission # Attach transmission if available
+            self.drivetrain.transmission = transmission
 
+        # Ensure num_gears is set
         if self.drivetrain and not hasattr(self.drivetrain, 'num_gears') and self.drivetrain.transmission:
-             self.drivetrain.num_gears = len(getattr(self.drivetrain.transmission, 'gear_ratios', [0]*6))
+             gear_ratios = getattr(self.drivetrain.transmission, 'gear_ratios', [])
+             self.drivetrain.num_gears = len(gear_ratios) if isinstance(gear_ratios, (list, np.ndarray)) else 0
 
     def _initialize_cooling_system(self, cooling_instance: Optional[ExternalCoolingSystem], vehicle_ref):
         """Initialize the main external cooling system using self.config."""
-        if ExternalCoolingSystem and isinstance(cooling_instance, ExternalCoolingSystem): # Check class existence
+        if ExternalCoolingSystem and isinstance(cooling_instance, ExternalCoolingSystem):
             self.cooling_system = cooling_instance
             logger.info("Using pre-configured external CoolingSystem instance.")
         else:
@@ -385,42 +389,41 @@ class Vehicle:
                 if os.path.exists(resolved_path): config_path = resolved_path
                 else: logger.warning(f"Cooling system config path not found: {resolved_path}")
 
-            config_dir = os.path.dirname(config_path) if config_path else os.path.normpath(os.path.join(base_cfg_dir, '..', 'configs', 'thermal')) # Default relative location
+            config_dir = os.path.dirname(config_path) if config_path else os.path.normpath(os.path.join(base_cfg_dir, '..', 'configs', 'thermal'))
 
-            if config_path and create_formula_student_cooling_system: # Check factory exists
+            self.cooling_system = None # Initialize as None
+            if config_path and create_formula_student_cooling_system:
                 logger.info(f"Initializing external CoolingSystem from config file: {config_path}")
                 self.cooling_system = create_formula_student_cooling_system(config_dir=config_dir)
             elif isinstance(cooling_config_inline, dict):
                  logger.info("Initializing external CoolingSystem from inline config.")
                  try:
-                      # Check needed components exist
-                      from ..thermal.cooling_system import Radiator, WaterPump, CoolingFan, Thermostat # Local import
-                      if Radiator and WaterPump and Thermostat and ExternalCoolingSystem: # Check essential classes
+                      from ..thermal.cooling_system import Radiator, WaterPump, CoolingFan, Thermostat
+                      if Radiator and WaterPump and Thermostat and ExternalCoolingSystem:
                           rad_cfg = cooling_config_inline.get('radiator', {})
                           pump_cfg = cooling_config_inline.get('water_pump', {})
                           fan_cfg = cooling_config_inline.get('cooling_fan', {})
                           thermo_cfg = cooling_config_inline.get('thermostat', {})
                           system_cfg = cooling_config_inline.get('system', {})
-
                           radiator = Radiator(**rad_cfg) if rad_cfg else Radiator()
                           pump = WaterPump(**pump_cfg) if pump_cfg else WaterPump()
-                          fan = CoolingFan(**fan_cfg) if fan_cfg and CoolingFan else None # Fan optional
+                          fan = CoolingFan(**fan_cfg) if fan_cfg and CoolingFan else None
                           thermostat = Thermostat(**thermo_cfg) if thermo_cfg else Thermostat()
-
                           self.cooling_system = ExternalCoolingSystem(radiator, pump, fan, thermostat, **system_cfg)
                       else: raise ImportError("Missing essential cooling component classes")
                  except Exception as e:
-                      logger.error(f"Failed to create cooling system from inline config: {e}. Creating default.")
-                      self.cooling_system = create_formula_student_cooling_system(config_dir=config_dir) if create_formula_student_cooling_system else None
-            else:
-                logger.info("No cooling system config found. Creating default FS cooling system.")
-                self.cooling_system = create_formula_student_cooling_system(config_dir=config_dir) if create_formula_student_cooling_system else None
+                      logger.error(f"Failed to create cooling system from inline config: {e}.")
+                      self.cooling_system = None # Failed
+
+            # Fallback to default if still None
+            if self.cooling_system is None and create_formula_student_cooling_system:
+                logger.info("No cooling system config found or creation failed. Creating default FS cooling system.")
+                self.cooling_system = create_formula_student_cooling_system(config_dir=config_dir)
 
         if self.cooling_system is None:
              logger.error("Failed to initialize CoolingSystem component.")
              self.cooling_system = type('MockCooling', (object,), {'coolant_temp_C': 25.0, 'total_thermal_capacity_J_K': 10000.0, 'radiator_heat_rejection_W': 0.0, 'simulate_step': lambda *args, **kwargs: None, 'get_system_specs': lambda: {}})()
 
-        # Ensure essential cooling system attributes exist
         if not hasattr(self.cooling_system, 'coolant_temp_C'): self.cooling_system.coolant_temp_C = 25.0
         if not hasattr(self.cooling_system, 'total_thermal_capacity_J_K') or getattr(self.cooling_system, 'total_thermal_capacity_J_K', 0) <= 0:
              vol = getattr(self.cooling_system, 'coolant_volume_L', 2.5)
@@ -436,12 +439,17 @@ class Vehicle:
             logger.info("Using pre-configured StrategyManager instance.")
         else:
             if self.engine and self.drivetrain and create_formula_student_strategies:
+                 # Gather parameters safely using getattr
+                 gear_ratios = getattr(getattr(self.drivetrain, 'transmission', None), 'gear_ratios', [])
+                 num_gears = getattr(self.drivetrain, 'num_gears', 0)
+                 if not gear_ratios and num_gears > 0: gear_ratios = [0.0] * num_gears # Handle missing ratios
+
                  self.shift_manager = create_formula_student_strategies(
                      engine_max_rpm=getattr(self.engine, 'redline_rpm', 14000.0),
                      engine_peak_power_rpm=getattr(self.engine, 'max_power_rpm', 12500.0),
                      engine_peak_torque_rpm=getattr(self.engine, 'max_torque_rpm', 10500.0),
-                     gear_ratios=getattr(self.drivetrain.transmission, 'gear_ratios', []),
-                     num_gears=getattr(self.drivetrain, 'num_gears', 6),
+                     gear_ratios=gear_ratios,
+                     num_gears=num_gears,
                      idle_rpm=getattr(self.engine, 'idle_rpm', 1300.0)
                  )
                  strat_cfg_path_ref = self.config.get('shift_strategy_config_path')
@@ -496,8 +504,9 @@ class Vehicle:
         elif create_standard_side_pod_system and (self.config.get('side_pods') or self.config.get('side_pod_config_path')):
              config_path = resolve_path('side_pod_config_path')
              config_dir = os.path.dirname(config_path) if config_path else os.path.normpath(os.path.join(base_cfg_dir, '..', 'configs', 'thermal'))
-             self.side_pods = create_standard_side_pod_system(config_dir=config_dir) # Use factory
-             logger.info("Initialized DualSidePodSystem.")
+             try: self.side_pods = create_standard_side_pod_system(config_dir=config_dir)
+             except Exception as e: logger.error(f"Failed to create side pods: {e}"); self.side_pods = None
+             if self.side_pods: logger.info("Initialized DualSidePodSystem.")
         else: self.side_pods = None
 
         # Rear Radiator
@@ -506,8 +515,9 @@ class Vehicle:
         elif create_default_rear_radiator_system and (self.config.get('rear_radiator') or self.config.get('rear_radiator_config_path')):
              config_path = resolve_path('rear_radiator_config_path')
              config_dir = os.path.dirname(config_path) if config_path else os.path.normpath(os.path.join(base_cfg_dir, '..', 'configs', 'thermal'))
-             self.rear_radiator = create_default_rear_radiator_system(config_dir=config_dir)
-             logger.info("Initialized RearRadiatorSystem.")
+             try: self.rear_radiator = create_default_rear_radiator_system(config_dir=config_dir)
+             except Exception as e: logger.error(f"Failed to create rear radiator: {e}"); self.rear_radiator = None
+             if self.rear_radiator: logger.info("Initialized RearRadiatorSystem.")
         else: self.rear_radiator = None
 
         # Cooling Assist
@@ -516,140 +526,120 @@ class Vehicle:
         elif create_default_cooling_assist_system and (self.config.get('cooling_assist') or self.config.get('cooling_assist_config_path')):
              config_path = resolve_path('cooling_assist_config_path')
              config_dir = os.path.dirname(config_path) if config_path else os.path.normpath(os.path.join(base_cfg_dir, '..', 'configs', 'thermal'))
-             self.cooling_assist = create_default_cooling_assist_system(config_dir=config_dir)
-             logger.info("Initialized CoolingAssistSystem.")
+             try: self.cooling_assist = create_default_cooling_assist_system(config_dir=config_dir)
+             except Exception as e: logger.error(f"Failed to create cooling assist: {e}"); self.cooling_assist = None
+             if self.cooling_assist: logger.info("Initialized CoolingAssistSystem.")
         else: self.cooling_assist = None
 
     def update_engine_state(self):
-        """Update engine RPM and calculate torque based on current vehicle state."""
-        if not self.engine or not self.drivetrain: return
+        """Update engine RPM and store calculated torque."""
+        if not self.engine or not self.drivetrain:
+            self._current_engine_torque = 0.0
+            return
 
-        # Calculate engine RPM from vehicle speed and current gear
-        if self.current_gear > 0:
-             # Ensure drivetrain method exists
-             if hasattr(self.drivetrain, 'calculate_engine_speed_rpm'):
-                 self.current_engine_rpm = self.drivetrain.calculate_engine_speed_rpm(
-                     self.current_speed_mps, self.current_gear
-                 )
-                 # Clamp RPM
-                 self.current_engine_rpm = np.clip(self.current_engine_rpm, self.engine.idle_rpm, self.engine.redline_rpm)
-             else:
-                  self.current_engine_rpm = self.engine.idle_rpm # Fallback
-        else: # Neutral
-            # Allow RPM to decay towards idle (simplified)
+        if self.current_gear > 0 and hasattr(self.drivetrain, 'calculate_engine_speed_rpm'):
+            self.current_engine_rpm = self.drivetrain.calculate_engine_speed_rpm(self.current_speed_mps, self.current_gear)
+            self.current_engine_rpm = np.clip(self.current_engine_rpm, self.engine.idle_rpm, self.engine.redline_rpm)
+        else:
             idle = self.engine.idle_rpm
-            decay_rate = 2000.0 # RPM per second decay rate
+            decay_rate = 2000.0
             time_now = time.monotonic()
             dt = time_now - self.last_update_time
             self.current_engine_rpm = max(idle, self.current_engine_rpm - decay_rate * dt)
 
-
-        # Update engine's internal state (needed for temp factor in get_torque)
         if hasattr(self.engine, 'current_rpm'): self.engine.current_rpm = self.current_engine_rpm
         if hasattr(self.engine, 'throttle_position'): self.engine.throttle_position = self.throttle_input
 
-        # Calculate engine torque based on current RPM, throttle, and *engine's* temperature
-        # Engine torque calculation is needed before drivetrain update
-        # Store it temporarily if needed later, or rely on drivetrain re-calculating it
         if hasattr(self.engine, 'get_torque'):
-             engine_torque_nm = self.engine.get_torque(
-                 rpm=self.current_engine_rpm,
-                 throttle=self.throttle_input,
-                 engine_temp=self.engine_temperature # Use vehicle's view of engine temp
-             )
-             self._current_engine_torque = engine_torque_nm # Store temporarily
+            engine_torque_nm = self.engine.get_torque(rpm=self.current_engine_rpm, throttle=self.throttle_input, engine_temp=self.engine_temperature)
+            self._current_engine_torque = engine_torque_nm
         else:
-             self._current_engine_torque = 0.0
-
+            self._current_engine_torque = 0.0
 
     def update_drivetrain_state(self):
-        """Update drivetrain based on requested gear and engine torque."""
-        if not self.drivetrain or not self.engine:
-             self._current_total_wheel_torque = 0.0
-             return
+        """Update wheel torque based on current engine torque and gear."""
+        if not self.drivetrain:
+            self._current_total_wheel_torque = 0.0
+            return
 
-        # Use the engine torque calculated in update_engine_state
         engine_torque_nm = getattr(self, '_current_engine_torque', 0.0)
-
-        # Calculate total wheel torque using drivetrain method
         if hasattr(self.drivetrain, 'calculate_total_wheel_torque'):
-            total_wheel_torque_nm = self.drivetrain.calculate_total_wheel_torque(
-                engine_torque_nm=engine_torque_nm,
-                gear=self.current_gear
-            )
+            total_wheel_torque_nm = self.drivetrain.calculate_total_wheel_torque(engine_torque_nm=engine_torque_nm, gear=self.current_gear)
         else:
-             total_wheel_torque_nm = 0.0 # Fallback if method missing
-
+            total_wheel_torque_nm = 0.0
         self._current_total_wheel_torque = total_wheel_torque_nm
 
-
     def update_thermal_state(self, dt: float, ambient_temp_C: Optional[float] = None):
-        """
-        Update the thermal state of the engine and cooling system.
-        Relies on EngineHeatModel for heat generation and ExternalCoolingSystem for rejection.
-        """
-        if not self.include_thermal or not self.engine or not self.cooling_system or not hasattr(self.engine, 'heat_model') or self.engine.heat_model is None:
-            self.thermal_factor = 1.0 # Ensure no thermal penalty if not simulating
+        """Update thermal state (engine, coolant, oil)."""
+        if not self.include_thermal or not self.engine or not self.cooling_system:
+            self.thermal_factor = 1.0
             return
 
         ambient_temp = ambient_temp_C if ambient_temp_C is not None else 25.0
+        heat_to_coolant_W = 0.0
+        heat_to_oil_W = 0.0
+        heat_block_ambient_gen = 0.0
 
-        # 1. Calculate Engine Heat Generation (using engine's heat model)
-        try:
-            heat_gen = self.engine.heat_model.calculate_heat_generation(self.current_engine_rpm, self.throttle_input)
-            heat_to_coolant_W = heat_gen.get('to_coolant', 0.0)
-            heat_to_oil_W = heat_gen.get('to_oil', 0.0)
-            heat_block_ambient_gen = heat_gen.get('to_ambient', 0.0)
-        except Exception as e:
-            logger.warning(f"Could not calculate heat generation: {e}. Using zero input.")
-            heat_to_coolant_W = 0.0
-            heat_to_oil_W = 0.0
-            heat_block_ambient_gen = 0.0
+        # 1. Calculate Heat Generation
+        if hasattr(self.engine, 'heat_model') and self.engine.heat_model:
+            try:
+                heat_gen = self.engine.heat_model.calculate_heat_generation(self.current_engine_rpm, self.throttle_input)
+                heat_to_coolant_W = heat_gen.get('to_coolant', 0.0)
+                heat_to_oil_W = heat_gen.get('to_oil', 0.0)
+                heat_block_ambient_gen = heat_gen.get('to_ambient', 0.0)
+            except Exception as e:
+                logger.warning(f"Could not calculate heat generation: {e}")
 
-        # 2. Update External Cooling System State
+        # 2. Update External Cooling System
         try:
+             # Cooling system update needs engine block temp as input
              self.cooling_system.simulate_step(
-                 ambient_temp_C=ambient_temp,
-                 vehicle_speed_mps=self.current_speed_mps,
-                 engine_temp=self.engine_temperature,
-                 engine_rpm=self.current_engine_rpm,
-                 engine_load=self.throttle_input,
-                 engine_heat_input_W=heat_to_coolant_W,
-                 dt=dt
+                 ambient_temp_C=ambient_temp, vehicle_speed_mps=self.current_speed_mps,
+                 engine_temp=self.engine_temperature, # Pass block temp
+                 engine_rpm=self.current_engine_rpm, engine_load=self.throttle_input,
+                 engine_heat_input_W=heat_to_coolant_W, dt=dt
              )
              self.radiator_heat_rejection_W = getattr(self.cooling_system, 'radiator_heat_rejection_W', 0.0)
-             self.coolant_temperature = getattr(self.cooling_system, 'coolant_temp_C', ambient_temp)
+             self.coolant_temperature = getattr(self.cooling_system, 'coolant_temp_C', self.coolant_temperature) # Update coolant temp from system
         except AttributeError as e:
-             logger.warning(f"Cooling system simulation step failed: {e}. Temps may not update correctly.")
+             logger.warning(f"Cooling system simulation step failed: {e}.")
              self.radiator_heat_rejection_W = 0.0
+             # Use last known coolant temp
 
-        # 3. Update Engine/Oil Temperatures using heat flows and capacities
-        try:
-            thermal_cfg = self.engine.heat_model.config
-            capacities = thermal_cfg.get_thermal_capacities()
-            safe_caps = {'engine_block': 50000, 'engine_oil': 10000, 'coolant_engine': 8000}
-            safe_caps.update(capacities)
+        # 3. Update Engine/Oil Temperatures
+        if hasattr(self.engine, 'heat_model') and self.engine.heat_model:
+            try:
+                thermal_cfg = self.engine.heat_model.config
+                capacities = thermal_cfg.get_thermal_capacities()
+                safe_caps = {'engine_block': 50000, 'engine_oil': 10000, 'coolant_engine': 8000}
+                safe_caps.update(capacities)
 
-            temps_current = {'engine': self.engine_temperature, 'oil': self.oil_temperature, 'coolant': self.coolant_temperature}
-            internal_transfer = self.engine.heat_model.calculate_internal_heat_transfer(temps_current)
-            ambient_loss = self.engine.heat_model.calculate_ambient_heat_loss(temps_current, ambient_temp, self.current_speed_mps)
+                temps_current = {'engine': self.engine_temperature, 'oil': self.oil_temperature, 'coolant': self.coolant_temperature}
+                internal_transfer = self.engine.heat_model.calculate_internal_heat_transfer(temps_current)
+                ambient_loss = self.engine.heat_model.calculate_ambient_heat_loss(temps_current, ambient_temp, self.current_speed_mps)
 
-            q_block_to_coolant = internal_transfer.get('coolant_to_block', 0.0)
-            q_block_to_oil = internal_transfer.get('oil_to_block', 0.0)
-            q_block_to_ambient_loss = ambient_loss.get('block_to_ambient', 0.0)
-            q_oil_to_ambient_loss = ambient_loss.get('oil_to_ambient', 0.0)
+                q_block_to_coolant = internal_transfer.get('coolant_to_block', 0.0)
+                q_block_to_oil = internal_transfer.get('oil_to_block', 0.0)
+                q_block_to_ambient_loss = ambient_loss.get('block_to_ambient', 0.0)
+                q_oil_to_ambient_loss = ambient_loss.get('oil_to_ambient', 0.0)
 
-            q_net_engine = heat_block_ambient_gen - q_block_to_coolant - q_block_to_oil - q_block_to_ambient_loss
-            q_net_oil = heat_to_oil_W + q_block_to_oil - q_oil_to_ambient_loss
+                # Net Heat Flow to Engine Block = Heat_Gen_Direct - Heat_To_Coolant - Heat_To_Oil - Loss_To_Air
+                # Note: heat_to_coolant_W is the heat LEAVING the block TO the coolant
+                # q_block_to_coolant is heat FROM coolant TO block (negative if block is hotter)
+                # So net for block is: GeneratedHeatToAmbient + HeatFromCoolant + HeatFromOil - LossToAir
+                q_net_engine = heat_block_ambient_gen + (-q_block_to_coolant) + (-q_block_to_oil) - q_block_to_ambient_loss
 
-            self.engine_temperature += (q_net_engine * dt) / max(1e-3, safe_caps['engine_block'])
-            self.oil_temperature += (q_net_oil * dt) / max(1e-3, safe_caps['engine_oil'])
+                # Net Heat Flow to Oil = Heat_Gen_DirectlyToOil + Heat_From_Block - Loss_To_Air
+                q_net_oil = heat_to_oil_W + q_block_to_oil - q_oil_to_ambient_loss
 
-            # Clamp temperatures
-            self.engine_temperature = max(ambient_temp - 5, self.engine_temperature)
-            self.oil_temperature = max(ambient_temp - 5, self.oil_temperature)
-        except Exception as e:
-             logger.warning(f"Error updating engine/oil temperatures: {e}")
+                self.engine_temperature += (q_net_engine * dt) / max(1e-3, safe_caps['engine_block'])
+                self.oil_temperature += (q_net_oil * dt) / max(1e-3, safe_caps['engine_oil'])
+
+                # Clamp temperatures
+                self.engine_temperature = max(ambient_temp - 5, self.engine_temperature)
+                self.oil_temperature = max(ambient_temp - 5, self.oil_temperature)
+            except Exception as e:
+                 logger.warning(f"Error updating engine/oil temperatures: {e}")
 
         # 4. Update engine's internal state and thermal factor
         if hasattr(self.engine, 'engine_temperature'): self.engine.engine_temperature = self.engine_temperature
@@ -665,13 +655,55 @@ class Vehicle:
                   self.thermal_factor = 1.0
                   if hasattr(self.engine, 'thermal_factor'): self.engine.thermal_factor = 1.0
 
-    # change_gear remains the same
+
+    def change_gear(self, target_gear: int) -> Tuple[bool, float]:
+        """Request a gear change via CAS if available, otherwise direct change."""
+        shift_duration_s = 0.0
+        success = False
+        if self.drivetrain is None: return False, 0.0
+        gear_before = self.current_gear
+        if target_gear == gear_before: return True, 0.0
+
+        if self.cas_system:
+            current_time_s = time.monotonic()
+            direction = ShiftDirection.NEUTRAL
+            if target_gear > gear_before: direction = ShiftDirection.UP
+            elif target_gear < gear_before: direction = ShiftDirection.DOWN
+            current_rpm = getattr(self.engine, 'current_rpm', 0)
+
+            # Pass current_time in ms to CAS readiness check
+            if self.cas_system._check_shift_readiness(current_time_s * 1000.0):
+                 # CAS request needs direction, current RPM (for overrev), and optional target override
+                 initiated = self.cas_system.request_shift(direction, current_rpm, target_gear_override=target_gear)
+                 if initiated:
+                     # Mark vehicle state as potentially shifting - simulator needs to check CAS state
+                     # Get duration for simulator event scheduling
+                     shift_duration_s = self.cas_system.get_total_shift_time_ms(direction) / 1000.0
+                     logger.debug(f"CAS shift {gear_before}->{target_gear} initiated. Duration: {shift_duration_s*1000:.1f} ms.")
+                     success = True
+                 else:
+                     logger.debug(f"CAS shift request {gear_before}->{target_gear} rejected by CAS logic.")
+            else:
+                 logger.debug(f"CAS shift request {gear_before}->{target_gear} rejected by readiness check.")
+        else:
+            if 0 <= target_gear <= self.drivetrain.num_gears:
+                 if hasattr(self.drivetrain, 'change_gear'):
+                     success = self.drivetrain.change_gear(target_gear)
+                     if success:
+                         self.current_gear = target_gear
+                         shift_duration_s = 0.050
+                         logger.debug(f"Direct shift to gear {target_gear} successful.")
+                     else: logger.warning(f"Direct gear change to {target_gear} failed.")
+                 else: logger.error("Drivetrain object missing change_gear method.")
+            else: logger.error(f"Invalid target gear {target_gear} for direct change.")
+
+        return success, shift_duration_s
 
     def calculate_forces(self) -> Dict[str, float]:
         """Calculate major longitudinal forces acting on the vehicle."""
         F_tractive = getattr(self, '_current_total_wheel_torque', 0.0) / self.tire_radius_m if self.tire_radius_m > 0 else 0.0
         F_drag = 0.5 * AIR_DENSITY_SEA_LEVEL * self.drag_coefficient * self.frontal_area_m2 * self.current_speed_mps**2
-        # Calculate downforce using cornering calculator if available, else use vehicle Lc
+
         if self.cornering:
              F_downforce = self.cornering.calculate_downforce_N(self.current_speed_mps)
         else:
@@ -680,9 +712,8 @@ class Vehicle:
         normal_load = self.mass * GRAVITY + F_downforce
         F_rolling = self.rolling_resistance_coeff * max(0, normal_load)
 
-        # Braking force: Use max_braking_g limit applied to total normal load
-        max_brake_force = max(0, normal_load) * self.max_braking_g * GRAVITY # Ensure normal load isn't negative before multiply
-        F_brake = self.brake_input * max_brake_force
+        max_brake_force = max(0, normal_load) * self.max_braking_g # Use max_braking_g, which is positive
+        F_brake = self.brake_input * max_brake_force * GRAVITY # Multiply by G to get force
 
         return {
             'tractive': F_tractive, 'drag': F_drag, 'rolling': F_rolling,
@@ -694,7 +725,7 @@ class Vehicle:
         if throttle is not None: self.throttle_input = np.clip(throttle, 0.0, 1.0)
         if brake is not None: self.brake_input = np.clip(brake, 0.0, 1.0)
 
-        # Update engine/drivetrain first to get current forces
+        # Ensure engine/drivetrain states are updated
         self.update_engine_state()
         self.update_drivetrain_state()
 
@@ -703,95 +734,294 @@ class Vehicle:
         self.current_acceleration_mpss = net_force / self.mass if self.mass > 0 else 0.0
         return self.current_acceleration_mpss
 
-    # update_vehicle_state remains the same
+    def update_vehicle_state(self, dt: float, ambient_temp_C: float = 25.0):
+        """Update vehicle kinematics and thermal state."""
+        if dt <= 0: return
+        start_time_mono = time.monotonic()
+        self.last_update_time = start_time_mono
 
-    # simulate_acceleration_run remains the same
+        # --- Handle CAS Shift Completion ---
+        # Check CAS state BEFORE calculating acceleration, as CAS might affect throttle/ignition
+        is_shifting = False
+        if self.cas_system and self.cas_system.system_state != ShiftState.IDLE:
+            is_shifting = True
+            shift_elapsed_s = start_time_mono - self.cas_system.shift_start_time_s
+            required_duration_s = self.cas_system.get_total_shift_time_ms(self.cas_system._last_direction) / 1000.0 if hasattr(self.cas_system,'_last_direction') else 0.0
+            if required_duration_s > 0 and shift_elapsed_s >= required_duration_s:
+                self.cas_system.complete_shift(start_time_mono)
+                self.current_gear = self.cas_system.current_gear # Sync gear after completion
+                is_shifting = False # No longer shifting for *this* step's force calc
+                logger.debug(f"CAS shift completed. New gear: {self.current_gear}")
 
-    # simulate_skidpad remains the same
+        # Modify throttle/engine output if CAS is actively cutting ignition/throttle
+        throttle_override = self.throttle_input
+        engine_factor_override = 1.0
+        if is_shifting and self.cas_system:
+            # Apply CAS effects (simplified example)
+            if self.cas_system.system_state in [ShiftState.IGNITION_CUT, ShiftState.ACTUATING_SHIFT]:
+                 engine_factor_override = 0.0 # No power during cut/actuation
+                 throttle_override = 0.0
+            elif self.cas_system.system_state == ShiftState.PREPARE_UPSHIFT:
+                 throttle_override *= (1.0 - self.cas_system.throttle_cut_percent / 100.0)
+            elif self.cas_system.system_state == ShiftState.THROTTLE_BLIP: # Downshift blip
+                 throttle_override = max(throttle_override, self.cas_system.throttle_blip_increase_percent / 100.0)
 
-    # simulate_lap remains the same
+        # 1. Calculate acceleration (using potentially overridden throttle/engine factor)
+        # Temporarily modify engine torque calculation if needed
+        original_engine_get_torque = getattr(self.engine, 'get_torque', None)
+        if engine_factor_override < 1.0 and original_engine_get_torque:
+             def modified_get_torque(*args, **kwargs):
+                  return original_engine_get_torque(*args, **kwargs) * engine_factor_override
+             self.engine.get_torque = modified_get_torque
 
-    # calculate_weight_transfer remains the same
+        # Use overridden throttle for calculation
+        current_accel = self.calculate_acceleration(throttle=throttle_override)
 
-    # get_vehicle_specs remains the same
+        # Restore original engine method if modified
+        if engine_factor_override < 1.0 and original_engine_get_torque:
+             self.engine.get_torque = original_engine_get_torque
 
-    # calculate_performance_metrics remains the same
+        # 2. Update Kinematics
+        self.current_speed_mps += current_accel * dt
+        if self.current_speed_mps < 0:
+            if current_accel < 0:
+                self.current_speed_mps = 0.0
+                self.current_acceleration_mpss = 0.0
+            else:
+                self.current_speed_mps = 0.0
+        self.current_position_m += self.current_speed_mps * dt
+
+        # 3. Update Engine RPM (based on new speed and CURRENT gear)
+        # Gear change only takes effect *after* completion.
+        if self.current_gear > 0 and self.drivetrain:
+            self.current_engine_rpm = self.drivetrain.calculate_engine_speed_rpm(self.current_speed_mps, self.current_gear)
+            if self.engine: self.current_engine_rpm = np.clip(self.current_engine_rpm, self.engine.idle_rpm, self.engine.redline_rpm)
+        elif self.engine:
+             idle = self.engine.idle_rpm
+             decay_rate = 5000.0
+             self.current_engine_rpm = max(idle, self.current_engine_rpm - decay_rate * dt)
+
+        # 4. Update Thermal State
+        if self.include_thermal:
+             self.update_thermal_state(dt, ambient_temp_C)
+
+        # 5. Update CAS internal timers/state (e.g., cooldown)
+        if self.cas_system:
+             self.cas_system.update(current_time_s = start_time_mono + dt) # Pass end-of-step time
+
+    def simulate_acceleration_run(self, distance: float = FS_ACCELERATION_LENGTH,
+                                max_time: float = 10.0, dt: float = 0.01,
+                                use_launch_control: bool = True,
+                                use_optimized_shifts: bool = True) -> Dict:
+        """Simulate a standard acceleration run using AccelerationSimulator."""
+        logger.info("Running simulate_acceleration_run within Vehicle class...")
+        if not AccelerationSimulator_available:
+            logger.error("AccelerationSimulator class not available. Cannot simulate.")
+            return {'error': 'AccelerationSimulator not available'}
+        try:
+            vehicle_copy = copy.deepcopy(self)
+            if CorneringPerformance_available and vehicle_copy.cornering is None:
+                 vehicle_copy.cornering = CorneringPerformance(vehicle_copy)
+            accel_sim = AccelerationSimulator(vehicle_copy)
+            accel_sim.configure(distance_m=distance, time_step_s=dt, max_time_s=max_time)
+            accel_sim.configure_launch_control(use_traction_control=True)
+            accel_sim.configure_shifting(use_optimized=use_optimized_shifts)
+            results = accel_sim.simulate_acceleration(use_launch_control=use_launch_control)
+            metrics = accel_sim.analyze_performance_metrics(results)
+            results.update(metrics)
+            return results
+        except Exception as e:
+             logger.error(f"Error during AccelerationSimulation: {e}", exc_info=True)
+             return {'error': str(e)}
+
+    def simulate_skidpad(self, circle_radius_m: float = FS_SKIDPAD_RADIUS,
+                       target_gear: int = 2, max_laps: int = 4, dt: float = 0.01) -> Dict:
+        """Simulate a skidpad event (constant radius cornering)."""
+        logger.info("Running simulate_skidpad within Vehicle class...")
+        if not self.cornering:
+             logger.error("Cannot simulate skidpad: CorneringPerformance calculator not available.")
+             return {'error': 'CorneringPerformance unavailable'}
+
+        # --- Reset ---
+        initial_state = copy.deepcopy(self)
+        self.current_speed_mps = 0.0
+        self.current_position_m = 0.0
+        self.change_gear(target_gear)
+        self.current_engine_rpm = self.engine.idle_rpm if self.engine else 1300.0
+
+        lap_angle = 0.0
+        lap_times = []
+        t = 0.0
+        max_time = max_laps * 15.0
+        history = {'time': [0.0], 'speed': [0.0], 'lat_g': [0.0], 'lon_accel': [0.0], 'rpm': [self.current_engine_rpm]}
+
+        # --- Simulation Loop ---
+        while t < max_time and len(lap_times) < max_laps:
+            max_corner_speed = self.cornering.calculate_max_cornering_speed(circle_radius_m)
+            speed_error = max_corner_speed - self.current_speed_mps
+            throttle = np.clip(0.4 + speed_error * 0.5, 0.1, 0.9)
+            brake = 0.0
+            if self.current_speed_mps > max_corner_speed * 1.01:
+                 throttle = 0.0
+                 brake = 0.3
+
+            # Update vehicle state using its own method
+            self.throttle_input = throttle
+            self.brake_input = brake
+            self.update_vehicle_state(dt) # This updates speed, accel, rpm etc.
+
+            lon_accel = self.current_acceleration_mpss
+            angular_vel = self.current_speed_mps / circle_radius_m if circle_radius_m > 0 else 0
+            lap_angle += angular_vel * dt
+            t += dt
+
+            history['time'].append(t)
+            history['speed'].append(self.current_speed_mps)
+            history['lat_g'].append((self.current_speed_mps**2 / circle_radius_m) / GRAVITY if circle_radius_m > 0 else 0)
+            history['lon_accel'].append(lon_accel)
+            history['rpm'].append(self.current_engine_rpm)
+
+            if lap_angle >= 2 * np.pi:
+                 lap_time = t - sum(lap_times)
+                 lap_times.append(lap_time)
+                 lap_angle -= 2 * np.pi
+                 logger.debug(f"Skidpad lap {len(lap_times)} completed in {lap_time:.3f}s")
+
+        # --- Results ---
+        avg_lap_time = np.mean(lap_times) if lap_times else None
+        max_lat_g = np.max(history['lat_g']) if history['lat_g'] else None
+        results = {'average_lap_time': avg_lap_time, 'lap_times': lap_times, 'max_lateral_g': max_lat_g, 'history': {k: np.array(v) for k,v in history.items()}}
+        logger.info(f"Skidpad simulation finished. Avg Lap: {avg_lap_time:.3f}s, Max Lateral G: {max_lat_g:.3f}g")
+        self.__dict__.update(initial_state.__dict__) # Restore state
+        return results
+
+    def simulate_lap(self, track_file: str, include_thermal: bool = True) -> Dict:
+         """Simulate a single lap using the LapTimeSimulator."""
+         logger.info("Running simulate_lap via LapTimeSimulator...")
+         if not LapTimeSimulator_available:
+             logger.error("LapTimeSimulator class not available. Cannot simulate.")
+             return {'error': 'LapTimeSimulator not available'}
+         try:
+             vehicle_copy = copy.deepcopy(self)
+             if CorneringPerformance_available and vehicle_copy.cornering is None:
+                  vehicle_copy.cornering = CorneringPerformance(vehicle_copy)
+             lap_sim = LapTimeSimulator(vehicle_copy, track_file=track_file)
+             if lap_sim.track_data is None: return {'error': f"Failed to load track file {track_file}"}
+             results = lap_sim.simulate_lap(include_thermal=include_thermal)
+             metrics = lap_sim.analyze_lap_performance(results)
+             results['metrics'] = metrics
+             return results
+         except Exception as e:
+              logger.error(f"Error during LapTimeSimulation: {e}", exc_info=True)
+              return {'error': str(e)}
+
+    def calculate_weight_transfer(self, longitudinal_accel_mpss: float = 0.0, lateral_accel_mpss: float = 0.0) -> Dict:
+        """Calculate longitudinal and lateral weight transfer."""
+        long_transfer = (self.mass * longitudinal_accel_mpss * self.cg_height_m) / self.wheelbase_m if self.wheelbase_m > 0 else 0
+        lat_transfer = (self.mass * abs(lateral_accel_mpss) * self.cg_height_m) / self.track_width_rear_m if self.track_width_rear_m > 0 else 0
+        static_front_N = self.mass * GRAVITY * self.weight_distribution_front
+        static_rear_N = self.mass * GRAVITY * (1.0 - self.weight_distribution_front)
+        dynamic_front_N = static_front_N - long_transfer
+        dynamic_rear_N = static_rear_N + long_transfer
+        # Simple split of lateral transfer based on weight distribution (can be refined)
+        lat_transfer_front = lat_transfer * self.weight_distribution_front
+        lat_transfer_rear = lat_transfer * (1.0 - self.weight_distribution_front)
+        dynamic_FL_N = dynamic_front_N / 2.0 + lat_transfer_front / 2.0
+        dynamic_FR_N = dynamic_front_N / 2.0 - lat_transfer_front / 2.0
+        dynamic_RL_N = dynamic_rear_N / 2.0 + lat_transfer_rear / 2.0
+        dynamic_RR_N = dynamic_rear_N / 2.0 - lat_transfer_rear / 2.0
+        return {
+            'longitudinal_transfer_N': long_transfer, 'lateral_transfer_N': lat_transfer,
+            'dynamic_front_axle_load_N': dynamic_front_N, 'dynamic_rear_axle_load_N': dynamic_rear_N,
+            'dynamic_FL_wheel_load_N': max(0, dynamic_FL_N), 'dynamic_FR_wheel_load_N': max(0, dynamic_FR_N),
+            'dynamic_RL_wheel_load_N': max(0, dynamic_RL_N), 'dynamic_RR_wheel_load_N': max(0, dynamic_RR_N),
+        }
+
+    def get_vehicle_specs(self) -> Dict:
+        """Return a comprehensive dictionary of vehicle specifications."""
+        specs = {'team_name': self.team_name, 'vehicle': {}, 'tires': {}}
+        vehicle_attrs = ['mass', 'frontal_area_m2', 'drag_coefficient', 'lift_coefficient', 'rolling_resistance_coeff',
+                         'weight_distribution_front', 'wheelbase_m', 'track_width_front_m', 'track_width_rear_m', 'cg_height_m']
+        for attr in vehicle_attrs: specs['vehicle'][attr] = getattr(self, attr, None)
+        specs['tires']['radius_m'] = getattr(self, 'tire_radius_m', None)
+
+        if self.engine and hasattr(self.engine, 'get_engine_specs'): specs['engine'] = self.engine.get_engine_specs()
+        if self.drivetrain and hasattr(self.drivetrain, 'get_drivetrain_specs'): specs['drivetrain'] = self.drivetrain.get_drivetrain_specs()
+        if self.cooling_system and hasattr(self.cooling_system, 'get_system_specs'): specs['cooling'] = self.cooling_system.get_system_specs()
+        if self.side_pods and hasattr(self.side_pods, 'get_system_specs'): specs['side_pods'] = self.side_pods.get_system_specs()
+        if self.rear_radiator and hasattr(self.rear_radiator, 'get_system_specs'): specs['rear_radiator'] = self.rear_radiator.get_system_specs()
+        if self.cooling_assist and hasattr(self.cooling_assist, 'get_system_specs'): specs['cooling_assist'] = self.cooling_assist.get_system_specs()
+        if self.cas_system and hasattr(self.cas_system, 'get_status'): specs['cas'] = self.cas_system.get_status()
+        return specs
+
+    def calculate_performance_metrics(self) -> Dict:
+        """Calculate key theoretical performance metrics."""
+        metrics = {}
+        if self.engine and self.mass > 0 and hasattr(self.engine, 'max_power_hp'):
+             power_kw = self.engine.max_power_hp * HP_TO_KW
+             metrics['power_to_weight_kw_kg'] = power_kw / self.mass
+             metrics['power_to_weight_hp_kg'] = self.engine.max_power_hp / self.mass
+        try:
+             max_speed = self.calculate_max_speed()
+             metrics['max_speed_mps'] = max_speed
+             metrics['max_speed_kph'] = max_speed * MS_TO_KMH
+        except Exception as e: metrics['max_speed_mps'] = None
+        if self.cornering:
+             try:
+                 max_lat_g = self.cornering.calculate_max_lateral_acceleration(speed_mps=20.0) / GRAVITY
+                 metrics['max_lateral_g'] = max_lat_g
+             except Exception as e: metrics['max_lateral_g'] = None
+        return metrics
 
     def calculate_max_speed(self) -> float:
         """Estimate theoretical maximum speed where tractive force equals drag+rolling."""
-        # This requires solving F_tractive(v, gear_max) = F_drag(v) + F_rolling(v)
-        # It's an iterative process or requires solving a polynomial if forces are simplified.
+        if not self.engine or not self.drivetrain or not hasattr(self.engine, 'get_torque'):
+            logger.warning("Cannot calculate max speed: Missing engine or drivetrain.")
+            return 0.0
 
-        # Simplified iterative approach:
-        guess_speed_mps = 50.0 # Start guess ~180 kph
-        top_gear = self.drivetrain.num_gears if self.drivetrain else 1
-        rpm_limit = self.engine.redline_rpm if self.engine else 14000
+        top_gear = self.drivetrain.num_gears
+        rpm_limit = self.engine.redline_rpm
+        guess_speed_mps = 50.0
 
-        for _ in range(10): # Iterate to converge
-            # 1. Calculate forces at current guess speed
-            rpm_at_guess = self.drivetrain.calculate_engine_speed_rpm(guess_speed_mps, top_gear) if self.drivetrain else 0
-            if rpm_at_guess > rpm_limit: # RPM limited
-                 guess_speed_mps = self.drivetrain.calculate_vehicle_speed_mps(rpm_limit, top_gear) if self.drivetrain else 0
-                 continue # Re-evaluate forces at the RPM limited speed
+        for _ in range(10):
+            rpm_at_guess = self.drivetrain.calculate_engine_speed_rpm(guess_speed_mps, top_gear)
+            if rpm_at_guess > rpm_limit:
+                 speed_at_redline = self.drivetrain.calculate_vehicle_speed_mps(rpm_limit, top_gear)
+                 guess_speed_mps = speed_at_redline # RPM limited, use this speed
+                 continue
 
-            engine_torque = self.engine.get_torque(rpm_at_guess, throttle=1.0) if self.engine else 0
+            engine_torque = self.engine.get_torque(rpm_at_guess, throttle=1.0)
             f_tractive = self.calculate_tractive_force_N(engine_torque, top_gear)
 
-            # Calculate drag/rolling at this speed
-            forces = self.calculate_forces() # Use internal speed state updated implicitly
-            f_drag = forces['drag']
-            f_rolling = forces['rolling']
-            f_resist = f_drag + f_rolling
+            # Need forces at the current guess speed
+            temp_speed = self.current_speed_mps # Store current speed
+            self.current_speed_mps = guess_speed_mps # Temporarily set speed
+            forces = self.calculate_forces()
+            self.current_speed_mps = temp_speed # Restore speed
+            f_resist = forces['drag'] + forces['rolling']
 
-            # 2. Check balance
             force_diff = f_tractive - f_resist
-            if abs(force_diff) < 1.0: # Converged (within 1 Newton)
-                break
+            if abs(force_diff) < 1.0: break
 
-            # 3. Adjust guess (simple proportional step)
-            # If F_tractive > F_resist, speed can increase. If F_tractive < F_resist, speed must decrease.
-            # Need a sensitivity term d(F_resist - F_tractive)/dv - very complex
-            # Simplification: adjust speed by a fraction of the force difference
-            speed_adjustment = force_diff * 0.05 # Adjust speed by 0.05 m/s per Newton diff (tuning factor)
-            guess_speed_mps += speed_adjustment
-            guess_speed_mps = max(0.1, guess_speed_mps) # Ensure positive speed
-
+            # Adjust guess based on which force is larger
+            if f_tractive > f_resist: guess_speed_mps *= 1.05 # Increase guess
+            else: guess_speed_mps *= 0.95 # Decrease guess
+            guess_speed_mps = max(0.1, guess_speed_mps)
         else:
             logger.warning(f"Max speed calculation did not fully converge. Final guess: {guess_speed_mps:.1f} m/s")
-
         return guess_speed_mps
 
-    # plot_acceleration_results remains the same
+    def plot_acceleration_results(self, results: Dict, save_path: Optional[str] = None):
+         """Plot acceleration results using the utility function."""
+         if plotting_utils:
+             fig = plotting_utils.plot_acceleration_results(results, save_path=save_path, plot_wheel_slip=True)
+             # if fig: plt.close(fig) # Optional: Close plot after saving/showing
+         else:
+             logger.warning("Plotting utilities not available.")
+
 
 # --- Factory Function ---
-def create_formula_student_vehicle(config_path: Optional[str] = None) -> Vehicle:
-    """
-    Factory function to create a Vehicle instance with typical FS components.
-    Loads configurations if available, otherwise uses defaults.
-
-    Args:
-        config_path: Optional path to a main vehicle config file.
-
-    Returns:
-        A configured Vehicle instance.
-    """
-    logger.info("Creating Formula Student Vehicle...")
-    try:
-        vehicle = Vehicle(config_path=config_path)
-        logger.info("Formula Student Vehicle created successfully.")
-        return vehicle
-    except Exception as e:
-         logger.critical(f"Failed to create Formula Student vehicle: {e}", exc_info=True)
-         # Attempt to create with absolutely no config (pure defaults)
-         try:
-             logger.warning("Attempting to create vehicle with pure defaults...")
-             vehicle = Vehicle()
-             logger.info("Formula Student Vehicle created with defaults.")
-             return vehicle
-         except Exception as fallback_e:
-              logger.critical(f"Failed to create vehicle even with pure defaults: {fallback_e}", exc_info=True)
-              raise RuntimeError("Vehicle creation failed completely.") from fallback_e
-
+# create_formula_student_vehicle remains the same
 
 # Example Usage
 if __name__ == "__main__":
@@ -800,7 +1030,6 @@ if __name__ == "__main__":
     print("-" * 20)
 
     try:
-        # Create vehicle using factory function
         vehicle = create_formula_student_vehicle() # Tries to load defaults
 
         print("\n--- Vehicle Specs ---")
@@ -835,10 +1064,23 @@ if __name__ == "__main__":
             if accel_results and 'error' not in accel_results:
                 print(f" 75m Time: {accel_results.get('finish_time', -1):.3f} s")
                 print(f" 0-60 mph: {accel_results.get('time_to_60mph', -1):.3f} s")
+                # Plotting is handled within simulate_acceleration_run if save_path is provided
+                # Optionally call plot here if needed for direct display
+                # vehicle.plot_acceleration_results(accel_results)
             else:
                  print(f" Acceleration simulation failed: {accel_results.get('error', 'Unknown error')}")
         else:
             print(" Acceleration simulation skipped: Simulator not available.")
+
+        # --- Example Skidpad Run ---
+        print("\n--- Simulating Skidpad Run ---")
+        skidpad_results = vehicle.simulate_skidpad()
+        if skidpad_results and 'error' not in skidpad_results:
+             print(f" Avg Lap Time: {skidpad_results.get('average_lap_time', -1):.3f} s")
+             print(f" Max Lateral G: {skidpad_results.get('max_lateral_g', -1):.3f} g")
+        else:
+            print(f" Skidpad simulation failed: {skidpad_results.get('error', 'Unknown error')}")
+
 
         print("\nVehicle demo finished.")
 

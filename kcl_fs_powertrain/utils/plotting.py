@@ -54,6 +54,8 @@ COLOR_SCHEMES = {
     'acceleration': plt.cm.plasma # Another perceptually uniform colormap
 }
 THERMAL_CMAP = COLOR_SCHEMES['thermal']
+SPEED_CMAP = COLOR_SCHEMES['speed']
+
 
 #------------------------------------------------------------------------------
 # Utility functions
