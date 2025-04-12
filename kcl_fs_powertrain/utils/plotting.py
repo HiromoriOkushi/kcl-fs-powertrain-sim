@@ -811,19 +811,7 @@ def plot_cooling_system_map(cooling_data: Dict, title: Optional[str] = None,
 def plot_weight_sensitivity(sensitivity_data: Dict, title: Optional[str] = None,
                           unit_system: str = 'metric',
                           save_path: Optional[str] = None) -> Optional[plt.Figure]:
-    """
-    Plot weight sensitivity analysis results.
-
-    Args:
-        sensitivity_data: Dict with 'weights' (list/array) and performance metric lists
-                          (e.g., 'lap_times', 'acceleration_times', 'time_to_60mph').
-        title: Plot title.
-        unit_system: Unit system ('metric' or 'imperial').
-        save_path: Path to save plot (if None, not saved).
-
-    Returns:
-        Matplotlib figure or None if error.
-    """
+    # ... (extract data) ...
     try:
         weights = np.array(sensitivity_data['weights'])
         if len(weights) < 2: raise ValueError("Insufficient weight data points.")
@@ -838,7 +826,8 @@ def plot_weight_sensitivity(sensitivity_data: Dict, title: Optional[str] = None,
         logger.error("No performance data provided for weight sensitivity plot."); return None
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharey=False) # Separate Y scales might be needed
-
+    colors = COLOR_SCHEMES['default']
+    
     if unit_system.lower() == 'imperial': weight_factor, weight_unit = KG_TO_LBS, "lbs"
     else: weight_factor, weight_unit = 1.0, "kg"
     display_weights = weights * weight_factor
@@ -890,7 +879,6 @@ def plot_weight_sensitivity(sensitivity_data: Dict, title: Optional[str] = None,
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     if save_path: save_plot(fig, save_path)
     return fig
-
 
 def plot_weight_distribution_sensitivity(sensitivity_data: Dict, title: Optional[str] = None,
                                        save_path: Optional[str] = None) -> Optional[plt.Figure]:
@@ -1245,7 +1233,8 @@ def plot_acceleration_results(results: Dict, title: Optional[str] = None,
 
     num_axes = 4 if plot_wheel_slip and throttle is not None else 3
     fig, axes = plt.subplots(num_axes, 1, figsize=(12, 10 if num_axes==4 else 8), sharex=True)
-
+    colors = COLOR_SCHEMES['default']
+    
     if unit_system.lower() == 'imperial': speed_factor, speed_unit = MS_TO_MPH, "mph"; pos_factor, pos_unit = M_TO_INCH / 12.0, "ft"; accel_factor, accel_unit = 1 / GRAVITY, "g"
     else: speed_factor, speed_unit = MS_TO_KMH, "km/h"; pos_factor, pos_unit = 1.0, "m"; accel_factor, accel_unit = 1 / GRAVITY, "g"
 
@@ -1288,14 +1277,12 @@ def plot_acceleration_results(results: Dict, title: Optional[str] = None,
     # Add finish time annotation
     finish_time = results.get('finish_time')
     if finish_time is not None:
-        for ax in fig.get_axes(): # Iterate through all axes, including twins
-            if ax.get_xlabel() == 'Time (s)' or ax.get_shared_x_axes().joined(ax, axes[0]): # Check if it shares the x-axis
-                 ax.axvline(finish_time, color='k', linestyle='--', alpha=0.8)
-        # Add label only once to the top plot legend
-        handle_finish, = axes[0].plot([],[], color='k', linestyle='--', label=f'Finish: {finish_time:.3f}s')
-        handles, labels_leg = axes[0].get_legend_handles_labels()
-        axes[0].legend(handles=handles+[handle_finish], labels=labels_leg+[handle_finish.get_label()], loc='best')
-
+        # Find the primary shared x-axis (usually the bottom-most one in this setup)
+        primary_ax = axes[-1]
+        primary_ax.axvline(finish_time, color='k', linestyle='--', alpha=0.8, label=f'Finish: {finish_time:.3f}s')
+        # Update the legend on the axis where the line was added
+        handles, labels_leg = primary_ax.get_legend_handles_labels()
+        primary_ax.legend(handles=handles, labels=labels_leg, loc='best') 
 
     plot_title = title if title else f"Acceleration Run ({results.get('distance_m', 75):.0f}m)"
     fig.suptitle(plot_title, fontsize=DEFAULT_TITLE_SIZE + 2)
@@ -1345,20 +1332,7 @@ def plot_acceleration_comparison(comparison_data: List[Dict], title: Optional[st
 def plot_lap_time_results(results: Dict, title: Optional[str] = None,
                          unit_system: str = 'metric',
                          save_path: Optional[str] = None) -> Optional[plt.Figure]:
-    """
-    Plot results from a single lap time simulation.
-
-    Args:
-        results: Dictionary with lap time results. Expected keys:
-                 'time', 'distance', 'speed', 'acceleration', 'lateral_g', 'engine_rpm', 'gear'.
-                 Optional: 'lap_time', 'racing_line' (Nx2), 'track_points' (Mx2).
-        title: Plot title.
-        unit_system: Unit system ('metric' or 'imperial').
-        save_path: Path to save plot (if None, not saved).
-
-    Returns:
-        Matplotlib figure or None if error.
-    """
+    # ... (try block to extract data) ...
     try:
         time = np.array(results['time']); distance = np.array(results['distance'])
         speed = np.array(results['speed']); acceleration = np.array(results['acceleration'])
@@ -1371,7 +1345,7 @@ def plot_lap_time_results(results: Dict, title: Optional[str] = None,
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
     colors = COLOR_SCHEMES['default']
-
+    
     if unit_system.lower() == 'imperial': speed_factor, speed_unit = MS_TO_MPH, "mph"; dist_factor, dist_unit = M_TO_KM * 0.621371, "miles"
     else: speed_factor, speed_unit = MS_TO_KMH, "km/h"; dist_factor, dist_unit = M_TO_KM, "km"
 
@@ -1402,23 +1376,11 @@ def plot_lap_time_results(results: Dict, title: Optional[str] = None,
     return fig
 
 
+
 def plot_lap_time_comparison(comparison_data: List[Dict], labels: List[str],
                             title: Optional[str] = None, unit_system: str = 'metric',
                             save_path: Optional[str] = None) -> Optional[plt.Figure]:
-    """
-    Plot comparison of multiple lap time simulations.
-
-    Args:
-        comparison_data: List of dictionaries, each containing lap time results.
-                         Expected keys: 'distance', 'speed', 'lateral_g', 'label' (optional).
-        labels: List of labels corresponding to the data dictionaries (used if 'label' not in data).
-        title: Plot title.
-        unit_system: Unit system ('metric' or 'imperial').
-        save_path: Path to save plot (if None, not saved).
-
-    Returns:
-        Matplotlib figure or None if error.
-    """
+    # ... (check data) ...
     if not comparison_data: logger.error("No data for lap time comparison plot."); return None
     if len(comparison_data) != len(labels) and not all('label' in d for d in comparison_data):
         logger.warning("Mismatch between number of data entries and labels, using default labels.")

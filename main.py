@@ -415,7 +415,7 @@ class SimulationManager:
         run_optimization = self.config.get('analysis_settings',{}).get('enable_lap_optimization')
 
         if run_lap or run_endurance or run_sensitivity or run_optimization:
-             self.track = track_manager.get_track(track_arg, generate_if_missing=generate_track)
+             self.track = track_manager.get_track(track_arg, generate_if_missing=(generate_track or track_arg is None))
              if not self.track:
                   log.error("Track is required but could not be loaded/generated. Disabling relevant events/analyses.")
                   self.config['event_settings']['lap_time'] = False

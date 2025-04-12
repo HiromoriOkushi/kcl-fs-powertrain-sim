@@ -4,13 +4,13 @@
 generation:
   track_width: 3.0              # meters - Standard FS track width
   min_length: 250               # meters - Minimum desired track centerline length
-  max_length: 450               # meters - Maximum desired track centerline length
-  curvature_threshold: 0.3      # 1/radius (e.g., 0.3 corresponds to ~3.33m radius) - maximum allowed curvature
+  max_length: 550               # meters - Maximum desired track centerline length
+  curvature_threshold: 0.4      # 1/radius (e.g., 0.3 corresponds to ~3.33m radius) - maximum allowed curvature
   straight_threshold: 0.05      # 1/radius (e.g., 0.05 corresponds to 20m radius) - curvature below this is considered straight
   min_straight_length: 10.0     # meters - Minimum length for a straight section
   cone_spacing: 3.5             # meters - Target spacing between cones along boundaries
   n_points_voronoi: 60          # Number of initial points for Voronoi diagram
-  n_regions_select: 20          # Number of Voronoi regions to select for track shape
+  n_regions_select: 18          # Number of Voronoi regions to select for track shape
   max_bounds: 150.0             # meters - Maximum extent of the generation area
   min_bounds: 0.0               # meters - Minimum extent of the generation area
 

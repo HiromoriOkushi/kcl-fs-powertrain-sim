@@ -123,23 +123,47 @@ class CASSystem:
          # Note: Safety enables like neutral_safety, overrev_protection are usually handled by calling code
 
     def _check_overrev(self, target_gear: int, current_rpm: float) -> bool:
-         """Check if shifting to target_gear would cause overrev."""
-         if self.engine is None or current_rpm <= 0 or self.current_gear <= 0 or target_gear >= self.current_gear:
-             return False # Cannot check or not a downshift
+            """Check if shifting to target_gear would cause overrev. Assumes it's a downshift."""
+            # Check for invalid initial conditions or non-downshift scenario
+            if self.engine is None:
+                logger.debug("Overrev check skipped: Engine object not available.")
+                return False # Cannot check without engine limits
+            if self.current_gear < 1:
+                 logger.debug(f"Overrev check skipped: Cannot check downshift from Neutral (Gear {self.current_gear}).")
+                 return False # Cannot downshift from neutral or invalid gear
+            if target_gear < 1:
+                 logger.debug(f"Overrev check skipped: Target gear is Neutral or invalid ({target_gear}).")
+                 return False # Shifting to neutral is always allowed
+            if target_gear >= self.current_gear:
+                 logger.debug(f"Overrev check skipped: Not a downshift ({self.current_gear} -> {target_gear}).")
+                 return False
 
-         if target_gear < 1: return False # Shifting to neutral is fine
+            try: 
+                current_ratio = self.gear_ratios[self.current_gear - 1]
+                target_ratio = self.gear_ratios[target_gear - 1]
 
-         # Calculate expected RPM after downshift
-         current_ratio = self.gear_ratios[self.current_gear - 1]
-         target_ratio = self.gear_ratios[target_gear - 1]
-         expected_rpm = current_rpm * (current_ratio / target_ratio)
+                if target_ratio <= 0: # Avoid division by zero
+                     logger.warning(f"Overrev Check Warning: Target gear {target_gear} has invalid ratio {target_ratio}")
+                     return True # Consider it unsafe if ratio is invalid
 
-         redline = self.engine.redline_rpm
-         if expected_rpm > (redline - self.overrev_protection_rpm_margin):
-              logger.warning(f"Overrev Protection: Shift {self.current_gear}->{target_gear} rejected. "
-                             f"Current RPM {current_rpm:.0f}, Expected RPM {expected_rpm:.0f} > Limit {redline - self.overrev_protection_rpm_margin:.0f}")
-              return True # Overrev detected
-         return False # No overrev predicted
+                expected_rpm = current_rpm * (current_ratio / target_ratio)
+
+                # Get redline limit from engine object
+                redline = self.engine.redline_rpm
+                limit = redline - self.overrev_protection_rpm_margin
+
+                if expected_rpm > limit:
+                    logger.warning(f"Overrev Protection: Shift {self.current_gear}->{target_gear} rejected. "
+                                f"Current RPM {current_rpm:.0f}, Expected RPM {expected_rpm:.0f} > Limit {limit:.0f}")
+                    return True # Overrev detected
+            except IndexError:
+                logger.error(f"IndexError during overrev check: CurrentGear={self.current_gear}, TargetGear={target_gear}. Check gear_ratios list.")
+                return True # Fail safe if index is wrong
+            except Exception as e:
+                 logger.error(f"Unexpected error during overrev check: {e}")
+                 return True # Fail safe
+
+            return False # No overrev predicted
 
     def request_shift(self, direction: ShiftDirection, current_rpm: float, target_gear_override: Optional[int] = None) -> bool:
         """
@@ -230,8 +254,6 @@ class CASSystem:
                   delattr(self, 'target_gear_during_shift')
         else:
              logger.warning(f"complete_shift called when not in SHIFT_IN_PROGRESS state (current state: {self.system_state.name}).")
-
-
     def _check_shift_readiness(self, current_time_ms: float) -> bool:
          """Check if the system is ready for a new shift command."""
          if self.system_state != ShiftState.IDLE:
@@ -282,16 +304,16 @@ class CASSystem:
              delattr(self, 'target_gear_during_shift') # Ensure cleared on reset
          logger.info("CAS system state reset.")
 
-    def _log_shift(self, from_gear: int, to_gear: int, duration_ms: float):
-         """Log details of a completed shift."""
-         record = {
-             'timestamp': time.monotonic(),
-             'from_gear': from_gear,
-             'to_gear': to_gear,
-             'duration_ms': duration_ms,
-             'engine_rpm': self.engine.current_rpm if self.engine else None # Log RPM at completion
-         }
-         self.shift_log.append(record)
+    def _log_shift(self, from_gear: int, to_gear: int, duration_ms: float, rpm_at_completion: Optional[float]):
+        """Log details of a completed shift."""
+        record = {
+            'timestamp_s': time.monotonic(), # Use monotonic seconds for log
+            'from_gear': from_gear,
+            'to_gear': to_gear,
+            'duration_ms': duration_ms,
+            'engine_rpm_at_completion': rpm_at_completion
+        }
+        self.shift_log.append(record)
 
     def get_total_shift_time_ms(self, direction: ShiftDirection) -> float:
         """Calculate the total theoretical time for a shift."""

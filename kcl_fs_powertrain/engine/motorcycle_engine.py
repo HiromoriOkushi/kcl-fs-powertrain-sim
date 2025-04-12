@@ -10,10 +10,10 @@ import os
 import numpy as np
 import yaml
 import matplotlib.pyplot as plt
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union,Callable
 from scipy.interpolate import interp1d, CubicSpline
 import logging
-
+import pandas as pd
 # Import from local modules
 try:
     from .engine_thermal import EngineHeatModel, ThermalConfig
@@ -303,7 +303,7 @@ class MotorcycleEngine:
         # Use a skewed Gaussian-like function combined with a base level
         tq_shape = np.exp(-0.5 * ((rpm - peak_tq_rpm) / (peak_tq_rpm * 0.3))**2) # Gaussian part
         tq_skew = 1 + 0.1 * np.tanh((rpm - peak_tq_rpm) / (self.redline_rpm * 0.2)) # Skewness
-        idle_torque = max_tq * 0.2 # Torque at idle
+        idle_torque = max(max_tq * 0.15, 5.0)
         base_torque = idle_torque + (max_tq - idle_torque) * tq_shape * tq_skew
 
         # --- Power Curve Model (for scaling/validation) ---
@@ -325,7 +325,12 @@ class MotorcycleEngine:
              logger.warning("Could not scale torque curve based on power peak, using base torque.")
 
         self.torque_curve = base_torque * scale_factor_p
-
+        idle_idx = np.argmin(np.abs(self.rpm_range - self.idle_rpm))
+        min_allowable_idle_torque = 3.0 
+        
+        if self.torque_curve[idle_idx] < min_allowable_idle_torque:
+             self.torque_curve[idle_idx] = min_allowable_idle_torque
+             
         # Recalculate power and peaks from the final scaled torque curve
         self._calculate_power_from_torque()
         # Update peak values based on generated curve
@@ -352,32 +357,49 @@ class MotorcycleEngine:
         Returns:
             Torque in Nm.
         """
+        # Clamp inputs
+        rpm = np.clip(rpm, self.idle_rpm, self.redline_rpm)
+        throttle = np.clip(throttle, 0.0, 1.0)
+
         if self.torque_function is None:
             logger.warning("Torque function not initialized, returning 0.")
             return 0.0
 
-        # Use current engine temperature if not provided
-        temp = engine_temp if engine_temp is not None else self.engine_temperature
-
-        # Ensure RPM is within operating range
-        rpm = np.clip(rpm, self.idle_rpm, self.redline_rpm)
-        throttle = np.clip(throttle, 0.0, 1.0)
-
-        # Get base torque from the interpolated curve
+        # Get base torque from the curve at this RPM
         base_torque = float(self.torque_function(rpm))
 
-        # Apply throttle position (non-linear relationship - throttle^gamma)
-        # Gamma < 1 means torque increases faster at lower throttle openings
+        # Calculate throttle effect
         throttle_gamma = 0.8
         throttle_factor = throttle ** throttle_gamma
 
+        # Calculate torque before considering minimums or thermal effects
+        calculated_torque = base_torque * throttle_factor
+
+        # --- Apply minimum torque logic ---
+        min_torque_threshold = 5.0 # Nm - Threshold to ensure vehicle moves
+        torque_before_thermal = 0.0 # Initialize
+
+        if throttle > 0.01:
+            # scaled by throttle factor, but don't exceed WOT torque.
+            min_effective_torque = min_torque_threshold * throttle_factor
+            # Use the greater of the calculated torque or the minimum effective torque
+            torque_before_thermal = max(calculated_torque, min_effective_torque)
+            # Cap it at the maximum possible torque at this RPM (WOT base torque)
+            # Ensure base_torque used for capping is non-negative
+            max_possible_at_rpm = max(0.0, float(self.torque_function(rpm))) # WOT torque
+            torque_before_thermal = min(torque_before_thermal, max_possible_at_rpm)
+        else:
+            # If throttle is zero, torque is zero (ignoring engine braking for now)
+            torque_before_thermal = 0.0
+        # --- End minimum torque logic ---
+
         # Apply thermal performance factor
+        temp = engine_temp if engine_temp is not None else self.engine_temperature
         temp_factor = self._get_thermal_performance_factor(temp)
 
-        # Calculate final torque
-        actual_torque = base_torque * throttle_factor * temp_factor
+        actual_torque = torque_before_thermal * temp_factor
 
-        return actual_torque
+        return max(0.0, actual_torque) # Ensure non-negative final torque
 
     def _get_thermal_performance_factor(self, temp_c: float) -> float:
         """Calculate performance factor based on engine temperature."""

@@ -161,11 +161,12 @@ class ShiftStrategy:
             if self._check_condition(point, state):
                 # Check if target gear is valid
                 num_gears = state.get('num_gears', 6) # Get from state or assume 6
-                if 0 <= point.target_gear <= num_gears:
-                    logger.debug(f"{self.name}: Recommending shift {current_gear}->{point.target_gear} due to {point.description}")
-                    return point.target_gear
+                if 0 <= point.to_gear <= num_gears:
+                    logger.debug(f"{self.name}: Recommending shift {current_gear}->{point.to_gear} due to {point.description}")
+                    return point.to_gear 
                 else:
-                    logger.warning(f"Invalid target gear {point.target_gear} defined in strategy {self.name}")
+                    logger.warning(f"Invalid target gear {point.to_gear} defined in strategy {self.name}")
+
 
         return None # No shift condition met
 

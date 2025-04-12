@@ -886,7 +886,7 @@ class CoolingSystem:
 
         # Update power consumptions
         self.water_pump.calculate_power_consumption_W()
-        if self.cooling_fan: self.cooling_fan.calculate_power_consumption()
+        #if self.cooling_fan: self.cooling_fan.calculate_power_consumption()
 
 
     def simulate_step(self, ambient_temp_C: float, vehicle_speed_mps: float,
@@ -965,7 +965,7 @@ class CoolingSystem:
                 # Simulate until steady state (or timeout)
                 max_iter = 500
                 for k in range(max_iter):
-                    state = self.simulate_step(ambient, vehicle_speed, engine_rpm, engine_load, heat, dt=1.0) # 1s step
+                    state = self.simulate_step(ambient, vehicle_speed_mps, engine_rpm, engine_load, heat, dt=1.0) # 1s step
                     temp_change = abs(self.coolant_temp_C - last_temp)
                     if k > 10 and temp_change < 0.01: # Check after 10s, tolerance 0.01 C/s
                          break
