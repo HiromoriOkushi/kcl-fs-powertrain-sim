@@ -390,63 +390,121 @@ class Vehicle:
                 if os.path.exists(resolved_path): config_path = resolved_path
                 else: logger.warning(f"Cooling system config path not found: {resolved_path}")
 
-            config_dir = os.path.dirname(config_path) if config_path else os.path.normpath(os.path.join(base_cfg_dir, '..', 'configs', 'thermal'))
+            # Determine config directory for potential default loading
+            config_dir_default = os.path.normpath(os.path.join(base_cfg_dir, '..', 'configs', 'thermal'))
+            config_dir_from_path = os.path.dirname(config_path) if config_path else config_dir_default
+            final_config_dir = config_dir_from_path if os.path.isdir(config_dir_from_path) else config_dir_default
 
             self.cooling_system = None # Initialize as None
-            if config_path and create_formula_student_cooling_system:
-                logger.info(f"Initializing external CoolingSystem from config file: {config_path}")
-                self.cooling_system = create_formula_student_cooling_system(config_dir=config_dir)
-            elif isinstance(cooling_config_inline, dict):
+
+            # Try creating from inline config first if it exists
+            if isinstance(cooling_config_inline, dict):
                  logger.info("Initializing external CoolingSystem from inline config.")
                  try:
+                      # Ensure component classes are available
                       from ..thermal.cooling_system import Radiator, WaterPump, CoolingFan, Thermostat
-                      if Radiator and WaterPump and Thermostat and ExternalCoolingSystem:
-                          rad_cfg = cooling_config_inline.get('radiator', {})
-                          pump_cfg = cooling_config_inline.get('water_pump', {})
-                          fan_cfg = cooling_config_inline.get('cooling_fan', {})
-                          thermo_cfg = cooling_config_inline.get('thermostat', {})
-                          system_cfg = cooling_config_inline.get('system', {})
-                          rad_cfg.pop('type', None)
-                          pump_cfg.pop('type', None)
-                          fan_cfg.pop('type', None)
-                          
-                          if 'voltage' in fan_cfg and 'voltage_V' not in fan_cfg:
-                            fan_cfg['voltage_V'] = fan_cfg.pop('voltage')
-                          if 'max_flow_rate' in pump_cfg and 'max_flow_rate_lpm' not in pump_cfg:
-                            pump_cfg['max_flow_rate_lpm'] = pump_cfg.pop('max_flow_rate')
-                          if 'max_pressure' in pump_cfg and 'max_pressure_bar' not in pump_cfg:
-                            pump_cfg['max_pressure_bar'] = pump_cfg.pop('max_pressure')
-                          if 'nominal_speed' in pump_cfg and 'nominal_speed_rpm' not in pump_cfg:
-                            pump_cfg['nominal_speed_rpm'] = pump_cfg.pop('nominal_speed')
-                          
-                          radiator = Radiator(**rad_cfg) if rad_cfg else Radiator()   
-                          pump = WaterPump(**pump_cfg) if pump_cfg else WaterPump()
-                          fan = CoolingFan(**fan_cfg) if fan_cfg and CoolingFan else None
-                          thermostat = Thermostat(**thermo_cfg) if thermo_cfg else Thermostat()
-                          self.cooling_system = ExternalCoolingSystem(radiator, pump, fan, thermostat, **system_cfg)
-                      else: 
-                          raise ImportError("Missing essential cooling component classes")
+                      if not (Radiator and WaterPump and Thermostat and ExternalCoolingSystem):
+                           raise ImportError("Missing essential cooling component classes")
+
+                      rad_cfg = cooling_config_inline.get('radiator', {})
+                      pump_cfg = cooling_config_inline.get('water_pump', {})
+                      fan_cfg = cooling_config_inline.get('cooling_fan', {})
+                      thermo_cfg = cooling_config_inline.get('thermostat', {})
+                      system_cfg = cooling_config_inline.get('system', {})
+
+                      # --- Clean up config keys before passing ---
+                      # Pop 'type' keys as they determine class, not init args
+                      rad_cfg.pop('type', None)
+                      pump_cfg.pop('type', None)
+                      fan_cfg.pop('type', None)
+
+                      # Standardize keyword arguments AND pop known non-init args
+                      # Radiator: Pop non-init args
+                      rad_cfg.pop('base_effectiveness', None); rad_cfg.pop('thermal_conductivity', None)
+                      rad_cfg.pop('weight_factor', None); rad_cfg.pop('weight_kg', None)
+                      rad_cfg.pop('coolant_volume', None) # Radiator coolant volume is internal
+
+                      # Fan: Rename keys and pop non-init args
+                      if 'max_airflow' in fan_cfg and 'max_airflow_m3s' not in fan_cfg: fan_cfg['max_airflow_m3s'] = fan_cfg.pop('max_airflow')
+                      if 'diameter' in fan_cfg and 'diameter_m' not in fan_cfg: fan_cfg['diameter_m'] = fan_cfg.pop('diameter')
+                      if 'max_power' in fan_cfg and 'max_power_W' not in fan_cfg: fan_cfg['max_power_W'] = fan_cfg.pop('max_power')
+                      if 'voltage' in fan_cfg and 'voltage_V' not in fan_cfg: fan_cfg['voltage_V'] = fan_cfg.pop('voltage')
+                      # Pop known non-init args for Fan
+                      fan_cfg.pop('voltage_V', None); fan_cfg.pop('control_type', None)
+                      fan_cfg.pop('num_fans', None); fan_cfg.pop('weight_kg', None)
+                      fan_cfg.pop('max_static_pressure_pa', None)
+
+                      # Pump: Rename keys and pop non-init args
+                      if 'max_flow_rate' in pump_cfg and 'max_flow_rate_lpm' not in pump_cfg: pump_cfg['max_flow_rate_lpm'] = pump_cfg.pop('max_flow_rate')
+                      if 'max_pressure' in pump_cfg and 'max_pressure_bar' not in pump_cfg: pump_cfg['max_pressure_bar'] = pump_cfg.pop('max_pressure')
+                      if 'nominal_speed' in pump_cfg and 'nominal_speed_rpm' not in pump_cfg: pump_cfg['nominal_speed_rpm'] = pump_cfg.pop('nominal_speed')
+                      # Pop known non-init args for Pump
+                      pump_cfg.pop('voltage', None); pump_cfg.pop('voltage_V', None)
+                      pump_cfg.pop('speed_ratio', None); pump_cfg.pop('power_consumption_factor', None)
+                      pump_cfg.pop('weight_kg', None); pump_cfg.pop('current_draw_max_A', None)
+                      pump_cfg.pop('current_draw_max', None)
+
+                      # Thermostat: Rename keys and pop non-init args
+                      if 'opening_temp' in thermo_cfg and 'opening_temp_C' not in thermo_cfg: thermo_cfg['opening_temp_C'] = thermo_cfg.pop('opening_temp')
+                      if 'full_open_temp' in thermo_cfg and 'full_open_temp_C' not in thermo_cfg: thermo_cfg['full_open_temp_C'] = thermo_cfg.pop('full_open_temp')
+                      # Pop known non-init args for Thermostat
+                      thermo_cfg.pop('bypass_flow_max', None)
+                      # --- End config key cleanup ---
+
+                      # --- Standardize system_cfg keys for CoolingSystem constructor ---
+                      if 'coolant_density' in system_cfg and 'coolant_density_kg_m3' not in system_cfg:
+                           dens_val = float(system_cfg['coolant_density'])
+                           if dens_val > 500: system_cfg['coolant_density_kg_m3'] = dens_val
+                           else: system_cfg['coolant_density_kg_m3'] = dens_val * 1000.0
+                           system_cfg.pop('coolant_density')
+                      if 'coolant_volume' in system_cfg and 'coolant_volume_L' not in system_cfg: system_cfg['coolant_volume_L'] = system_cfg.pop('coolant_volume')
+                      if 'coolant_specific_heat' in system_cfg and 'coolant_specific_heat_J_kgK' not in system_cfg: system_cfg['coolant_specific_heat_J_kgK'] = system_cfg.pop('coolant_specific_heat')
+                      if 'system_pressure_cap' in system_cfg and 'system_pressure_cap_bar' not in system_cfg: system_cfg['system_pressure_cap_bar'] = system_cfg.pop('system_pressure_cap')
+                      # ---
+
+                      # Initialize components using cleaned configs
+                      radiator = Radiator(**rad_cfg) if rad_cfg else Radiator()
+                      pump = WaterPump(**pump_cfg) if pump_cfg else WaterPump()
+                      fan = CoolingFan(**fan_cfg) if fan_cfg and CoolingFan else None
+                      thermostat = Thermostat(**thermo_cfg) if thermo_cfg else Thermostat()
+                      # Pass system_cfg kwargs to CoolingSystem constructor
+                      self.cooling_system = ExternalCoolingSystem(radiator, pump, fan, thermostat, **system_cfg)
+                      logger.info("External CoolingSystem created successfully from inline config.")
                  except Exception as e:
-                      logger.error(f"Failed to create cooling system from inline config: {e}.")
-                      self.cooling_system = None # Failed
+                      logger.error(f"Failed to create cooling system from inline config: {e}.", exc_info=True)
+                      self.cooling_system = None # Ensure it's None if inline fails
+
+            # Try loading from config file if inline failed or wasn't provided
+            if self.cooling_system is None and config_path and create_formula_student_cooling_system:
+                 logger.info(f"Initializing external CoolingSystem from config file: {config_path}")
+                 try:
+                      self.cooling_system = create_formula_student_cooling_system(config_dir=os.path.dirname(config_path))
+                 except Exception as e:
+                      logger.error(f"Failed to create FS cooling system from config path {config_path}: {e}")
+                      self.cooling_system = None
 
             # Fallback to default if still None
             if self.cooling_system is None and create_formula_student_cooling_system:
                 logger.info("No cooling system config found or creation failed. Creating default FS cooling system.")
-                self.cooling_system = create_formula_student_cooling_system(config_dir=config_dir)
+                self.cooling_system = create_formula_student_cooling_system(config_dir=final_config_dir)
 
         if self.cooling_system is None:
              logger.error("Failed to initialize CoolingSystem component.")
-             self.cooling_system = type('MockCooling', (object,), {'coolant_temp_C': 25.0, 'total_thermal_capacity_J_K': 10000.0, 'radiator_heat_rejection_W': 0.0, 'simulate_step': lambda *args, **kwargs: None, 'get_system_specs': lambda: {}})()
+             self.cooling_system = type('MockCooling', (object,), {
+                 'coolant_temp_C': 25.0, 'total_thermal_capacity_J_K': 10000.0,
+                 'radiator_heat_rejection_W': 0.0, 'simulate_step': lambda *args, **kwargs: None,
+                 'get_system_specs': lambda: {}, '_load_config': lambda *args: None # Add dummy _load_config
+             })()
 
+        # Ensure necessary attributes exist on the final cooling_system object
         if not hasattr(self.cooling_system, 'coolant_temp_C'): self.cooling_system.coolant_temp_C = 25.0
         if not hasattr(self.cooling_system, 'total_thermal_capacity_J_K') or getattr(self.cooling_system, 'total_thermal_capacity_J_K', 0) <= 0:
              vol = getattr(self.cooling_system, 'coolant_volume_L', 2.5)
-             dens = getattr(self.cooling_system, 'coolant_density_kg_L', 1.0)
-             spec_heat = getattr(self.cooling_system, 'coolant_specific_heat_J_kgK', 4186)
-             self.cooling_system.total_thermal_capacity_J_K = vol * dens * spec_heat
-             if self.cooling_system.total_thermal_capacity_J_K <= 0: self.cooling_system.total_thermal_capacity_J_K = 1e-3
-
+             dens_kg_l = getattr(self.cooling_system, 'coolant_density_kg_L', 1.050)
+             spec_heat = getattr(self.cooling_system, 'coolant_specific_heat_J_kgK', 3800)
+             self.cooling_system.total_thermal_capacity_J_K = vol * dens_kg_l * spec_heat
+             if self.cooling_system.total_thermal_capacity_J_K <= 0: self.cooling_system.total_thermal_capacity_J_K = 10000.0
+             
     def _initialize_shifting_systems(self, manager_instance: Optional[StrategyManager], cas_instance: Optional[CASSystem]):
         """Initialize shift manager and CAS system using self.config."""
         if StrategyManager and isinstance(manager_instance, StrategyManager):
@@ -769,118 +827,267 @@ class Vehicle:
 
     def calculate_acceleration(self, throttle: Optional[float] = None, brake: Optional[float] = None) -> float:
         """Calculate current longitudinal acceleration."""
-        if throttle is not None: self.throttle_input = np.clip(throttle, 0.0, 1.0)
-        if brake is not None: self.brake_input = np.clip(brake, 0.0, 1.0)
+        logger.debug("--- Inside calculate_acceleration ---") # DEBUG Start
+        if throttle is not None:
+            logger.debug(f"  Setting throttle_input: {throttle}") # DEBUG
+            self.throttle_input = np.clip(throttle, 0.0, 1.0)
+        if brake is not None:
+            logger.debug(f"  Setting brake_input: {brake}") # DEBUG
+            self.brake_input = np.clip(brake, 0.0, 1.0)
 
-        # Ensure engine/drivetrain states are updated
-        self.update_engine_state()
-        self.update_drivetrain_state()
+        # --- Wrap state updates in try-except ---
+        logger.debug("  Calling update_engine_state...") # DEBUG
+        try:
+            self.update_engine_state()
+        except TypeError as e:
+             logger.error(f"TypeError ORIGINATED IN update_engine_state: {e}", exc_info=True)
+             raise # Re-raise to signal failure
+        except Exception as e:
+             logger.error(f"Unexpected error in update_engine_state: {e}", exc_info=True)
+             raise # Re-raise
+        logger.debug("  Finished update_engine_state.") # DEBUG
 
-        forces = self.calculate_forces()
+        logger.debug("  Calling update_drivetrain_state...") # DEBUG
+        try:
+            self.update_drivetrain_state()
+        except TypeError as e:
+             logger.error(f"TypeError ORIGINATED IN update_drivetrain_state: {e}", exc_info=True)
+             raise # Re-raise
+        except Exception as e:
+            logger.error(f"Unexpected error in update_drivetrain_state: {e}", exc_info=True)
+            raise # Re-raise
+        logger.debug("  Finished update_drivetrain_state.") # DEBUG
+        # --- End state update wrapping ---
+
+        logger.debug("  Calling calculate_forces...") # DEBUG
+        try:
+            forces = self.calculate_forces()
+        except TypeError as e:
+             logger.error(f"TypeError ORIGINATED IN calculate_forces: {e}", exc_info=True)
+             raise # Re-raise
+        except Exception as e:
+             logger.error(f"Unexpected error in calculate_forces: {e}", exc_info=True)
+             raise # Re-raise
+        logger.debug(f"  calculate_forces returned: {forces}") # DEBUG
+
         net_force = forces['tractive'] - forces['drag'] - forces['rolling'] - forces['brake']
-        self.current_acceleration_mpss = net_force / self.mass if self.mass > 0 else 0.0
+        logger.debug(f"  Net Force: {net_force:.2f} N") # DEBUG
+
+        logger.debug(f"  Vehicle mass: {self.mass} (type={type(self.mass)})")
+
+        current_mass_float = float(self.mass) if self.mass is not None else 0.0
+        if current_mass_float > 0:
+            acceleration_value = net_force / current_mass_float
+        else:
+            acceleration_value = 0.0
+
+        # --- Assign to attribute ONLY if calculation was successful ---
+        self.current_acceleration_mpss = acceleration_value
+        # ---
+
+        logger.debug(f"  Calculated acceleration: {self.current_acceleration_mpss:.3f} m/s^2") # DEBUG
+        logger.debug("--- Exiting calculate_acceleration ---") # DEBUG End
         return self.current_acceleration_mpss
 
     def update_vehicle_state(self, dt: float, ambient_temp_C: float = 25.0):
         """Update vehicle kinematics and thermal state."""
+        # --- Add logging at the start ---
+        current_time_s = getattr(self, 'current_time_s', 0.0) # Get time if simulator manages it
+        logger.debug(f"--- Entering update_vehicle_state (t={current_time_s:.3f}, dt={dt:.4f}) ---")
+        logger.debug(f"  Initial State: Speed={self.current_speed_mps:.2f}, Gear={self.current_gear}, RPM={self.current_engine_rpm:.0f}")
+        logger.debug(f"  Initial Types: Gear={type(self.current_gear)}, Drivetrain={type(self.drivetrain)}")
+        # ---
+
         if dt <= 0: return
-        start_time_mono = time.monotonic()
-        # Removed: self.last_update_time = start_time_mono - Not used locally
+        start_time_mono = time.monotonic() # Use monotonic time for internal checks
 
-        # --- Handle CAS Shift Completion ---
+        # --- Check and Handle CAS Shift Completion ---
         is_shifting = False
-        cas_is_ready = not (self.cas_system and self.cas_system.system_state != ShiftState.IDLE) # Assume ready if no CAS
-        if self.cas_system and self.cas_system.system_state == ShiftState.SHIFT_IN_PROGRESS:
-            is_shifting = True # Mark as currently shifting for potential overrides
-            # Check completion based on stored start time and duration
-            shift_start_s = getattr(self.cas_system, 'shift_start_time_s', 0.0)
-            if shift_start_s > 0:
-                 shift_elapsed_s = start_time_mono - shift_start_s
-                 last_direction = getattr(self.cas_system, '_last_direction', ShiftDirection.UP) # Assume UP if missing
-                 required_duration_s = self.cas_system.get_total_shift_time_ms(last_direction) / 1000.0
-                 if required_duration_s > 0 and shift_elapsed_s >= required_duration_s:
-                      self.cas_system.complete_shift(start_time_mono) # Call completion
-                      self.current_gear = self.cas_system.current_gear # Sync gear
-                      is_shifting = False # Shift just completed
-                      cas_is_ready = True # System is now ready
-                      logger.debug(f"CAS shift completed this step. New gear: {self.current_gear}")
+        cas_is_ready = True # Assume ready if no CAS
+        shift_completed_this_step = False
 
-        # --- Evaluate Shift Strategy ---
-        # Only evaluate if CAS is ready (i.e., not mid-shift)
+        # --- Add logging before CAS/Shift Logic ---
+        logger.debug(f"  Checking CAS: Type={type(self.cas_system)}, State={getattr(self.cas_system, 'system_state', 'N/A')}")
+        # ---
+        if self.cas_system:
+            cas_state = self.cas_system.system_state
+            cas_is_ready = (cas_state == ShiftState.IDLE)
+
+            if cas_state == ShiftState.SHIFT_IN_PROGRESS:
+                is_shifting = True # Mark as currently shifting
+                shift_start_s = getattr(self.cas_system, 'shift_start_time_s', 0.0) # Use seconds
+                last_direction = getattr(self.cas_system, '_last_direction', ShiftDirection.UP) # Get last direction if stored
+
+                if shift_start_s > 0:
+                    shift_elapsed_s = start_time_mono - shift_start_s # Use seconds
+                    # --- Ensure get_total_shift_time_ms exists and is callable ---
+                    if callable(getattr(self.cas_system, 'get_total_shift_time_ms', None)):
+                        required_duration_s = self.cas_system.get_total_shift_time_ms(last_direction) / 1000.0
+                        logger.debug(f"    CAS Check: Elapsed={shift_elapsed_s:.3f}s, Required={required_duration_s:.3f}s") # DEBUG
+                    else:
+                        logger.error("CASSystem object missing 'get_total_shift_time_ms' method!")
+                        required_duration_s = 0.050 # Fallback duration
+                    # ---
+
+                    # Ensure required_duration_s is valid before checking elapsed time
+                    if required_duration_s > 0 and shift_elapsed_s >= required_duration_s:
+                        target_gear_before_complete = getattr(self.cas_system, 'target_gear_during_shift', 'N/A')
+                        # --- Ensure complete_shift exists and is callable ---
+                        if callable(getattr(self.cas_system, 'complete_shift', None)):
+                            self.cas_system.complete_shift(start_time_mono) # Pass current time in seconds
+                        else:
+                            logger.error("CASSystem object missing 'complete_shift' method!")
+                            self.cas_system.system_state = ShiftState.ERROR # Mark as error if method missing
+                        # ---
+                        # Check if state actually changed to IDLE
+                        if self.cas_system.system_state == ShiftState.IDLE:
+                            self.current_gear = self.cas_system.current_gear # Ensure vehicle gear matches CAS gear after completion
+                            is_shifting = False # Shift is no longer in progress
+                            cas_is_ready = True
+                            shift_completed_this_step = True
+                            logger.debug(f"CAS shift -> {target_gear_before_complete} completed this step. New Gear: {self.current_gear}")
+                        else:
+                            logger.warning(f"CAS complete_shift called but state is still {self.cas_system.system_state.name}")
+                            # Keep is_shifting = True
+                else:
+                     logger.warning("CAS shift in progress but start time or duration invalid. Resetting CAS state.")
+                     self.cas_system.system_state = ShiftState.ERROR # Or IDLE?
+                     is_shifting = False
+                     cas_is_ready = True
+
+            # Update cas_is_ready based on potentially updated state
+            cas_is_ready = (self.cas_system.system_state == ShiftState.IDLE)
+
+        # --- Evaluate Shift Strategy (Only if CAS is ready) ---
+        logger.debug(f"  Checking Shift Manager: Type={type(self.shift_manager)}, Active={self.shift_manager.get_active_strategy_name() if self.shift_manager else 'N/A'}") # DEBUG
+        logger.debug(f"  Conditions for shift eval: current_gear={self.current_gear}, cas_is_ready={cas_is_ready}") # DEBUG
         if self.shift_manager and self.current_gear != -1 and cas_is_ready:
             state_for_shift = {
-                'engine_rpm': self.current_engine_rpm,
-                'vehicle_speed': self.current_speed_mps,
-                'throttle_position': self.throttle_input,
-                'engine_load': self.throttle_input, # Approximate load with throttle
-                'num_gears': self.drivetrain.num_gears if self.drivetrain else 0,
-                'engine_redline_rpm': self.engine.redline_rpm if self.engine else 14000
+                'engine_rpm': self.current_engine_rpm, 'vehicle_speed': self.current_speed_mps,
+                'throttle_position': self.throttle_input, 'engine_load': self.throttle_input,
+                'num_gears': getattr(self.drivetrain, 'num_gears', 0),
+                'engine_redline_rpm': getattr(self.engine, 'redline_rpm', 14000)
             }
             target_gear = self.shift_manager.evaluate_shift(self.current_gear, state_for_shift)
             if target_gear is not None and target_gear != self.current_gear:
-                logger.debug(f"Shift requested by strategy: {self.current_gear}->{target_gear}")
-                # change_gear handles CAS initiation and returns success/duration
-                # Success just means it was initiated, completion is checked next step
-                self.change_gear(target_gear)
-                # Note: self.current_gear is NOT updated here
+                logger.debug(f"Shift requested by strategy: {self.current_gear}->{target_gear} at RPM {self.current_engine_rpm:.0f}")
+                # --- Check if change_gear is callable ---
+                if callable(getattr(self, 'change_gear', None)):
+                    success_init, shift_duration = self.change_gear(target_gear) # Passes current_rpm implicitly now
+                    if success_init:
+                        logger.debug(f"CAS shift {self.current_gear}->{target_gear} initiated (duration ~{shift_duration*1000:.1f}ms).")
+                        is_shifting = True; cas_is_ready = False
+                    else:
+                        logger.debug(f"Shift request {self.current_gear}->{target_gear} failed/rejected by CAS.")
+                else:
+                    logger.error("Vehicle.change_gear method is not callable!")
+                # ---
 
-        # --- Apply overrides if CAS is actively mid-shift ---
+        # --- Apply Overrides if CAS is Actively Mid-Shift ---
         throttle_override = self.throttle_input
         engine_factor_override = 1.0
-        if is_shifting and self.cas_system:
-             if self.cas_system.system_state == ShiftState.IGNITION_CUT: # Check specific sub-states if defined
-                  engine_factor_override = 0.0
-                  throttle_override = 0.0 # Cut throttle during ignition cut too? Optional.
-             elif self.cas_system.system_state == ShiftState.PREPARE_UPSHIFT: # Example state
-                  throttle_override *= (1.0 - self.cas_system.throttle_cut_percent / 100.0)
-             # Add other states like THROTTLE_BLIP if modeled
+        if is_shifting and not shift_completed_this_step and self.cas_system:
+             cas_state_now = self.cas_system.system_state
+             logger.debug(f"Applying overrides for active shift state: {cas_state_now.name}")
+             if cas_state_now == ShiftState.IGNITION_CUT: engine_factor_override = 0.0
+             elif cas_state_now == ShiftState.PREPARE_UPSHIFT: throttle_override *= (1.0 - self.cas_system.throttle_cut_percent / 100.0)
+             elif cas_state_now == ShiftState.THROTTLE_BLIP: throttle_override = max(throttle_override, self.cas_system.throttle_blip_increase_percent / 100.0)
 
-        # 1. Calculate acceleration (using potentially overridden throttle/engine factor)
-        # Temporarily modify engine torque calculation if needed
+        # 1. Calculate acceleration
         original_engine_get_torque = getattr(self.engine, 'get_torque', None)
+        modified_torque_applied = False
         if engine_factor_override < 1.0 and original_engine_get_torque and callable(original_engine_get_torque):
-             def modified_get_torque(*args, **kwargs):
-                  return original_engine_get_torque(*args, **kwargs) * engine_factor_override
-             self.engine.get_torque = modified_get_torque
+             if not hasattr(self, '_original_get_torque_backup'):
+                 self._original_get_torque_backup = original_engine_get_torque
+                 def modified_get_torque(*args, **kwargs):
+                     if hasattr(self, '_original_get_torque_backup'):
+                         return self._original_get_torque_backup(*args, **kwargs) * engine_factor_override
+                     else:
+                         logger.error("Original torque function backup missing during override!"); return 0.0
+                 self.engine.get_torque = modified_get_torque
+                 modified_torque_applied = True
+                 logger.debug(f"Applied engine factor override: {engine_factor_override}")
 
-        # Use overridden throttle for calculation
-        current_accel = self.calculate_acceleration(throttle=throttle_override)
+        current_accel = 0.0
+        try:
+            logger.debug(f"Calling calculate_acceleration. Type: {type(self.calculate_acceleration)}")
+            logger.debug(f"  throttle_override={throttle_override}, type={type(throttle_override)}")
+            # --- Check calculate_acceleration itself ---
+            if not callable(getattr(self, 'calculate_acceleration', None)):
+                logger.error("Vehicle.calculate_acceleration method is not callable!")
+                raise TypeError("'Vehicle' object attribute 'calculate_acceleration' is not callable")
+            # ---
+            current_accel = self.calculate_acceleration(throttle=throttle_override) # Call the method
+            logger.debug(f"calculate_acceleration returned: {current_accel}, type: {type(current_accel)}")
+        except TypeError as e:
+            logger.error(f"TypeError during calculate_acceleration call: {e}", exc_info=True)
+            logger.error(f"  State at error: speed={self.current_speed_mps}, gear={self.current_gear}, rpm={self.current_engine_rpm}")
+            logger.error(f"  Relevant types: type(mass)={type(self.mass)}, type(tire_radius)={type(self.tire_radius_m)}")
+            # Re-raise the error to stop simulation and see the full traceback
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected error during calculate_acceleration call: {e}", exc_info=True)
+            raise e # Re-raise
 
-        # Restore original engine method if modified
-        if engine_factor_override < 1.0 and original_engine_get_torque and callable(original_engine_get_torque):
-             self.engine.get_torque = original_engine_get_torque
+        if modified_torque_applied and hasattr(self, '_original_get_torque_backup'):
+             self.engine.get_torque = self._original_get_torque_backup
+             delattr(self, '_original_get_torque_backup')
+             logger.debug("Restored original engine torque function.")
+
+        forces_debug = self.calculate_forces()
+        logger.debug(f"t={current_time_s:.3f} Gear={self.current_gear} RPM={self.current_engine_rpm:.0f} Thr={self.throttle_input:.2f} Brk={self.brake_input:.2f}")
+        logger.debug(f" Forces: Trac={forces_debug['tractive']:.1f}N, Drag={forces_debug['drag']:.1f}N, Roll={forces_debug['rolling']:.1f}N, Brake={forces_debug['brake']:.1f}N")
+        logger.debug(f" Accel Calc: {current_accel:.3f} m/s^2")
 
         # 2. Update Kinematics
+        previous_speed = self.current_speed_mps
         self.current_speed_mps += current_accel * dt
-        # Prevent backward movement unless intended (e.g., reverse gear)
-        if self.current_speed_mps < 0 and self.current_gear >= 0: # Check if not in reverse
+        if self.current_speed_mps < 0 and self.current_gear >= 0:
+            logger.debug(f"Speed became negative ({self.current_speed_mps:.2f}), clamping to 0.")
             self.current_speed_mps = 0.0
-            # Only reset accel if speed is zero AND net force is negative
-            if self.current_speed_mps == 0.0 and current_accel < 0.0:
-                self.current_acceleration_mpss = 0.0
+            if current_accel < 0.0: self.current_acceleration_mpss = 0.0
+            else: self.current_acceleration_mpss = current_accel
         else:
-             self.current_acceleration_mpss = current_accel # Store the calculated accel
+             self.current_acceleration_mpss = current_accel
 
-        self.current_position_m += self.current_speed_mps * dt
+        self.current_position_m += ((previous_speed + self.current_speed_mps) / 2.0) * dt
+        logger.debug(f" Speed: {self.current_speed_mps:.3f} m/s, Pos: {self.current_position_m:.3f} m")
 
-        # 3. Update Engine RPM (based on new speed and CURRENT gear)
-        # Gear change only takes effect *after* completion.
+        # 3. Update Engine RPM
+        logger.debug(f"Updating RPM: Gear={self.current_gear} (type={type(self.current_gear)}), Speed={self.current_speed_mps:.2f}")
         if self.current_gear > 0 and self.drivetrain:
-            self.current_engine_rpm = self.drivetrain.calculate_engine_speed_rpm(self.current_speed_mps, self.current_gear)
-            if self.engine: self.current_engine_rpm = np.clip(self.current_engine_rpm, self.engine.idle_rpm, self.engine.redline_rpm)
+            logger.debug(f"  Drivetrain type: {type(self.drivetrain)}")
+            calc_rpm_method = getattr(self.drivetrain, 'calculate_engine_speed_rpm', None)
+            logger.debug(f"  calculate_engine_speed_rpm type: {type(calc_rpm_method)}")
+            if callable(calc_rpm_method):
+                try:
+                    new_rpm = calc_rpm_method(self.current_speed_mps, self.current_gear)
+                    logger.debug(f"  Calculated new_rpm: {new_rpm:.1f}")
+                    if self.engine: self.current_engine_rpm = np.clip(new_rpm, self.engine.idle_rpm, self.engine.redline_rpm)
+                    else: self.current_engine_rpm = max(0, new_rpm)
+                except TypeError as e: # Catch specific error here
+                    logger.error(f"TypeError calling calculate_engine_speed_rpm: {e}", exc_info=True)
+                    logger.error(f"  Args: speed={self.current_speed_mps} (type={type(self.current_speed_mps)}), gear={self.current_gear} (type={type(self.current_gear)})")
+                    raise e # Re-raise to see the original traceback
+                except Exception as e:
+                    logger.error(f"Error calling calculate_engine_speed_rpm: {e}", exc_info=True)
+                    self.current_engine_rpm = getattr(self.engine, 'idle_rpm', 0)
+            else:
+                logger.error("Drivetrain.calculate_engine_speed_rpm is not callable!")
+                self.current_engine_rpm = getattr(self.engine, 'idle_rpm', 0)
         elif self.engine:
-             idle = self.engine.idle_rpm
-             decay_rate = 5000.0 # RPM/s decay rate in neutral
+             idle = self.engine.idle_rpm; decay_rate = 5000.0
              self.current_engine_rpm = max(idle, self.current_engine_rpm - decay_rate * dt)
+        else: self.current_engine_rpm = 0
 
-        # Update engine's internal RPM state if exists
-        if hasattr(self.engine, 'current_rpm'):
-            self.engine.current_rpm = self.current_engine_rpm
+        if hasattr(self.engine, 'current_rpm'): self.engine.current_rpm = self.current_engine_rpm
 
         # 4. Update Thermal State
         if self.include_thermal:
-             self.update_thermal_state(dt, ambient_temp_C)
+            self.update_thermal_state(dt, ambient_temp_C)
 
+        logger.debug(f"--- Exiting update_vehicle_state (t={current_time_s:.3f}) ---")
+            
     def simulate_acceleration_run(self, distance: float = FS_ACCELERATION_LENGTH,
                                 max_time: float = 10.0, dt: float = 0.01,
                                 use_launch_control: bool = True,

@@ -68,9 +68,19 @@ class Transmission:
 
     def calculate_output_torque(self, input_torque_nm: float, gear: Optional[int] = None) -> float:
         """Calculate output torque (Nm) after gearbox reduction and losses."""
+        # --- Add type check for gear ---
+        if not isinstance(gear, (int, np.integer)):
+             logger.error(f"Invalid type for gear in calculate_output_torque: {type(gear)}")
+             return 0.0
+        # ---
         ratio = self.get_ratio(gear)
         efficiency = self.get_efficiency(gear)
         # Torque increases by ratio, decreases by efficiency
+        # --- Add type check for ratio/efficiency ---
+        if not isinstance(ratio, (float, np.floating)) or not isinstance(efficiency, (float, np.floating)):
+            logger.error(f"Invalid types for ratio ({type(ratio)}) or efficiency ({type(efficiency)})")
+            return 0.0
+        # ---
         return input_torque_nm * ratio * efficiency if ratio != 0 else 0.0
 
     def calculate_output_speed_rpm(self, input_speed_rpm: float, gear: Optional[int] = None) -> float:
@@ -264,63 +274,53 @@ class DrivetrainSystem:
                 differential: Optional[Differential] = None,
                 wheel_radius_m: float = 0.2286,
                 config_path: Optional[str] = None):
-        """
-        Args:
-            transmission: Transmission instance.
-            final_drive: FinalDrive instance.
-            differential: Optional Differential instance (defaults to locked).
-            wheel_radius_m: Effective rolling radius of driven wheels (m).
-            config_path: Optional path to YAML config for drivetrain system params.
-        """
-        self.transmission = transmission
-        self.final_drive = final_drive
-        self.differential = differential if differential else Differential(locked=True)
-        self.wheel_radius_m = wheel_radius_m
+        # ... (initialization of components) ...
 
-        # System parameters
-        self.drivetrain_inertia_kgm2 = 0.15 # Default equivalent inertia
-
-        # Load from config if provided
-        if config_path and os.path.exists(config_path):
-            try:
-                with open(config_path, 'r') as f:
-                    config = yaml.safe_load(f)
-                # Load vehicle params section which might contain wheel radius / inertia
-                vehicle_config = config.get('vehicle', {})
-                self.wheel_radius_m = float(vehicle_config.get('wheel_radius', self.wheel_radius_m))
-                self.drivetrain_inertia_kgm2 = float(vehicle_config.get('drivetrain_inertia', self.drivetrain_inertia_kgm2))
-                # Reload components if their configs are nested here (optional)
-                if 'transmission' in config: self.transmission = Transmission(**config['transmission'])
-                if 'final_drive' in config: self.final_drive = FinalDrive(**config['final_drive'])
-                if 'differential' in config: self.differential = Differential(**config['differential'])
-                logger.info(f"Drivetrain config loaded from {config_path}")
-            except Exception as e:
-                logger.error(f"Error loading drivetrain config from {config_path}: {e}.")
-
-
-        self.overall_ratios = self._calculate_overall_ratios()
+        self.overall_ratios = self._calculate_overall_ratios() # Calculation should return floats now
         self.num_gears = self.transmission.num_gears
 
         logger.info(f"Drivetrain System initialized. Wheel Radius: {self.wheel_radius_m*M_TO_MM:.1f} mm")
-        logger.info(f" Overall Ratios: {[f'{r:.3f}' for r in self.overall_ratios]}")
-
+        # --- Fix Logging ---
+        # Ensure the list comprehension formats each ratio as a float string
+        ratios_str_list = [f'{r:.3f}' for r in self.overall_ratios]
+        logger.info(f" Overall Ratios: {ratios_str_list}") # Log list of formatted strings
 
     def _calculate_overall_ratios(self) -> List[float]:
         """Calculate overall gear reduction ratio for each gear."""
         ratios = []
+        # --- Get component ratios ONCE ---
+        fd_ratio = self.final_drive.get_ratio()
+        diff_ratio = self.differential.get_ratio()
+        # ---
         for i in range(1, self.transmission.num_gears + 1):
-             ratio = self.transmission.get_ratio(i) * \
-                     self.final_drive.get_ratio() * \
-                     self.differential.get_ratio()
-             ratios.append(ratio)
+             # --- Get transmission ratio ---
+             trans_ratio = self.transmission.get_ratio(i)
+             # ---
+             # Check for potential issues before calculation
+             if not isinstance(trans_ratio, (float, np.floating)) or \
+                not isinstance(fd_ratio, (float, np.floating)) or \
+                not isinstance(diff_ratio, (float, np.floating)):
+                 logger.error(f"Non-float ratio encountered for gear {i}: T={trans_ratio}, FD={fd_ratio}, Diff={diff_ratio}")
+                 overall_ratio = 0.0 # Assign safe value on error
+             else:
+                 overall_ratio = trans_ratio * fd_ratio * diff_ratio
+             # --- Explicitly cast to float before appending ---
+             ratios.append(float(overall_ratio))
+             # ---
         return ratios
 
     def get_overall_ratio(self, gear: Optional[int] = None) -> float:
         """Get overall ratio for a specific gear."""
         gear_idx = gear if gear is not None else self.transmission.current_gear
+        logger.debug(f"Getting overall ratio for gear_idx={gear_idx}") # DEBUG
         if 1 <= gear_idx <= self.num_gears:
+            # --- Add Debugging ---
+            logger.debug(f"  overall_ratios type: {type(self.overall_ratios)}")
+            logger.debug(f"  Index: {gear_idx - 1}, Value type: {type(self.overall_ratios[gear_idx - 1])}")
+            # ---
             return self.overall_ratios[gear_idx - 1]
         elif gear_idx == 0:
+            logger.debug("  Returning 0 for Neutral gear.") # DEBUG
             return 0.0 # Neutral
         else:
              logger.warning(f"Invalid gear {gear_idx} requested for overall ratio.")
@@ -337,16 +337,55 @@ class DrivetrainSystem:
     def calculate_total_wheel_torque(self, engine_torque_nm: float, gear: Optional[int] = None) -> float:
         """Calculate total torque (Nm) delivered to both driven wheels."""
         gear_idx = gear if gear is not None else self.transmission.current_gear
+        logger.debug(f"Calculating wheel torque for gear_idx={gear_idx} (type={type(gear_idx)})") # DEBUG
+
+        # --- Check type before calling transmission methods ---
+        if not isinstance(gear_idx, (int, np.integer)):
+             logger.error(f"Invalid type for gear_idx in calculate_total_wheel_torque: {type(gear_idx)}")
+             return 0.0 # Return zero torque if gear is invalid type
+        # ---
+
         trans_out_nm = self.transmission.calculate_output_torque(engine_torque_nm, gear_idx)
+        logger.debug(f"  Transmission output torque: {trans_out_nm:.2f}") # DEBUG
+
+        # --- Check type before calling final_drive methods ---
+        if not isinstance(trans_out_nm, (float, np.floating)):
+            logger.error(f"Invalid type for trans_out_nm: {type(trans_out_nm)}")
+            return 0.0
+        # ---
+
         final_drive_out_nm = self.final_drive.calculate_output_torque(trans_out_nm)
+        logger.debug(f"  Final drive output torque: {final_drive_out_nm:.2f}") # DEBUG
+
         # Assuming locked diff or summing both wheels for total output
-        total_wheel_torque = final_drive_out_nm * self.differential.get_ratio() * self.differential.efficiency
+        # --- Check type before calling differential methods ---
+        if not isinstance(final_drive_out_nm, (float, np.floating)):
+             logger.error(f"Invalid type for final_drive_out_nm: {type(final_drive_out_nm)}")
+             return 0.0
+        if not callable(getattr(self.differential, 'get_ratio', None)):
+             logger.error("Differential.get_ratio is not callable!")
+             return 0.0
+        if not isinstance(getattr(self.differential, 'efficiency', None), (float, np.floating)):
+            logger.error(f"Differential.efficiency is not a float: {type(self.differential.efficiency)}")
+            return 0.0
+        # ---
+
+        diff_ratio = self.differential.get_ratio()
+        diff_efficiency = self.differential.efficiency
+        logger.debug(f"  Differential ratio={diff_ratio}, eff={diff_efficiency}") # DEBUG
+
+        total_wheel_torque = final_drive_out_nm * diff_ratio * diff_efficiency
+        logger.debug(f"  Total wheel torque calculated: {total_wheel_torque:.2f}") # DEBUG
         return total_wheel_torque
 
     def calculate_engine_speed_rpm(self, vehicle_speed_mps: float, gear: Optional[int] = None) -> float:
         """Calculate engine speed (RPM) for a given vehicle speed and gear."""
         gear_idx = gear if gear is not None else self.transmission.current_gear
+        logger.debug(f"Calculating engine RPM for speed={vehicle_speed_mps:.2f}, gear={gear_idx}")
+        logger.debug(f"  Type of self.get_overall_ratio: {type(getattr(self, 'get_overall_ratio', None))}")
+
         overall_ratio = self.get_overall_ratio(gear_idx)
+        logger.debug(f"  Overall ratio for gear {gear_idx}: {overall_ratio} (type={type(overall_ratio)})")
 
         if overall_ratio <= 0 or self.wheel_radius_m <= 0: return 0.0 # Avoid division by zero
 
@@ -357,6 +396,7 @@ class DrivetrainSystem:
 
         # Engine speed (RPM) = wheel_speed (RPM) * overall_ratio
         engine_rpm = wheel_speed_rpm * overall_ratio
+        logger.debug(f"  Calculated engine RPM: {engine_rpm:.1f}") 
         return engine_rpm
 
     def calculate_vehicle_speed_mps(self, engine_rpm: float, gear: Optional[int] = None) -> float:

@@ -1086,28 +1086,39 @@ def create_formula_student_cooling_system(config_dir: str = "configs/thermal") -
     """Create an optimized cooling system typical for Formula Student."""
     # Assumes config files are tailored for FS (e.g., electric pump, potentially larger radiator)
     try:
-        # Use generic config names defined in the project structure
-        rad_path = os.path.join(config_dir, "cooling_system.yaml") # Radiator params might be in main file
-        pump_path = os.path.join(config_dir, "cooling_system.yaml") # Pump params might be in main file
-        fan_path = os.path.join(config_dir, "cooling_system.yaml") # Fan params might be in main file
-        thermo_path = os.path.join(config_dir, "cooling_system.yaml")
-        system_path = os.path.join(config_dir, "cooling_system.yaml") # System params
+        cfg_file_path = os.path.join(config_dir, "cooling_system.yaml")
 
-        # Create components using the main cooling_system config file
-        radiator = Radiator(config_path=rad_path) if os.path.exists(rad_path) else \
-                   Radiator(radiator_type=RadiatorType.DOUBLE_CORE_ALUMINUM, core_area=0.18) # FS default
-        pump = WaterPump(config_path=pump_path) if os.path.exists(pump_path) else \
-               WaterPump(pump_type=PumpType.ELECTRIC, max_flow_rate_lpm=75) # FS default
-        fan = CoolingFan(config_path=fan_path) if os.path.exists(fan_path) else \
-              CoolingFan(fan_type=FanType.VARIABLE_SPEED, max_airflow_m3s=0.35) # FS default
-        thermostat = Thermostat(config_path=thermo_path) if os.path.exists(thermo_path) else \
-                     Thermostat(opening_temp_C=80, full_open_temp_C=90) # FS default
+        # Initialize components with defaults first
+        radiator = Radiator(radiator_type=RadiatorType.DOUBLE_CORE_ALUMINUM, core_area=0.18)
+        pump = WaterPump(pump_type=PumpType.ELECTRIC, max_flow_rate_lpm=75)
+        # *** Explicitly list expected __init__ args for CoolingFan ***
+        fan = CoolingFan(fan_type=FanType.VARIABLE_SPEED,
+                         max_airflow_m3s=0.35, # Correct keyword
+                         diameter_m=0.25,      # Correct keyword
+                         max_power_W=90.0,       # Correct keyword
+                         voltage_V=12.0)        # Correct keyword
+        thermostat = Thermostat(opening_temp_C=80, full_open_temp_C=90)
+        system = CoolingSystem(radiator, pump, fan, thermostat) # Pass components
 
-        system = CoolingSystem(radiator, pump, fan, thermostat, config_path=system_path)
+        # Load config file if it exists and apply overrides
+        if os.path.exists(cfg_file_path):
+             logger.debug(f"Loading overrides for FS cooling system from: {cfg_file_path}")
+             with open(cfg_file_path, 'r') as f:
+                 config = yaml.safe_load(f)
+             if config:
+                  # Use the _load_config methods of individual components
+                  if 'radiator' in config: radiator._load_config(cfg_file_path) # Let it load its own section
+                  if 'water_pump' in config: pump._load_config(cfg_file_path)
+                  if 'cooling_fan' in config: fan._load_config(cfg_file_path)
+                  if 'thermostat' in config: thermostat._load_config(cfg_file_path)
+                  # Load system-level parameters directly into the CoolingSystem object
+                  system._load_config(cfg_file_path)
+
         logger.info("Created Formula Student optimized cooling system.")
         return system
     except Exception as e:
          logger.error(f"Failed to create FS system from configs: {e}. Returning basic default.")
+         # Ensure fallback creates valid components
          return CoolingSystem(Radiator(), WaterPump(), CoolingFan(), Thermostat())
 
 

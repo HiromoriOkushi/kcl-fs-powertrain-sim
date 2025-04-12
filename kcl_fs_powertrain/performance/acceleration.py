@@ -98,34 +98,27 @@ class AccelerationSimulator:
         return self.vehicle.engine.redline_rpm + self.shift_rpm_offset
 
     def simulate_acceleration(self, use_launch_control: bool = True) -> Dict:
-        """
-        Simulate the acceleration run.
-        """
-        # --- Prepare Cache Key ---
-        cache_key_parts = [f"dist{self.distance_m}", f"ts{self.time_step_s}", f"lc{use_launch_control}", f"lcRpm{self.launch_rpm if use_launch_control else 0}", f"lcSlip{self.launch_slip_target if use_launch_control else 0}", f"lcDur{self.launch_duration_s if use_launch_control else 0}", f"optSh{self.use_optimized_shifts}", f"shOff{self.shift_rpm_offset}", f"mass{self.vehicle.mass:.1f}"]
-        cache_key = "_".join(cache_key_parts)
-        if cache_key in self.results_cache:
-            logger.info("Using cached acceleration results for key: %s", cache_key)
-            return self.results_cache[cache_key]
-
+        # ... (cache check) ...
         logger.info(f"Simulating acceleration: LC={'On' if use_launch_control else 'Off'}, Shifts={'Optimized' if self.use_optimized_shifts else 'Fixed Offset'}")
 
         # --- Reset Vehicle State ---
-        self.vehicle.current_speed = 0.0
-        self.vehicle.current_position = 0.0
-        self.vehicle.current_acceleration = 0.0
-        self.vehicle.current_engine_rpm = getattr(self.vehicle.engine, 'idle_rpm', 1300.0)
-        self.vehicle.throttle_input = 0.0
-        self.vehicle.brake_input = 0.0
+        # ... (reset position, speed, etc.) ...
         if hasattr(self.vehicle, 'cas_system') and self.vehicle.cas_system:
             self.vehicle.cas_system.reset()
-        # Start in 1st gear (Vehicle.change_gear handles CAS logic)
+
+        # --- Engage 1st Gear ---
+        logger.debug("Attempting to engage 1st gear...")
         success_gear1, _ = self.vehicle.change_gear(1)
-        if not success_gear1:
-            logger.error("Failed to engage 1st gear at simulation start.")
-            return {'error': 'Failed to engage 1st gear'}
-        # Directly set gear if no CAS or if change_gear failed but we need to start
-        if self.vehicle.current_gear == 0: self.vehicle.current_gear = 1
+        # Directly check and set gear if change_gear didn't (e.g., CAS busy at start?)
+        if self.vehicle.current_gear() == 0: # Use getter method if available
+            if success_gear1:
+                logger.warning("change_gear(1) succeeded but vehicle gear is still 0. Forcing gear 1.")
+                self.vehicle.current_gear = 1 # Force it if needed
+                if self.vehicle.cas_system: self.vehicle.cas_system.current_gear = 1 # Sync CAS too
+            else:
+                logger.error("Failed to engage 1st gear at simulation start.")
+                return {'error': 'Failed to engage 1st gear', 'finish_time': None} # Ensure finish_time is None
+        logger.info(f"Starting simulation in Gear: {self.vehicle.current_gear()}")
 
         # --- Simulation Loop ---
         time_s = 0.0
@@ -230,6 +223,7 @@ class AccelerationSimulator:
             except Exception as e: logger.error(f"Error interpolating time to speed {target_speed_mps:.1f} m/s: {e}"); return None
         results['time_to_60mph'] = time_to_speed(60.0 / MS_TO_MPH)
         results['time_to_100kph'] = time_to_speed(100.0 / MS_TO_KMH)
+        logger.debug(f"Results before final log: finish_time={results.get('finish_time')}, 0-60={results.get('time_to_60mph')}, 0-100={results.get('time_to_100kph')}")
 
         # Add metadata
         results['distance_m'] = self.distance_m; results['used_launch_control'] = use_launch_control
@@ -237,7 +231,16 @@ class AccelerationSimulator:
         results['config'] = {'launch_rpm': self.launch_rpm, 'launch_slip_target': self.launch_slip_target, 'launch_duration_s': self.launch_duration_s, 'shift_rpm_offset': self.shift_rpm_offset}
 
         self.results_cache[cache_key] = results
-        logger.info(f"Accel sim complete. Time: {results.get('finish_time', -1):.3f}s, 0-60mph: {results.get('time_to_60mph', -1):.3f}s, 0-100kph: {results.get('time_to_100kph', -1):.3f}s")
+        ft = results.get('finish_time')
+        t60 = results.get('time_to_60mph')
+        t100 = results.get('time_to_100kph')
+        log_msg = (
+            f"Accel sim complete. " +
+            (f"Time: {ft:.3f}s" if ft is not None else "Time: DNF") + ", " +
+            (f"0-60mph: {t60:.3f}s" if t60 is not None else "0-60mph: N/A") + ", " +
+            (f"0-100kph: {t100:.3f}s" if t100 is not None else "0-100kph: N/A")
+        )
+        logger.info(log_msg)
         return results
 
     def optimize_launch_control(self,
