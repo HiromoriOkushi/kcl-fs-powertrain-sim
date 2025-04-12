@@ -7,6 +7,7 @@ used throughout the Formula Student powertrain simulation.
 
 import numpy as np
 from enum import Enum, auto
+from typing import Optional, List
 
 # Physical constants
 GRAVITY = 9.80665  # m/s², standard gravity
@@ -40,6 +41,7 @@ INCH_TO_M = 0.0254  # Convert inches to meters
 M_TO_INCH = 1 / INCH_TO_M  # Convert meters to inches
 MM_TO_M = 0.001  # Convert mm to meters
 M_TO_MM = 1000.0  # Convert meters to mm
+M_TO_KM = 0.001  # Convert meters to kilometers
 DEG_TO_RAD = np.pi / 180.0  # Convert degrees to radians
 RAD_TO_DEG = 180.0 / np.pi  # Convert radians to degrees
 LITERS_TO_M3 = 0.001  # Convert liters to cubic meters

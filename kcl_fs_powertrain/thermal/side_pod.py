@@ -14,6 +14,8 @@ import logging
 from enum import Enum, auto
 import yaml
 
+logger = logging.getLogger("SidePod")
+
 # Import base components
 try:
     from .cooling_system import Radiator, RadiatorType, CoolingFan, FanType

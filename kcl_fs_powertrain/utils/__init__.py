@@ -102,7 +102,7 @@ __all__ = [
     'celsius_to_fahrenheit', 'fahrenheit_to_celsius',
 
     # Unit conversion factors
-    'KMH_TO_MS', 'MS_TO_KMH', 'MPH_TO_MS', 'MS_TO_MPH',
+    'KMH_TO_MS', 'MS_TO_KMH', 'MPH_TO_MS', 'MS_TO_MPH','M_TO_KM',
     'KW_TO_HP', 'HP_TO_KW', 'NM_TO_LBFT', 'LBFT_TO_NM',
     'KG_TO_LBS', 'LBS_TO_KG', 'PSI_TO_PA', 'PA_TO_PSI',
     'INCH_TO_M', 'M_TO_INCH', 'MM_TO_M', 'M_TO_MM',
