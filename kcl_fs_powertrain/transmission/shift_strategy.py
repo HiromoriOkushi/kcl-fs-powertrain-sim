@@ -8,6 +8,8 @@ goals like maximum acceleration, efficiency, or endurance.
 import time
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+import pandas as pd
 from enum import Enum, auto
 from typing import Dict, List, Tuple, Optional, Union, Callable
 import logging

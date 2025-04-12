@@ -17,11 +17,18 @@ from typing import Dict, List, Tuple, Optional, Union, Any
 import os
 import logging
 
+
 # Import constants for unit conversions
 from .constants import (
     MS_TO_KMH, MS_TO_MPH, KG_TO_LBS, KW_TO_HP, LITERS_TO_GAL,
     NM_TO_LBFT, M_TO_INCH, M_TO_MM
 )
+# Import ReliabilityEvent for endurance plot
+try:
+    from ..performance.endurance import ReliabilityEvent # <-- ADD THIS IMPORT
+except ImportError:
+    class ReliabilityEvent(Enum): NONE=0 # Mock Enum as fallback <-- ADD FALLBACK
+    logger.warning("Could not import ReliabilityEvent for plotting.")
 
 # Configure logging
 logging.basicConfig(
@@ -51,6 +58,7 @@ COLOR_SCHEMES = {
     'speed': plt.cm.viridis, # Perceptually uniform colormap
     'acceleration': plt.cm.plasma # Another perceptually uniform colormap
 }
+THERMAL_CMAP = COLOR_SCHEMES['thermal']
 
 #------------------------------------------------------------------------------
 # Utility functions
@@ -1221,12 +1229,20 @@ def plot_endurance_results(endurance_data: Dict, title: Optional[str] = None,
         ax1.axhline(y=avg_lap_time, color='r', linestyle='--', alpha=0.7, label=f'Avg: {avg_lap_time:.2f}s')
         ax1.axhline(y=best_lap_time, color='g', linestyle='--', alpha=0.7, label=f'Best: {best_lap_time:.2f}s')
 
-        # Mark reliability events
-        for i, event_enum in enumerate(reliability_events):
-            if event_enum is not None and event_enum.name != 'NONE':
-                 if i < len(lap_times): # Check index bounds
+        # # Mark reliability events
+        reliability_events = endurance_data.get('reliability_events', []) # Get the list
+        for i, event in enumerate(reliability_events): # Iterate through events
+            # Check if it's a valid ReliabilityEvent instance or name and not NONE
+            event_name = None
+            if isinstance(event, ReliabilityEvent):
+                event_name = event.name
+            elif isinstance(event, str): # Handle if stored as string name
+                event_name = event
+
+            if event_name and event_name != 'NONE': # Check the name
+                if i < len(lap_times): # Check index bounds
                     ax1.scatter([lap_numbers[i]], [lap_times[i]], color='red', marker='x', s=100, zorder=5)
-                    ax1.annotate(event_enum.name.replace('_', ' ').title(),
+                    ax1.annotate(event_name.replace('_', ' ').title(),
                                xy=(lap_numbers[i], lap_times[i]),
                                xytext=(lap_numbers[i], lap_times[i] + 0.05 * (np.max(lap_times) - np.min(lap_times))),
                                ha='center', rotation=30, size=8, color='red')

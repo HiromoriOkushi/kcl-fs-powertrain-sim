@@ -20,6 +20,13 @@ import logging
 from enum import Enum, auto
 import yaml
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("RearRadiator")
+
 # Import base components (handle potential import errors if run standalone)
 try:
     from .cooling_system import Radiator, RadiatorType, CoolingFan, FanType
@@ -46,13 +53,6 @@ except ImportError:
     COLOR_SCHEMES = {'default': plt.cm.tab10.colors}
     logger.warning("Could not import utils.constants or utils.plotting. Using fallback values/functions.")
 
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("RearRadiator")
 
 
 class MountingPosition(Enum):

@@ -9,7 +9,9 @@ and track processing used throughout the Formula Student powertrain simulation p
 from .constants import (
     # Physical constants
     GRAVITY, AIR_DENSITY_SEA_LEVEL, WATER_DENSITY, AIR_VISCOSITY,
-    WATER_SPECIFIC_HEAT, AIR_SPECIFIC_HEAT, AIR_GAS_CONSTANT,
+    WATER_SPECIFIC_HEAT,
+    AIR_SPECIFIC_HEAT_CP, AIR_SPECIFIC_HEAT_CV,
+    AIR_GAS_CONSTANT,
     STANDARD_PRESSURE, STEFAN_BOLTZMANN, ABSOLUTE_ZERO_C,
 
     # Unit conversion functions
@@ -54,7 +56,7 @@ from .constants import (
     calculate_efficiency_score,
 
     # Fuel properties class
-    FuelProperties as FuelPropertiesConstants # Rename to avoid conflict if FuelProperties is imported elsewhere
+    FuelPropertiesConstants # Rename to avoid conflict if FuelProperties is imported elsewhere
 )
 
 # Import plotting functions
@@ -90,7 +92,9 @@ from .track_utils import (
 __all__ = [
     # Constants
     'GRAVITY', 'AIR_DENSITY_SEA_LEVEL', 'WATER_DENSITY', 'AIR_VISCOSITY',
-    'WATER_SPECIFIC_HEAT', 'AIR_SPECIFIC_HEAT', 'AIR_GAS_CONSTANT',
+    'WATER_SPECIFIC_HEAT',
+    'AIR_SPECIFIC_HEAT_CP', 'AIR_SPECIFIC_HEAT_CV',
+    'AIR_GAS_CONSTANT',
     'STANDARD_PRESSURE', 'STEFAN_BOLTZMANN', 'ABSOLUTE_ZERO_C',
 
     # Unit conversion functions

@@ -15,7 +15,24 @@ from scipy.interpolate import interp1d, CubicSpline
 import logging
 
 # Import from local modules
-from .engine_thermal import EngineHeatModel, ThermalConfig
+try:
+    from .engine_thermal import EngineHeatModel, ThermalConfig
+except ImportError:
+    class EngineHeatModel: pass
+    class ThermalConfig: pass
+    EngineHeatModel = None
+    ThermalConfig = None
+    
+# Import constants and fuel properties
+try:
+    from ..utils.constants import HP_TO_KW, KW_TO_HP
+    from .fuel_systems import FuelProperties, FuelType
+except ImportError:
+    HP_TO_KW = 0.7457
+    KW_TO_HP = 1 / HP_TO_KW
+    class FuelProperties: pass
+    class FuelType: E85 = 0 
+    FuelProperties = None 
 
 
 
@@ -72,9 +89,28 @@ class MotorcycleEngine:
 
         # --- Thermal Model ---
         # Use default config initially, can be overridden
-        self.thermal_config = ThermalConfig()
-        self.heat_model = EngineHeatModel(self.thermal_config, self) # Pass self for potential access
-
+        if ThermalConfig:
+            self.thermal_config = ThermalConfig()
+        else:
+            self.thermal_config = None
+            logger.warning("ThermalConfig not available, thermal model disabled.")
+        
+        if EngineHeatModel and self.thermal_config:
+            self.heat_model = EngineHeatModel(self.thermal_config, self) # Pass self for potential access
+        else:
+            self.heat_model = None
+            logger.warning("EngineHeatModel not available, thermal model disabled.")
+        
+        if FuelProperties and hasattr(self, 'fuel_type'):
+            try:
+                ft = FuelType[self.fuel_type.upper()]
+                self.fuel_properties = FuelProperties(ft)
+            except (KeyError, TypeError):
+                logger.warning(f"Could not create FuelProperties for type '{self.fuel_type}'. Using defaults for heat calc.")
+                self.fuel_properties = None
+        else:
+            self.fuel_properties = None
+            
         # --- Load Configuration ---
         self.config = {} # Store loaded config
         if config_path:

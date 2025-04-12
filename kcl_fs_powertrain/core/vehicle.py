@@ -10,42 +10,60 @@ from typing import Dict, List, Tuple, Optional, Union, Callable
 import yaml
 import logging
 import copy
+import matplotlib.pyplot as plt
+
+# --- Import constants FIRST ---
+# Import the necessary constants directly at the module level
+try:
+    from ..utils.constants import (
+        GRAVITY, AIR_DENSITY_SEA_LEVEL, KW_TO_HP, HP_TO_KW, MS_TO_KMH, MS_TO_MPH,
+        FS_ACCELERATION_LENGTH, # <--- Import Here
+        FS_SKIDPAD_RADIUS     # <--- Import Here too
+    )
+except ImportError:
+    # Define fallbacks if constants module cannot be imported
+    GRAVITY = 9.81; AIR_DENSITY_SEA_LEVEL = 1.225; KW_TO_HP = 1.341; HP_TO_KW = 1/KW_TO_HP; MS_TO_KMH = 3.6; MS_TO_MPH = 2.237
+    FS_ACCELERATION_LENGTH = 75.0 # Define fallback
+    FS_SKIDPAD_RADIUS = 15.25 / 2.0 # Define fallback
 
 # Import powertrain components (handle potential errors)
 try:
     from ..engine.motorcycle_engine import MotorcycleEngine
-    from ..engine.engine_thermal import EngineHeatModel, ThermalConfig # Assuming thermal model is here
+    from ..engine.engine_thermal import EngineHeatModel, ThermalConfig
     from ..transmission.gearing import DrivetrainSystem, Transmission, FinalDrive, Differential
-    from ..transmission.cas_system import CASSystem, ShiftDirection
+    from ..transmission.cas_system import CASSystem, ShiftDirection, ShiftState # Added ShiftState
     from ..transmission.shift_strategy import StrategyManager, create_formula_student_strategies, StrategyType
-    # Import primary cooling system interface (adjust if needed)
-    # Alias ExternalCoolingSystem to avoid name clash with EngineCoolingSystemComponent if both exist
     from ..thermal.cooling_system import CoolingSystem as ExternalCoolingSystem
-    from ..thermal.cooling_system import create_formula_student_cooling_system # Import factory
+    from ..thermal.cooling_system import create_formula_student_cooling_system
     from ..thermal.side_pod import DualSidePodSystem, create_standard_side_pod_system
     from ..thermal.rear_radiator import RearRadiatorSystem, create_default_rear_radiator_system
     from ..thermal.electric_compressor import CoolingAssistSystem, create_default_cooling_assist_system
-    from ..utils.constants import GRAVITY, AIR_DENSITY_SEA_LEVEL, KW_TO_HP, HP_TO_KW, MS_TO_KMH, MS_TO_MPH
     from ..utils.plotting import plot_vehicle_performance_summary, plot_acceleration_results as plot_accel_results_util, save_plot
-    from ..performance.lap_time import CorneringPerformance # For cornering calcs
+    from ..performance.lap_time import CorneringPerformance
+    from ..performance.acceleration import AccelerationSimulator 
+    from ..performance.lap_time import LapTimeSimulator       
 except ImportError as e:
-    # Define placeholders if imports fail (e.g., for testing)
-    logger = logging.getLogger("Vehicle_Fallback")
-    logger.error(f"Error importing vehicle components: {e}. Using placeholders.")
+    # Define placeholders if imports fail
+    logger_fallback = logging.getLogger("Vehicle_Fallback") 
+    logger_fallback.error(f"Error importing vehicle components: {e}. Using placeholders.")
     class MotorcycleEngine: pass
+    class EngineHeatModel: pass
+    class ThermalConfig: pass
     class DrivetrainSystem: pass
     class Transmission: pass
     class FinalDrive: pass
     class Differential: pass
     class CASSystem: pass
+    class ShiftState: IDLE = 0; SHIFT_IN_PROGRESS = 1 
+    class ShiftDirection: UP = 1; DOWN = -1
     class StrategyManager: pass
     class ExternalCoolingSystem: pass
     class DualSidePodSystem: pass
     class RearRadiatorSystem: pass
     class CoolingAssistSystem: pass
-    class EngineHeatModel: pass
-    class ThermalConfig: pass
     class CorneringPerformance: pass
+    class AccelerationSimulator: pass
+    class LapTimeSimulator: pass
     def create_formula_student_strategies(*args, **kwargs): return None
     def create_standard_side_pod_system(*args, **kwargs): return None
     def create_default_rear_radiator_system(*args, **kwargs): return None
@@ -54,7 +72,6 @@ except ImportError as e:
     def plot_vehicle_performance_summary(*args, **kwargs): plt.figure(); plt.plot([0,1]); plt.title("Fallback Plot"); plt.show(); plt.close(); return plt.gcf()
     def plot_accel_results_util(*args, **kwargs): plt.figure(); plt.plot([0,1]); plt.title("Fallback Plot"); plt.show(); plt.close(); return plt.gcf()
     def save_plot(fig, path, **kwargs): pass
-    GRAVITY = 9.81; AIR_DENSITY_SEA_LEVEL = 1.225; KW_TO_HP = 1.341; HP_TO_KW = 1/KW_TO_HP; MS_TO_KMH = 3.6; MS_TO_MPH = 2.237
 
 # Configure logging
 logging.basicConfig(
@@ -168,6 +185,7 @@ class Vehicle:
         self.thermal_factor = getattr(self.engine, 'thermal_factor', 1.0)
 
         logger.info(f"{self.team_name} Vehicle initialized. Mass: {self.mass:.1f} kg")
+    
     def load_config(self, config_path: str):
         """Load vehicle base parameters from YAML file."""
         if not os.path.exists(config_path):
@@ -643,15 +661,23 @@ class Vehicle:
 
         if self.cas_system:
             # CAS handles readiness checks and overrev protection internally now
-            success = self.cas_system.request_shift(direction, target_gear_override=target_gear)
-            if success:
-                # Shift *initiated*. Gear change happens later via event or state check.
-                # Get estimated time for the *calling simulator* to handle.
-                shift_duration_s = self.cas_system.get_total_shift_time_ms(direction) / 1000.0
-                # DO NOT update self.current_gear here. It's updated when the shift completes.
-                logger.debug(f"CAS shift {self.current_gear}->{target_gear} initiated. Estimated duration: {shift_duration_s*1000:.1f} ms.")
+            # Use monotonic time for shift initiation check
+            current_time_s = time.monotonic()
+            # Pass current time to CAS for readiness check
+            if self.cas_system._check_shift_readiness(current_time_s * 1000.0): # CAS uses ms
+                success = self.cas_system.request_shift(direction, target_gear_override=target_gear)
+                if success:
+                    # Shift *initiated*. Gear change happens later via event or state check.
+                    # Get estimated time for the *calling simulator* to handle.
+                    shift_duration_s = self.cas_system.get_total_shift_time_ms(direction) / 1000.0
+                    # DO NOT update self.current_gear here. It's updated when the shift completes.
+                    logger.debug(f"CAS shift {self.current_gear}->{target_gear} initiated. Estimated duration: {shift_duration_s*1000:.1f} ms.")
+                else:
+                    logger.debug(f"CAS shift request {self.current_gear}->{target_gear} rejected by internal CAS logic (e.g., overrev).")
             else:
-                logger.debug(f"CAS shift request {self.current_gear}->{target_gear} rejected.")
+                 logger.debug(f"CAS shift request {self.current_gear}->{target_gear} rejected by readiness check (busy/cooldown).")
+                 success = False # Explicitly false if readiness check fails
+
         else:
             # Direct transmission change if no CAS
             if 0 <= target_gear <= self.drivetrain.num_gears:
@@ -766,19 +792,33 @@ class Vehicle:
     # These methods might call the specialized simulators from performance package
     # or implement simplified versions directly using the vehicle's step updates.
 
-    def simulate_acceleration_run(self, distance: float = FS_ACCELERATION_LENGTH,
+    def simulate_acceleration_run(self, distance: float = FS_ACCELERATION_LENGTH, # Now defined
                                 max_time: float = 10.0, dt: float = 0.01,
                                 use_launch_control: bool = True,
                                 use_optimized_shifts: bool = True) -> Dict:
-        """Simulate a standard acceleration run."""
+        """Simulate a standard acceleration run using AccelerationSimulator."""
         logger.info("Running simulate_acceleration_run within Vehicle class...")
+        # Check if the specialized simulator class is available
+        if AccelerationSimulator is None:
+            logger.error("AccelerationSimulator class not available. Cannot simulate.")
+            return {'error': 'AccelerationSimulator not available'}
+
         # Use the dedicated AccelerationSimulator for consistency
-        accel_sim = AccelerationSimulator(copy.deepcopy(self)) # Simulate on a copy
-        accel_sim.configure(distance_m=distance, time_step_s=dt, max_time_s=max_time)
-        accel_sim.configure_launch_control(use_traction_control=True) # Use default LC params initially
-        accel_sim.configure_shifting(use_optimized=use_optimized_shifts)
-        results = accel_sim.simulate_acceleration(use_launch_control=use_launch_control)
-        return results
+        try:
+            # Pass a deep copy of the *current* vehicle state to the simulator
+            vehicle_copy = copy.deepcopy(self)
+            accel_sim = AccelerationSimulator(vehicle_copy)
+            accel_sim.configure(distance_m=distance, time_step_s=dt, max_time_s=max_time)
+            accel_sim.configure_launch_control(use_traction_control=True) # Use default LC params initially
+            accel_sim.configure_shifting(use_optimized=use_optimized_shifts)
+            results = accel_sim.simulate_acceleration(use_launch_control=use_launch_control)
+            # Analyze results using the simulator's method
+            metrics = accel_sim.analyze_performance_metrics(results)
+            results.update(metrics) # Add metrics to the results dict
+            return results
+        except Exception as e:
+             logger.error(f"Error during AccelerationSimulation: {e}", exc_info=True)
+             return {'error': str(e)}
 
     def simulate_skidpad(self, circle_radius_m: float = FS_SKIDPAD_RADIUS,
                        target_gear: int = 2, max_laps: int = 4, dt: float = 0.01) -> Dict:
@@ -848,13 +888,25 @@ class Vehicle:
     def simulate_lap(self, track_file: str, include_thermal: bool = True) -> Dict:
          """Simulate a single lap using the LapTimeSimulator."""
          logger.info("Running simulate_lap via LapTimeSimulator...")
-         # Use the dedicated LapTimeSimulator for consistency
-         lap_sim = LapTimeSimulator(copy.deepcopy(self), track_file=track_file)
-         results = lap_sim.simulate_lap(include_thermal=include_thermal)
-         # Add metrics for convenience
-         results['metrics'] = lap_sim.analyze_lap_performance(results)
-         return results
+         # Check if the specialized simulator class is available
+         if LapTimeSimulator is None:
+             logger.error("LapTimeSimulator class not available. Cannot simulate.")
+             return {'error': 'LapTimeSimulator not available'}
 
+         # Use the dedicated LapTimeSimulator for consistency
+         try:
+             # Pass a deep copy of the *current* vehicle state
+             vehicle_copy = copy.deepcopy(self)
+             lap_sim = LapTimeSimulator(vehicle_copy, track_file=track_file)
+             results = lap_sim.simulate_lap(include_thermal=include_thermal)
+             # Add metrics for convenience
+             metrics = lap_sim.analyze_lap_performance(results)
+             results['metrics'] = metrics
+             return results
+         except Exception as e:
+              logger.error(f"Error during LapTimeSimulation: {e}", exc_info=True)
+              return {'error': str(e)}
+          
     # --- Analysis and Helper Methods ---
 
     def calculate_weight_transfer(self, longitudinal_accel_mpss: float = 0.0, lateral_accel_mpss: float = 0.0) -> Dict:
