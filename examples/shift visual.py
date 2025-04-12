@@ -19,6 +19,7 @@ from matplotlib.widgets import Slider, Button, RadioButtons, CheckButtons
 import yaml
 from typing import Dict, List, Tuple, Optional
 import pandas as pd
+import logging
 
 # --- Add project root to Python path ---
 # This allows running this script directly from the examples directory
@@ -27,7 +28,7 @@ project_root = os.path.abspath(os.path.join(script_dir, '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 # -----------------------------------------
-
+logger = logging.getLogger("Shift Visual")
 # Import modules from the kcl_fs_powertrain package (Use absolute paths)
 try:
     from kcl_fs_powertrain.engine.motorcycle_engine import MotorcycleEngine

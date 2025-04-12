@@ -13,6 +13,7 @@ from typing import Dict, List, Tuple, Optional, Union, Callable
 import os
 import yaml
 
+logger = logging.getLogger("__name__")
 # Assuming MotorcycleEngine might be needed for properties like redline
 try:
     from ..engine.motorcycle_engine import MotorcycleEngine
@@ -29,6 +30,7 @@ class ShiftState(Enum):
     PREPARE_DOWNSHIFT = auto()# Preparing blip/cut
     IGNITION_CUT = auto()    # Ignition is cut
     ACTUATING_SHIFT = auto() # Solenoid/actuator is moving forks
+    SHIFT_IN_PROGRESS = auto()
     THROTTLE_BLIP = auto()   # Throttle is blipped (downshift only)
     RECOVERY = auto()        # Ignition/throttle restored, stabilizing
     COOLDOWN = auto()        # Minimum interval between shifts
@@ -120,27 +122,6 @@ class CASSystem:
          self.overrev_protection_rpm_margin = float(config.get('overrev_protection_margin', self.overrev_protection_rpm_margin))
          # Note: Safety enables like neutral_safety, overrev_protection are usually handled by calling code
 
-
-    def _check_shift_readiness(self, current_time_ms: float) -> bool:
-        """Check if the system is ready for a new shift command."""
-        if self.system_state != ShiftState.IDLE:
-            logger.debug(f"Shift rejected: System busy ({self.system_state.name}).")
-            return False
-
-        time_since_last = current_time_ms - self.last_shift_finish_time_ms
-        if time_since_last < self.min_shift_interval_ms:
-            logger.debug(f"Shift rejected: Cooldown active ({time_since_last:.0f} < {self.min_shift_interval_ms:.0f} ms).")
-            return False
-
-        # Check shift frequency (shifts in the last 60 seconds)
-        sixty_seconds_ago = current_time_ms - 60000.0
-        self._shift_timestamps = [t for t in self._shift_timestamps if t > sixty_seconds_ago]
-        if len(self._shift_timestamps) >= self.max_shifts_per_minute:
-            logger.warning(f"Shift rejected: Exceeded max shifts per minute ({self.max_shifts_per_minute}).")
-            return False
-
-        return True
-
     def _check_overrev(self, target_gear: int, current_rpm: float) -> bool:
          """Check if shifting to target_gear would cause overrev."""
          if self.engine is None or current_rpm <= 0 or self.current_gear <= 0 or target_gear >= self.current_gear:
@@ -160,7 +141,7 @@ class CASSystem:
               return True # Overrev detected
          return False # No overrev predicted
 
-    def request_shift(self, direction: ShiftDirection, target_gear_override: Optional[int] = None) -> bool:
+    def request_shift(self, direction: ShiftDirection, current_rpm: float, target_gear_override: Optional[int] = None) -> bool:
         """
         Request a gear shift. Checks readiness and constraints.
         Updates internal state but does not block. Returns True if shift initiated.
@@ -168,14 +149,17 @@ class CASSystem:
 
         Args:
             direction: UP, DOWN, or NEUTRAL.
+            current_rpm: The current engine RPM (needed for overrev check). # <-- Added to docstring
             target_gear_override: Optional specific gear number to shift to.
 
         Returns:
             True if the shift process was initiated, False otherwise.
         """
         current_time_s = time.monotonic() # Use seconds for system time
-        if not self._check_shift_readiness(current_time_s):
+        # --- Use monotonic time consistently ---
+        if not self._check_shift_readiness(current_time_s * 1000.0): # Convert to ms for check
             return False
+        # ------------------------------------
 
         # Determine target gear
         target_gear = target_gear_override
@@ -198,46 +182,93 @@ class CASSystem:
              logger.debug(f"Shift ignored: Already in gear {target_gear}.")
              return True # No error, just no action needed
 
-        # Check overrev on downshifts (requires engine RPM)
-        if direction == ShiftDirection.DOWN and self.engine:
-             current_rpm = getattr(self.engine, 'current_rpm', 0)
+        # Check overrev on downshifts using the passed current_rpm
+        if direction == ShiftDirection.DOWN:
+             # Removed the check for self.engine as current_rpm is now passed directly
+             # if self.engine:
+             #    current_rpm = getattr(self.engine, 'current_rpm', 0) # No longer needed
              if self._check_overrev(target_gear, current_rpm):
                  return False # Overrev prevented shift
 
         # --- If all checks pass, initiate shift ---
         self.shift_start_time_s = current_time_s
-        self.system_state = ShiftState.SHIFT_IN_PROGRESS # Set state to busy
+        self.system_state = ShiftState.SHIFT_IN_PROGRESS # Use a clear state for busy
         self.target_gear_during_shift = target_gear # Store target gear
+
+        # Log timestamp list using seconds
+        # (Ensure this list exists - initialize in __init__)
+        if not hasattr(self, '_shift_timestamps_s'): self._shift_timestamps_s = []
+        # self._shift_timestamps_s.append(current_time_s) # Append when initiating
+
         logger.info(f"CAS Initiating shift: {self.current_gear} -> {target_gear}")
 
         # The shift process is initiated. The external simulator is responsible
         # for scheduling the completion event based on get_total_shift_time_ms()
         # and calling complete_shift().
         return True
-    
     def complete_shift(self, current_time_s: float):
         """Mark the current shift as complete and update state."""
+        # Ensure consistent time units (seconds)
         if self.system_state == ShiftState.SHIFT_IN_PROGRESS:
              shift_duration_ms = (current_time_s - self.shift_start_time_s) * 1000.0
              from_gear = self.current_gear
-             # Ensure target gear was stored during request_shift
-             to_gear = getattr(self, 'target_gear_during_shift', -1) # Get the stored target, default to invalid
+             to_gear = getattr(self, 'target_gear_during_shift', -1)
              if to_gear == -1:
                   logger.error("Cannot complete shift: Target gear was not stored.")
                   self.system_state = ShiftState.ERROR
                   return
 
-             self.current_gear = to_gear # Update the gear
-             self.system_state = ShiftState.IDLE # Ready for next shift
+             self.current_gear = to_gear
+             self.system_state = ShiftState.IDLE
+             # Use seconds for last shift time
              self.last_shift_finish_time_s = current_time_s
-             self._shift_timestamps_s.append(current_time_s)
-             self._log_shift(from_gear, to_gear, shift_duration_ms)
+             # Log the shift (RPM at completion might need update logic)
+             rpm_at_completion = getattr(self.engine, 'current_rpm', None) if self.engine else None
+             self._log_shift(from_gear, to_gear, shift_duration_ms, rpm_at_completion)
              logger.info(f"CAS shift completed: {from_gear} -> {to_gear} in {shift_duration_ms:.1f} ms.")
-             # Clear stored target only after successful completion
              if hasattr(self, 'target_gear_during_shift'):
                   delattr(self, 'target_gear_during_shift')
         else:
              logger.warning(f"complete_shift called when not in SHIFT_IN_PROGRESS state (current state: {self.system_state.name}).")
+
+
+    def _check_shift_readiness(self, current_time_ms: float) -> bool:
+         """Check if the system is ready for a new shift command."""
+         if self.system_state != ShiftState.IDLE:
+             logger.debug(f"Shift rejected: System busy ({self.system_state.name}).")
+             return False
+
+         # Use seconds internally now
+         current_time_s = current_time_ms / 1000.0
+         last_finish_s = getattr(self, 'last_shift_finish_time_s', -float('inf')) # Initialize if needed
+         min_interval_s = self.min_shift_interval_ms / 1000.0
+
+         time_since_last_s = current_time_s - last_finish_s
+         if time_since_last_s < min_interval_s:
+             logger.debug(f"Shift rejected: Cooldown active ({time_since_last_s*1000:.0f} < {self.min_shift_interval_ms:.0f} ms).")
+             return False
+
+         # Check shift frequency (shifts in the last 60 seconds)
+         sixty_seconds_ago_s = current_time_s - 60.0
+         # Ensure timestamp list uses seconds
+         if not hasattr(self, '_shift_timestamps_s'): self._shift_timestamps_s = []
+         self._shift_timestamps_s = [t for t in self._shift_timestamps_s if t > sixty_seconds_ago_s]
+         if len(self._shift_timestamps_s) >= self.max_shifts_per_minute:
+             logger.warning(f"Shift rejected: Exceeded max shifts per minute ({self.max_shifts_per_minute}).")
+             return False
+
+         return True
+
+    def _log_shift(self, from_gear: int, to_gear: int, duration_ms: float, rpm_at_completion: Optional[float]):
+        """Log details of a completed shift."""
+        record = {
+            'timestamp_s': time.monotonic(), # Use monotonic seconds for log
+            'from_gear': from_gear,
+            'to_gear': to_gear,
+            'duration_ms': duration_ms,
+            'engine_rpm_at_completion': rpm_at_completion
+        }
+        self.shift_log.append(record)
     
     def reset(self):
          """Reset CAS state to initial conditions."""

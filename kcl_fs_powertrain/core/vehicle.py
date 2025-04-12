@@ -10,7 +10,9 @@ from typing import Dict, List, Tuple, Optional, Union, Callable
 import yaml
 import logging
 import copy
-import time # <-- Import time for monotonic time
+import time
+
+logger = logging.getLogger("Vehicle")
 
 # --- Import constants FIRST ---
 try:
@@ -149,7 +151,7 @@ class Vehicle:
         self.cg_height_m: float = 0.28
         self.tire_radius_m: float = 0.2286
         self.max_braking_g: float = 1.8 # Max braking deceleration relative to g
-
+        self.include_thermal: bool = True
         # --- Load configuration ---
         if config is not None:
             self.config = copy.deepcopy(config)
@@ -357,7 +359,6 @@ class Vehicle:
                  self.drivetrain = DrivetrainSystem(
                      transmission, final_drive, differential,
                      wheel_radius_m=self.tire_radius_m,
-                     drivetrain_inertia_kgm2=dt_config.get('drivetrain_inertia_kgm2', 0.15)
                  )
                  logger.info("Drivetrain initialized from config/defaults.")
             else:
@@ -442,7 +443,9 @@ class Vehicle:
                  # Gather parameters safely using getattr
                  gear_ratios = getattr(getattr(self.drivetrain, 'transmission', None), 'gear_ratios', [])
                  num_gears = getattr(self.drivetrain, 'num_gears', 0)
-                 if not gear_ratios and num_gears > 0: gear_ratios = [0.0] * num_gears # Handle missing ratios
+                 if (gear_ratios is None or len(gear_ratios) == 0) and num_gears > 0:
+                     gear_ratios = [0.0] * num_gears # Handle missing ratios
+                     logger.warning(f"Transmission gear ratios were missing, created placeholder for {num_gears} gears.")
 
                  self.shift_manager = create_formula_student_strategies(
                      engine_max_rpm=getattr(self.engine, 'redline_rpm', 14000.0),
@@ -572,8 +575,11 @@ class Vehicle:
     def update_thermal_state(self, dt: float, ambient_temp_C: Optional[float] = None):
         """Update thermal state (engine, coolant, oil)."""
         if not self.include_thermal or not self.engine or not self.cooling_system:
+            # Set thermal factor to 1 if thermal simulation is disabled or components missing
             self.thermal_factor = 1.0
-            return
+            if hasattr(self.engine, 'thermal_factor'):
+                 self.engine.thermal_factor = 1.0
+            return # Skip thermal calculations
 
         ambient_temp = ambient_temp_C if ambient_temp_C is not None else 25.0
         heat_to_coolant_W = 0.0
@@ -583,77 +589,131 @@ class Vehicle:
         # 1. Calculate Heat Generation
         if hasattr(self.engine, 'heat_model') and self.engine.heat_model:
             try:
-                heat_gen = self.engine.heat_model.calculate_heat_generation(self.current_engine_rpm, self.throttle_input)
+                # Ensure current RPM and throttle are reasonably up-to-date before heat calc
+                # (update_engine_state should ideally be called before this if possible,
+                # otherwise use current values)
+                rpm_for_heat = getattr(self, 'current_engine_rpm', getattr(self.engine, 'idle_rpm', 1300))
+                throttle_for_heat = getattr(self, 'throttle_input', 0.0)
+
+                heat_gen = self.engine.heat_model.calculate_heat_generation(rpm_for_heat, throttle_for_heat)
                 heat_to_coolant_W = heat_gen.get('to_coolant', 0.0)
                 heat_to_oil_W = heat_gen.get('to_oil', 0.0)
                 heat_block_ambient_gen = heat_gen.get('to_ambient', 0.0)
             except Exception as e:
                 logger.warning(f"Could not calculate heat generation: {e}")
+        else:
+            logger.debug("No engine heat model available for heat generation calculation.")
+            # Estimate heat input if no model - very basic, proportional to RPM/Throttle?
+            rpm_for_heat = getattr(self, 'current_engine_rpm', getattr(self.engine, 'idle_rpm', 1300))
+            throttle_for_heat = getattr(self, 'throttle_input', 0.0)
+            estimated_power_kw = self.engine.get_power(rpm_for_heat, throttle_for_heat) if hasattr(self.engine, 'get_power') else 0
+            heat_to_coolant_W = (estimated_power_kw * 1500) + (3000 * throttle_for_heat) # Rough estimate based on power and baseline
 
         # 2. Update External Cooling System
+        # The cooling system step uses the current coolant temp and calculates heat rejection
         try:
-             # Cooling system update needs engine block temp as input
+             # --- MODIFIED CALL: Removed engine_temp keyword argument ---
              self.cooling_system.simulate_step(
-                 ambient_temp_C=ambient_temp, vehicle_speed_mps=self.current_speed_mps,
-                 engine_temp=self.engine_temperature, # Pass block temp
-                 engine_rpm=self.current_engine_rpm, engine_load=self.throttle_input,
-                 engine_heat_input_W=heat_to_coolant_W, dt=dt
+                 ambient_temp_C=ambient_temp,
+                 vehicle_speed_mps=self.current_speed, # Use vehicle's current speed
+                 engine_rpm=getattr(self, 'current_engine_rpm', 0), # Pass current RPM
+                 engine_load=getattr(self, 'throttle_input', 0.0), # Pass current throttle as load estimate
+                 engine_heat_input_W=heat_to_coolant_W, # Heat going INTO coolant
+                 dt=dt
              )
+             # ----------------------------------------------------------
+             # Get results from cooling system state
              self.radiator_heat_rejection_W = getattr(self.cooling_system, 'radiator_heat_rejection_W', 0.0)
-             self.coolant_temperature = getattr(self.cooling_system, 'coolant_temp_C', self.coolant_temperature) # Update coolant temp from system
+             self.coolant_temperature = getattr(self.cooling_system, 'coolant_temp_C', self.coolant_temperature) # Update coolant temp from system state
         except AttributeError as e:
-             logger.warning(f"Cooling system simulation step failed: {e}.")
+             logger.warning(f"Cooling system simulation step or attribute access failed: {e}.")
+             self.radiator_heat_rejection_W = 0.0 # Assume no cooling on error
+        except TypeError as e: # Catch the specific error if arguments still mismatch
+             logger.error(f"TypeError calling cooling_system.simulate_step: {e}. Check arguments.", exc_info=True)
              self.radiator_heat_rejection_W = 0.0
-             # Use last known coolant temp
+        except Exception as e: # Catch other potential errors
+             logger.error(f"Unexpected error during cooling system update: {e}", exc_info=True)
+             self.radiator_heat_rejection_W = 0.0
 
-        # 3. Update Engine/Oil Temperatures
+        # 3. Update Engine/Oil Temperatures (if detailed engine heat model exists)
         if hasattr(self.engine, 'heat_model') and self.engine.heat_model:
             try:
                 thermal_cfg = self.engine.heat_model.config
                 capacities = thermal_cfg.get_thermal_capacities()
-                safe_caps = {'engine_block': 50000, 'engine_oil': 10000, 'coolant_engine': 8000}
-                safe_caps.update(capacities)
+                # Use safe defaults if capacities are missing
+                cap_eng_block = capacities.get('engine_block', 50000.0)
+                cap_eng_oil = capacities.get('engine_oil', 10000.0)
+                if cap_eng_block <= 0: cap_eng_block = 1e-3
+                if cap_eng_oil <= 0: cap_eng_oil = 1e-3
+
+                # Note: Coolant temp update is now handled primarily by the CoolingSystem object,
+                # as it accounts for the total system volume and radiator rejection.
+                # The engine heat model mainly updates engine block and oil based on transfers.
 
                 temps_current = {'engine': self.engine_temperature, 'oil': self.oil_temperature, 'coolant': self.coolant_temperature}
                 internal_transfer = self.engine.heat_model.calculate_internal_heat_transfer(temps_current)
-                ambient_loss = self.engine.heat_model.calculate_ambient_heat_loss(temps_current, ambient_temp, self.current_speed_mps)
+                ambient_loss = self.engine.heat_model.calculate_ambient_heat_loss(temps_current, ambient_temp, self.current_speed)
 
-                q_block_to_coolant = internal_transfer.get('coolant_to_block', 0.0)
-                q_block_to_oil = internal_transfer.get('oil_to_block', 0.0)
+                # Heat flow FROM block TO coolant/oil/ambient
+                q_block_to_coolant = -internal_transfer.get('coolant_to_block', 0.0) # Heat flowing out
+                q_block_to_oil = -internal_transfer.get('oil_to_block', 0.0) # Heat flowing out
                 q_block_to_ambient_loss = ambient_loss.get('block_to_ambient', 0.0)
                 q_oil_to_ambient_loss = ambient_loss.get('oil_to_ambient', 0.0)
 
-                # Net Heat Flow to Engine Block = Heat_Gen_Direct - Heat_To_Coolant - Heat_To_Oil - Loss_To_Air
-                # Note: heat_to_coolant_W is the heat LEAVING the block TO the coolant
-                # q_block_to_coolant is heat FROM coolant TO block (negative if block is hotter)
-                # So net for block is: GeneratedHeatToAmbient + HeatFromCoolant + HeatFromOil - LossToAir
-                q_net_engine = heat_block_ambient_gen + (-q_block_to_coolant) + (-q_block_to_oil) - q_block_to_ambient_loss
+                # Net Heat Flow for Engine Block = Heat Gen (not going to oil/coolant) - Transfer to Coolant - Transfer to Oil - Loss to Air
+                # We already accounted for heat *going* to coolant/oil in heat_gen calculation passed to cooling_system.
+                # So, net change is based on remaining heat_gen and ambient loss.
+                # Let's simplify: Assume engine_heat_input_W is the primary heat source affecting block temp, minus losses.
+                # This needs refinement based on how EngineHeatModel distributes heat.
+                # Let's recalculate based on transfers:
+                # Net Heat to Engine = (Heat from Oil) + (Heat from Coolant) + HeatGenDirectToBlock - LossToAmbient
+                q_net_engine = internal_transfer.get('oil_to_block', 0.0) + \
+                               internal_transfer.get('coolant_to_block', 0.0) + \
+                               heat_block_ambient_gen - \
+                               q_block_to_ambient_loss
 
-                # Net Heat Flow to Oil = Heat_Gen_DirectlyToOil + Heat_From_Block - Loss_To_Air
-                q_net_oil = heat_to_oil_W + q_block_to_oil - q_oil_to_ambient_loss
+                # Net Heat to Oil = HeatGenDirectToOil + HeatFromBlock - LossToAmbient
+                q_net_oil = heat_to_oil_W - internal_transfer.get('oil_to_block', 0.0) - q_oil_to_ambient_loss
 
-                self.engine_temperature += (q_net_engine * dt) / max(1e-3, safe_caps['engine_block'])
-                self.oil_temperature += (q_net_oil * dt) / max(1e-3, safe_caps['engine_oil'])
+                # Update temps using capacities
+                self.engine_temperature += (q_net_engine * dt) / cap_eng_block
+                self.oil_temperature += (q_net_oil * dt) / cap_eng_oil
 
                 # Clamp temperatures
                 self.engine_temperature = max(ambient_temp - 5, self.engine_temperature)
                 self.oil_temperature = max(ambient_temp - 5, self.oil_temperature)
+
             except Exception as e:
-                 logger.warning(f"Error updating engine/oil temperatures: {e}")
+                 logger.warning(f"Error updating engine/oil temperatures via heat model: {e}", exc_info=True)
+                 # Fallback: Engine/Oil temps loosely follow coolant if model fails
+                 self.engine_temperature += (self.coolant_temperature + 5 - self.engine_temperature) * 0.05 * dt
+                 self.oil_temperature += (self.coolant_temperature + 10 - self.oil_temperature) * 0.03 * dt
+        else:
+            # If no detailed model, make Engine/Oil temps follow Coolant temp with some offset/lag
+            self.engine_temperature += (self.coolant_temperature + 5 - self.engine_temperature) * 0.05 * dt
+            self.oil_temperature += (self.coolant_temperature + 10 - self.oil_temperature) * 0.03 * dt
+
 
         # 4. Update engine's internal state and thermal factor
+        # Ensure engine attributes reflect the calculated temperatures
         if hasattr(self.engine, 'engine_temperature'): self.engine.engine_temperature = self.engine_temperature
         if hasattr(self.engine, 'coolant_temperature'): self.engine.coolant_temperature = self.coolant_temperature
         if hasattr(self.engine, 'oil_temperature'): self.engine.oil_temperature = self.oil_temperature
+
+        # Calculate and apply thermal performance factor
         if hasattr(self.engine, '_get_thermal_performance_factor'):
              try:
-                 current_thermal_factor = self.engine._get_thermal_performance_factor(self.engine_temperature)
+                 current_thermal_factor = self.engine._get_thermal_performance_factor(self.engine_temperature) # Based on engine temp
                  self.thermal_factor = current_thermal_factor
-                 if hasattr(self.engine, 'thermal_factor'): self.engine.thermal_factor = current_thermal_factor
+                 if hasattr(self.engine, 'thermal_factor'):
+                      self.engine.thermal_factor = current_thermal_factor
              except Exception as e:
                   logger.warning(f"Error updating thermal factor: {e}")
                   self.thermal_factor = 1.0
                   if hasattr(self.engine, 'thermal_factor'): self.engine.thermal_factor = 1.0
+        else:
+             self.thermal_factor = 1.0 # Assume optimal if no method exists
+
 
 
     def change_gear(self, target_gear: int) -> Tuple[bool, float]:
@@ -806,8 +866,8 @@ class Vehicle:
              self.update_thermal_state(dt, ambient_temp_C)
 
         # 5. Update CAS internal timers/state (e.g., cooldown)
-        if self.cas_system:
-             self.cas_system.update(current_time_s = start_time_mono + dt) # Pass end-of-step time
+        """  if self.cas_system:
+             self.cas_system.update(current_time_s = start_time_mono + dt) # Pass end-of-step time """
 
     def simulate_acceleration_run(self, distance: float = FS_ACCELERATION_LENGTH,
                                 max_time: float = 10.0, dt: float = 0.01,

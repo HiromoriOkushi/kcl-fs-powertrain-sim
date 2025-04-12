@@ -34,7 +34,7 @@ except ImportError:
     class FuelType: E85 = 0 
     FuelProperties = None 
 
-
+logger = logging.getLogger("Motorcycle Engine")
 
 class MotorcycleEngine:
     """
@@ -382,16 +382,21 @@ class MotorcycleEngine:
     def _get_thermal_performance_factor(self, temp_c: float) -> float:
         """Calculate performance factor based on engine temperature."""
         # Get optimal range from thermal config if available
-        optimal_low = self.thermal_config.optimal_oil_temp - 10 # Use oil temp range approx
-        optimal_high = self.thermal_config.optimal_oil_temp + 10
-        warning_temp = self.thermal_config.max_engine_temp - 10 # Approx warning
-        critical_temp = self.thermal_config.max_engine_temp
+        if self.thermal_config and hasattr(self.thermal_config, 'optimal_temp_engine'):
+            optimal_low, optimal_high = self.thermal_config.optimal_temp_engine
+            warning_temp = self.thermal_config.warning_temp_engine
+            critical_temp = self.thermal_config.critical_temp_engine
+        else: # Fallback if thermal_config is missing or lacks attributes
+            optimal_low, optimal_high = (85.0, 100.0)
+            warning_temp = 105.0
+            critical_temp = 115.0
+        # ---------------------------------------------------------------------
 
         if temp_c < optimal_low: # Too cold
             # Linear penalty from 0.7 at 20C to 1.0 at optimal_low
             cold_limit = 20.0
             factor = 0.7 + 0.3 * (temp_c - cold_limit) / max(1.0, optimal_low - cold_limit)
-            return max(0.7, factor) # Min 70% performance when cold
+            return max(0.7, min(1.0, factor)) # Ensure factor doesn't exceed 1.0
         elif temp_c <= optimal_high: # Optimal range
             return 1.0
         elif temp_c <= warning_temp: # Slightly too hot

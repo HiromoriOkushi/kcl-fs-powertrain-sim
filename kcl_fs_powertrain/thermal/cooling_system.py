@@ -17,12 +17,16 @@ from scipy.interpolate import interp1d
 
 # Constants (ideally import from utils, define fallback here)
 try:
-    from ..utils.constants import AIR_DENSITY_SEA_LEVEL, AIR_SPECIFIC_HEAT_CP, WATER_DENSITY, WATER_SPECIFIC_HEAT
+    from ..utils.constants import AIR_DENSITY_SEA_LEVEL, AIR_SPECIFIC_HEAT_CP, WATER_DENSITY, WATER_SPECIFIC_HEAT,LITERS_TO_M3, BAR_TO_PA
 except ImportError:
     AIR_DENSITY_SEA_LEVEL = 1.225
     AIR_SPECIFIC_HEAT_CP = 1005.0
     WATER_DENSITY = 1000.0
     WATER_SPECIFIC_HEAT = 4186.0
+    LITERS_TO_M3 = 0.001
+    BAR_TO_PA = 100000.0
+    logger = logging.getLogger("CoolingSystemComponents_Fallback")
+    logger.warning("Could not import utils.constants. Using fallback values.")
 
 # Configure logging
 logging.basicConfig(
@@ -511,6 +515,7 @@ class CoolingFan:
         self.diameter_m = diameter_m
         self.max_power_W = max_power_W
         self.voltage_V = voltage_V
+        self.max_static_pressure_pa: float = 150.0
 
         # Load from config if path provided
         if config_path and os.path.exists(config_path):
