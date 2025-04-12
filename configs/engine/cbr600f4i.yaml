@@ -1,37 +1,61 @@
-# Honda CBR600F4i Engine Configuration
+# Honda CBR600F4i Engine Configuration for Formula Student
+# Base specifications adapted for FS context
+
+# General Info
 make: 'Honda'
 model: 'CBR600F4i'
-year: 2004
+year: 2004 # Model year the base engine is from
+type: 'MOTORCYCLE' # EngineType enum
+
+# Core Specifications
 displacement_cc: 599
 cylinders: 4
-configuration: 'Inline'
-compression_ratio: 12.0
+configuration: 'Inline-4'
 bore_mm: 67.0
 stroke_mm: 42.5
+compression_ratio: 12.0
 valves_per_cylinder: 4
 valve_train_type: 'DOHC'
-intake_open_btdc: 25
-intake_close_abdc: 55
-exhaust_open_bbdc: 25
-exhaust_close_atdc: 10
-max_power_hp: 110
+
+# Performance (Stock values, likely modified for FS)
+max_power_hp: 110 # Stock HP, may be lower with restrictor
 max_power_rpm: 12500
-max_torque_nm: 65
+max_torque_nm: 65 # Stock Nm
 max_torque_rpm: 10500
 redline_rpm: 14000
 idle_rpm: 1300
-dry_weight_kg: 57  # Engine weight estimate
+
+# Physical Properties
+dry_weight_kg: 52 # Estimated weight after FS modifications (removed starter, etc.)
 cooling_type: 'Liquid'
-fuel_system: 'PGM-FI'
-fuel_type: 'Gasoline'
+
+# Fuel System
+fuel_system: 'PGM-FI' # Honda's Programmed Fuel Injection
+fuel_type: 'E85' # Specify fuel type for simulation (affects AFR, energy density)
+
+# Ignition
 ignition_type: 'Digital transistorized'
 
-# FS-specific modifications
+# Thermal Parameters (Approximations - needs tuning)
+thermal_mass_engine_block: 40000 # J/K (Engine block thermal capacity)
+thermal_mass_coolant: 10000      # J/K (Coolant thermal capacity)
+thermal_mass_oil: 5000         # J/K (Oil thermal capacity)
+heat_transfer_coefficient: 150   # W/(m^2*K) Overall heat transfer coefficient (approx)
+
+# Formula Student Modifications (Descriptive)
 fs_modifications:
-  exhaust: 'Custom header and exhaust system'
-  intake: 'Velocity stacks and custom airbox'
-  ecu: 'Reprogrammed for E85 fuel'
-  weight_reduction: 'Removed starter motor, lights, and other non-essentials'
-  air_filter: 'High flow air filter'
-  fuel_injectors: 'Higher flow rate injectors for E85'
-fs_weight_reduction_kg: 5.0
+  intake: 'Custom airbox with velocity stacks, 20mm restrictor (required by rules)'
+  exhaust: 'Custom 4-2-1 stainless steel exhaust system'
+  ecu: 'Standalone ECU (e.g., MoTeC, LifeRacing) tuned for E85'
+  lubrication: 'Dry sump lubrication system'
+  cooling: 'Custom cooling system with sidepod/rear radiators'
+  weight_reduction: 'Removed starter motor, alternator (or reduced size), street accessories'
+
+# Simulation Parameters (Optional - can be overridden in main config)
+# These define baseline efficiencies used in the model if not calculated dynamically
+base_volumetric_efficiency: 0.85
+base_mechanical_efficiency: 0.88
+base_thermal_efficiency: 0.30 # Typical SI engine efficiency
+
+# Dyno Data Path (Optional - if available, overrides generated curves)
+# dyno_data_file: 'data/input/dyno/cbr600f4i_e85_dyno.csv'

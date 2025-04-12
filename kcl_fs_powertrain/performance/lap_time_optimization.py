@@ -1,9 +1,8 @@
 """
-Integration module for lap time optimization.
+Unified interface for lap time optimization methods.
 
-This module provides a unified interface for running lap time simulations
-with different optimization methods, from basic simulation to advanced
-numerical optimization with Runge-Kutta integration.
+Provides functions to run either basic or advanced lap time simulations
+and to compare the results of different methods.
 """
 
 import os
@@ -11,20 +10,34 @@ import numpy as np
 import yaml
 import logging
 from typing import Dict, Optional, Tuple, List, Literal
+import time
 
-from ..core.vehicle import Vehicle
-from ..core.track_integration import TrackProfile
-from .lap_time import create_example_track
-from .lap_time import LapTimeSimulator, create_lap_time_simulator, run_fs_lap_simulation
-from .optimal_lap_time import OptimalLapTimeOptimizer, run_advanced_lap_optimization
+# Import necessary components from the package
+try:
+    from ..core.vehicle import Vehicle
+    from ..core.track_integration import TrackProfile
+    from .lap_time import run_fs_lap_simulation # Basic simulation runner
+    from .optimal_lap_time import run_advanced_lap_optimization # Advanced runner
+    from ..utils.plotting import plot_lap_time_comparison as plot_lap_comp_unified # Unified comparison plotter
+    from ..utils.plotting import save_plot, set_plot_style
+except ImportError:
+    # Fallbacks
+    class Vehicle: pass
+    class TrackProfile: pass
+    def run_fs_lap_simulation(*args, **kwargs): logger.error("Basic sim failed: Module not found."); return {'lap_time': 999.9, 'error': 'Module not found'}
+    def run_advanced_lap_optimization(*args, **kwargs): logger.error("Advanced sim failed: Module not found."); return {'lap_time': 999.9, 'error': 'Module not found'}
+    def plot_lap_comp_unified(*args, **kwargs): plt.figure(); plt.plot([0,1]); plt.title("Fallback Comparison Plot"); plt.show(); plt.close(); return plt.gcf()
+    def save_plot(fig, path, **kwargs): pass
+    def set_plot_style(style): pass
+    logger = logging.getLogger("LapTimeOpt_Fallback")
+    logger.warning("Could not import all necessary modules. Using fallbacks.")
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
-logger = logging.getLogger("Lap_Time_Optimization")
+logger = logging.getLogger("LapTimeOptimization")
 
 
 def run_lap_optimization(
@@ -36,79 +49,64 @@ def run_lap_optimization(
     save_dir: Optional[str] = None
 ) -> Dict:
     """
-    Run lap time optimization with the specified method.
-    
+    Run lap time calculation/optimization using the specified method.
+
     Args:
-        vehicle: Vehicle model
-        track_file: Path to track file
-        method: Optimization method ('basic' or 'advanced')
-        config_file: Optional path to configuration file
-        include_thermal: Whether to include thermal effects
-        save_dir: Optional directory to save results
-        
+        vehicle: Vehicle model instance.
+        track_file: Path to the track file (YAML or CSV).
+        method: 'basic' for GG-based simulation, 'advanced' for numerical optimization.
+        config_file: Optional path to YAML config file (used primarily by 'advanced').
+        include_thermal: Whether to include thermal effects in the simulation.
+        save_dir: Optional directory to save results and plots.
+
     Returns:
-        Dictionary with optimization results
+        Dictionary containing simulation/optimization results, including 'lap_time'.
     """
-    # Load configuration if provided
-    config = {}
-    if config_file and os.path.exists(config_file):
-        with open(config_file, 'r') as f:
-            config = yaml.safe_load(f)
-        logger.info(f"Loaded configuration from {config_file}")
-    
-    # Load track
-    track_profile = TrackProfile(track_file)
-    
-    # Run appropriate optimization method
+    start_time = time.time()
+    logger.info(f"--- Running Lap Time Calculation ({method.capitalize()}) ---")
+    logger.info(f"Track: {os.path.basename(track_file)}")
+    logger.info(f"Include Thermal: {include_thermal}")
+
+    # Create specific save directory for this method if main save_dir is provided
+    method_save_dir = os.path.join(save_dir, method) if save_dir else None
+    if method_save_dir: os.makedirs(method_save_dir, exist_ok=True)
+
     if method.lower() == 'advanced':
-        # Advanced optimization with Runge-Kutta integration
-        logger.info("Running advanced lap time optimization...")
-        
-        # Create optimizer with configuration
-        optimizer = OptimalLapTimeOptimizer(vehicle, track_profile)
-        
-        # Apply configuration if provided
-        if 'optimization' in config:
-            opt_config = config['optimization']
-            optimizer.dt = opt_config.get('dt', optimizer.dt)
-            optimizer.max_time = opt_config.get('max_time', optimizer.max_time)
-            optimizer.include_thermal = opt_config.get('include_thermal', include_thermal)
-            optimizer.max_iterations = opt_config.get('max_iterations', optimizer.max_iterations)
-            optimizer.tolerance = opt_config.get('tolerance', optimizer.tolerance)
-            optimizer.optimization_method = opt_config.get('method', optimizer.optimization_method)
-            optimizer.num_control_points = opt_config.get('num_control_points', optimizer.num_control_points)
-        
-        # Run optimization
-        results = optimizer.optimize_lap_time()
-        
-        # Visualize and save results if requested
-        if save_dir and results['racing_line'] is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            
-            # Save visualization
-            optimizer.visualize_optimization_results(
-                results,
-                save_path=os.path.join(save_dir, "optimal_lap.png")
-            )
-            
-            # Save racing line to CSV
-            np.savetxt(
-                os.path.join(save_dir, "optimal_racing_line.csv"),
-                results['racing_line'],
-                delimiter=',',
-                header='x,y'
-            )
-        
-        return results
-    else:
-        # Basic lap time simulation
-        logger.info("Running basic lap time simulation...")
-        return run_fs_lap_simulation(
-            vehicle,
-            track_file,
-            include_thermal=include_thermal,
-            save_dir=save_dir
+        results = run_advanced_lap_optimization(
+            vehicle=vehicle,
+            track_file=track_file,
+            config_file=config_file,
+            # Note: include_thermal is handled within the advanced optimizer based on its config
+            save_dir=method_save_dir
         )
+        # Add method info to results
+        results['method'] = 'advanced'
+    elif method.lower() == 'basic':
+        results = run_fs_lap_simulation(
+            vehicle=vehicle,
+            track_file=track_file,
+            include_thermal=include_thermal,
+            save_dir=method_save_dir
+        )
+        # Add method info to results
+        results['method'] = 'basic'
+    else:
+        logger.error(f"Invalid optimization method specified: '{method}'. Choose 'basic' or 'advanced'.")
+        return {'error': f"Invalid method '{method}'", 'lap_time': None}
+
+    elapsed_time = time.time() - start_time
+    lap_time_result = results.get('lap_time')
+    if lap_time_result is not None and 'error' not in results:
+        logger.info(f"--- {method.capitalize()} Lap Time Calculation Finished ---")
+        logger.info(f" Lap Time: {lap_time_result:.3f} s")
+        logger.info(f" Calculation Time: {elapsed_time:.2f} s")
+    else:
+        logger.error(f"--- {method.capitalize()} Lap Time Calculation Failed ---")
+        logger.error(f" Error: {results.get('error', 'Unknown error')}")
+        logger.info(f" Calculation Time: {elapsed_time:.2f} s")
+
+
+    return results
 
 
 def compare_optimization_methods(
@@ -119,203 +117,144 @@ def compare_optimization_methods(
     save_dir: Optional[str] = None
 ) -> Dict:
     """
-    Compare basic and advanced lap time optimization methods.
-    
+    Run both basic and advanced lap time methods and compare results.
+
     Args:
-        vehicle: Vehicle model
-        track_file: Path to track file
-        config_file: Optional path to configuration file
-        include_thermal: Whether to include thermal effects
-        save_dir: Optional directory to save results
-        
+        vehicle: Vehicle model instance.
+        track_file: Path to the track file.
+        config_file: Optional path to YAML config file (passed to advanced method).
+        include_thermal: Whether to include thermal effects.
+        save_dir: Optional directory to save comparison results and plots.
+
     Returns:
-        Dictionary with comparison results
+        Dictionary containing results from both methods and a comparison summary.
     """
-    logger.info("Comparing lap time optimization methods...")
-    
-    # Run basic optimization
+    logger.info("--- Comparing Lap Time Optimization Methods ---")
+    if save_dir: os.makedirs(save_dir, exist_ok=True)
+
+    # Run Basic Simulation
     basic_results = run_lap_optimization(
-        vehicle,
-        track_file,
+        vehicle=vehicle,
+        track_file=track_file,
         method='basic',
-        config_file=config_file,
         include_thermal=include_thermal,
         save_dir=os.path.join(save_dir, 'basic') if save_dir else None
     )
-    
-    # Run advanced optimization
+
+    # Run Advanced Optimization
     advanced_results = run_lap_optimization(
-        vehicle,
-        track_file,
+        vehicle=vehicle,
+        track_file=track_file,
         method='advanced',
         config_file=config_file,
-        include_thermal=include_thermal,
+        include_thermal=include_thermal, # Advanced handles this via its config now
         save_dir=os.path.join(save_dir, 'advanced') if save_dir else None
     )
-    
-    # Create comparison visualization
+
+    # --- Comparison Logic ---
+    comparison = {'basic': basic_results, 'advanced': advanced_results, 'difference': {}}
+    basic_time = basic_results.get('lap_time')
+    advanced_time = advanced_results.get('lap_time')
+
+    if basic_time is not None and advanced_time is not None and basic_time > 0:
+         time_diff = basic_time - advanced_time
+         time_diff_pct = (time_diff / basic_time) * 100.0
+         comparison['difference'] = {
+             'lap_time_diff_s': time_diff,
+             'lap_time_improvement_pct': time_diff_pct
+         }
+         logger.info("\n--- Comparison Summary ---")
+         logger.info(f" Basic Lap Time:    {basic_time:.3f} s")
+         logger.info(f" Advanced Lap Time: {advanced_time:.3f} s")
+         logger.info(f" Difference:        {time_diff:.3f} s ({time_diff_pct:+.2f}%)")
+    else:
+         logger.warning("Could not calculate comparison difference due to missing or invalid lap times.")
+
+    # --- Generate Comparison Plot ---
     if save_dir:
-        import matplotlib.pyplot as plt
-        
-        # Create directory if it doesn't exist
-        os.makedirs(save_dir, exist_ok=True)
-        
-        # Create comparison figure
-        plt.figure(figsize=(12, 8))
-        
-        # Basic metrics
-        basic_lap_time = basic_results['lap_time']
-        basic_avg_speed = basic_results['metrics']['avg_speed_kph']
-        
-        # Advanced metrics
-        advanced_lap_time = advanced_results['lap_time']
-        advanced_racing_line = advanced_results.get('racing_line')
-        
-        # Create bar chart for lap times
-        plt.subplot(211)
-        methods = ['Basic Simulation', 'Advanced Optimization']
-        lap_times = [basic_lap_time, advanced_lap_time]
-        
-        bars = plt.bar(methods, lap_times)
-        plt.ylabel('Lap Time (s)')
-        plt.title('Lap Time Comparison')
-        
-        # Add lap time labels
-        for bar, time in zip(bars, lap_times):
-            plt.text(
-                bar.get_x() + bar.get_width()/2.,
-                time + 0.1,
-                f'{time:.3f}s',
-                ha='center',
-                va='bottom'
-            )
-        
-        # Plot racing lines
-        plt.subplot(212)
-        
-        # Load track profile for visualization
-        track_profile = TrackProfile(track_file)
-        track_data = track_profile.get_track_data()
-        track_points = track_data['points']
-        
-        # Plot track centerline
-        plt.plot(
-            track_points[:, 0],
-            track_points[:, 1],
-            'k--',
-            alpha=0.5,
-            label='Track Centerline'
-        )
-        
-        # Plot racing lines if available
-        if 'results' in basic_results and 'racing_line' in basic_results:
-            basic_line = basic_results['results'].get('racing_line')
-            if basic_line is not None:
-                plt.plot(
-                    basic_line[:, 0],
-                    basic_line[:, 1],
-                    'b-',
-                    linewidth=2,
-                    label='Basic Racing Line'
-                )
-        
-        if advanced_racing_line is not None:
-            plt.plot(
-                advanced_racing_line[:, 0],
-                advanced_racing_line[:, 1],
-                'r-',
-                linewidth=2,
-                label='Optimized Racing Line'
-            )
-        
-        plt.xlabel('X (m)')
-        plt.ylabel('Y (m)')
-        plt.title('Racing Line Comparison')
-        plt.legend()
-        plt.axis('equal')
-        plt.grid(True)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'method_comparison.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    # Create comparison dictionary
-    comparison = {
-        'basic': {
-            'lap_time': basic_results['lap_time'],
-            'metrics': basic_results.get('metrics', {}),
-            'full_results': basic_results
-        },
-        'advanced': {
-            'lap_time': advanced_results['lap_time'],
-            'optimization_success': advanced_results.get('optimization_success', False),
-            'optimization_time': advanced_results.get('optimization_time', 0),
-            'full_results': advanced_results
-        },
-        'difference': {
-            'lap_time_diff': basic_results['lap_time'] - advanced_results['lap_time'],
-            'lap_time_percent': ((basic_results['lap_time'] - advanced_results['lap_time']) / 
-                              basic_results['lap_time'] * 100)
-        }
-    }
-    
+        # Prepare data for the unified comparison plotter
+        plot_comparison_data = []
+        if basic_results and 'error' not in basic_results:
+            plot_comparison_data.append({**basic_results.get('results',{}), 'label': 'Basic Sim', 'lap_time': basic_time})
+        if advanced_results and 'error' not in advanced_results:
+             # Extract necessary plotting data from advanced results
+             adv_plot_data = {
+                  'label': 'Advanced Opt',
+                  'lap_time': advanced_time,
+                  'distance': np.array([s['distance'] for s in advanced_results.get('vehicle_states', [])]),
+                  'speed': np.array([s['speed'] for s in advanced_results.get('vehicle_states', [])]),
+                  'racing_line': advanced_results.get('racing_line'),
+                  'track_points': advanced_results.get('track_data',{}).get('points') # Pass track points if possible
+             }
+             plot_comparison_data.append(adv_plot_data)
+
+
+        if len(plot_comparison_data) > 1:
+             plot_lap_comp_unified(
+                 plot_comparison_data,
+                 labels=[d['label'] for d in plot_comparison_data], # Pass labels explicitly
+                 save_path=os.path.join(save_dir, 'lap_method_comparison.png')
+             )
+        else:
+             logger.warning("Could not generate comparison plot: Insufficient valid results.")
+
     return comparison
 
-
-# Example usage
+# Example Usage
 if __name__ == "__main__":
-    from ..core.vehicle import create_formula_student_vehicle
-    import tempfile
-    
-    print("Lap Time Optimization Comparison")
-    print("--------------------------------")
-    
-    # Create a Formula Student vehicle
-    vehicle = create_formula_student_vehicle()
-    
-    # Create a temporary directory for outputs
-    output_dir = tempfile.mkdtemp()
-    print(f"Creating output directory: {output_dir}")
-    
-    # Create an example track
-    track_file = os.path.join(output_dir, "example_track.yaml")
-    print("Generating example track...")
-    create_example_track(track_file, difficulty='easy')  # Use easy track for faster optimization
-    
-    # Create a simple configuration
-    config = {
-        'optimization': {
-            'max_iterations': 20,     # Limit iterations for faster demonstration
-            'num_control_points': 30  # Fewer control points for faster optimization
+    logging.basicConfig(level=logging.INFO)
+    try:
+        from ..core.vehicle import create_formula_student_vehicle
+        from .lap_time import create_example_track # Use lap_time's version
+        import tempfile
+
+        print("Lap Time Optimization Comparison Demo")
+        print("-" * 35)
+
+        vehicle = create_formula_student_vehicle()
+        output_dir = tempfile.mkdtemp()
+        track_file = os.path.join(output_dir, "compare_track.yaml")
+        config_file = os.path.join(output_dir, "compare_optim_config.yaml")
+
+        print(f"Output directory: {output_dir}")
+        create_example_track(track_file, difficulty='medium') # Medium track
+
+        # Create a config for advanced optimization (if needed)
+        optim_config = {
+             'optimization': {
+                  'max_iterations': 20, # Reduced iterations
+                  'num_control_points': 35,
+                  'dt': 0.025
+             }
         }
-    }
-    
-    # Write config to file
-    config_file = os.path.join(output_dir, "lap_optimization.yaml")
-    with open(config_file, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
-    
-    # Run comparison
-    print("\nComparing optimization methods (this may take a while)...")
-    comparison = compare_optimization_methods(
-        vehicle,
-        track_file,
-        config_file=config_file,
-        include_thermal=True,
-        save_dir=output_dir
-    )
-    
-    # Print comparison results
-    print("\nLap Time Comparison:")
-    print(f"  Basic Simulation: {comparison['basic']['lap_time']:.3f}s")
-    print(f"  Advanced Optimization: {comparison['advanced']['lap_time']:.3f}s")
-    print(f"  Difference: {comparison['difference']['lap_time_diff']:.3f}s " +
-          f"({comparison['difference']['lap_time_percent']:.2f}%)")
-    
-    # Print optimization details
-    if comparison['advanced']['optimization_success']:
-        print("\nOptimization Details:")
-        print(f"  Success: {comparison['advanced']['optimization_success']}")
-        print(f"  Optimization Time: {comparison['advanced']['optimization_time']:.1f}s")
-    
-    print(f"\nComparison results saved to: {output_dir}")
+        with open(config_file, 'w') as f: yaml.dump(optim_config, f)
+
+        # Run comparison
+        comparison_results = compare_optimization_methods(
+            vehicle,
+            track_file,
+            config_file=config_file,
+            include_thermal=True,
+            save_dir=output_dir
+        )
+
+        # Print results
+        if 'difference' in comparison_results and 'lap_time_diff_s' in comparison_results['difference']:
+            print("\n--- Comparison Results ---")
+            print(f" Basic Lap Time:    {comparison_results['basic']['lap_time']:.3f} s")
+            print(f" Advanced Lap Time: {comparison_results['advanced']['lap_time']:.3f} s")
+            print(f" Difference:        {comparison_results['difference']['lap_time_diff_s']:.3f} s ({comparison_results['difference']['lap_time_improvement_pct']:.2f} %)")
+        else:
+            print("\nComparison failed or produced invalid results.")
+            if 'error' in comparison_results.get('basic', {}): print(f" Basic Error: {comparison_results['basic']['error']}")
+            if 'error' in comparison_results.get('advanced', {}): print(f" Advanced Error: {comparison_results['advanced']['error']}")
+
+
+    except ImportError as e:
+        print(f"\nError: Could not import necessary modules ({e}).")
+    except FileNotFoundError as e:
+         print(f"\nError: Configuration file not found. {e}")
+    except Exception as e:
+        print(f"\nAn unexpected error occurred: {e}")
+        import traceback
+        traceback.print_exc()

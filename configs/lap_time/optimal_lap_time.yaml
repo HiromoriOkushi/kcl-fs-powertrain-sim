@@ -1,36 +1,43 @@
 # Advanced Lap Time Optimization Configuration
 
-# Optimization parameters
 optimization:
   # Numerical integration parameters
-  dt: 0.01                    # Integration step size (seconds)
-  max_time: 180.0             # Maximum lap time (seconds)
-  include_thermal: true       # Whether to include thermal effects
+  dt: 0.01                    # Integration time step (seconds)
+  max_time: 180.0             # Maximum allowed simulation time for a lap (seconds)
+  include_thermal: true       # Whether to include thermal effects in dynamics
 
   # Optimization algorithm settings
-  method: 'SLSQP'             # Optimization method ('SLSQP', 'Newton-CG', 'trust-constr')
+  method: 'SLSQP'             # Optimization method ('SLSQP', 'L-BFGS-B', 'TNC')
   max_iterations: 50          # Maximum number of optimization iterations
-  tolerance: 1.0e-4           # Convergence tolerance
-  num_control_points: 50      # Number of control points for parameterization
+  tolerance: 1.0e-4           # Convergence tolerance for the optimizer
+  num_control_points: 50      # Number of control points for parameterizing racing line/controls
 
-# Vehicle dynamics model parameters
 vehicle_dynamics:
-  # Tire model parameters
-  cornering_stiffness: 20000.0  # N/rad
-  max_lateral_accel: 2.0        # g
-  
+  # Tire model parameters (simplified - replace with more detailed model if available)
+  tire_model: 'simple'        # 'simple', 'pacejka' (Pacejka not implemented here)
+  cornering_stiffness_front: 18000.0  # N/rad (front axle)
+  cornering_stiffness_rear: 22000.0   # N/rad (rear axle)
+  max_lateral_accel_g: 2.0      # Maximum lateral acceleration constraint (g)
+  max_longitudinal_accel_g: 1.5 # Maximum longitudinal acceleration constraint (g)
+  max_braking_decel_g: 1.8    # Maximum braking deceleration constraint (g)
+
   # Powertrain parameters
-  rpm_lag: 0.5                # Engine RPM lag (seconds)
-  
-  # Braking parameters
-  max_braking_decel: 1.5      # Maximum braking deceleration (g)
+  rpm_lag: 0.1                # Engine RPM response lag (seconds) - time constant
+  shift_time_penalty: 0.05    # Time penalty for each gear shift (seconds)
 
-# Racing line parameters
 racing_line:
-  track_position_limit: 0.9   # Maximum normalized distance from centerline (-1 to 1)
-  look_ahead_distance: 10     # Look-ahead distance for steering calculation (points)
+  # Constraints on racing line position relative to centerline
+  # 0 = centerline, -1 = left edge, +1 = right edge
+  track_position_limit: 0.95  # Maximum normalized distance from centerline (allows slight edge usage)
+  smoothing_factor: 0.1       # Smoothing factor applied to the racing line control points
 
-# Visualization settings
+controls:
+  # Constraints on control inputs
+  throttle_rate_limit: 10.0   # Max throttle change per second (1/s)
+  brake_rate_limit: 15.0      # Max brake change per second (1/s)
+  steering_rate_limit: 10.0   # Max steering change per second (rad/s)
+
 visualization:
-  sample_rate: 100            # Number of points to sample for visualization
+  enabled: true               # Generate plots after optimization
+  sample_rate: 100            # Number of points to sample for visualization plots
   plot_size: [15, 10]         # Figure size (inches)

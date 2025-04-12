@@ -1,9 +1,14 @@
-﻿import os
+﻿"""
+Core track generation logic using Voronoi diagrams.
+Based on the methodology by Bai Li (ETH Zurich ASL).
+"""
+
+import os
 import numpy as np
 from scipy import spatial, interpolate, signal
 from shapely.geometry import Point, LineString, Polygon
+from shapely.ops import transform # For scaling geometry
 from datetime import datetime
-from .enums import TrackMode, SimType
 import csv
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -11,649 +16,638 @@ import yaml
 import gpxpy
 import gpxpy.gpx
 import math
+import logging
+import random
 from typing import List, Dict, Tuple, Optional
 
-from enum import Enum
+# Import local enums
+from .enums import TrackMode, SimType
 
-class TrackMode(Enum):
-    """Possible modes for how Voronoi regions are selected"""
-    EXPAND = 1   # Results in roundish track shapes
-    EXTEND = 2   # Results in elongated track shapes
-    RANDOM = 3   # Select regions randomly
-
-class SimType(Enum):
-    """Selection between output format for different simulators"""
-    FSSIM = 1     # FSSIM compatible .yaml file
-    FSDS = 2       # FSDS compatible .csv file
-    GPX = 3         # GPX track format
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("FSTrackGenerator")
 
 class FSTrackGenerator:
-    def __init__(self, base_dir: str, visualize: bool = False, track_width: float = 3.0, min_length: float = 200, max_length: float = 300, curvature_threshold: float = (1.0 / 3.75), straight_threshold: float = 1.0 / 20.0, length_start_area: float = 6.0, n_points: int = 60, n_regions: int = 20, max_bound: float = 200, min_bound: float = 0, cone_spacing: float = 4.0):
-        # Scale factor for generation (will be scaled down in output)
-        self.SCALE_FACTOR = 2.0  # Generate at 2x size, then scale down
-        
-        # Formula Student Track parameters
-        self.TRACK_WIDTH = track_width       # meters - standard FSG track width
-        self.MIN_LENGTH = min_length         # meters
-        self.MAX_LENGTH = max_length        # meters 
-        self.CURVATURE_THRESHOLD = curvature_threshold  # Original curvature threshold
+    """Generates Formula Student compliant tracks using Voronoi diagrams."""
+
+    def __init__(self,
+                 base_dir: str, # Directory where metadata.csv is stored
+                 output_dir_override: Optional[str] = None, # Explicit dir for tracks
+                 visualize: bool = False,
+                 track_width: float = 3.0,
+                 min_length: float = 200.0,
+                 max_length: float = 500.0, # Increased max length default
+                 curvature_threshold: float = 1.0 / 3.75, # Max curvature (1/min_radius)
+                 straight_threshold: float = 1.0 / 50.0, # Min curvature for straights
+                 start_straight_length: float = 10.0, # Min length for start straight
+                 n_points: int = 80, # Increased points for more complexity
+                 n_regions: int = 25, # Increased regions
+                 bounds: Tuple[float, float] = (0.0, 150.0), # Generation area bounds (m)
+                 cone_spacing: float = 3.5): # Target cone spacing (m)
+        """
+        Initialize the track generator.
+
+        Args:
+            base_dir: Directory for metadata file.
+            output_dir_override: Specific directory to save generated track files. If None, defaults to 'generated_tracks' inside base_dir.
+            visualize: If True, show plots during generation.
+            track_width: Standard width of the track (m).
+            min_length: Minimum centerline length (m).
+            max_length: Maximum centerline length (m).
+            curvature_threshold: Maximum allowed curvature (1/minimum_radius).
+            straight_threshold: Curvature below this is considered straight.
+            start_straight_length: Minimum length for the start/finish straight (m).
+            n_points: Number of initial random points for Voronoi.
+            n_regions: Number of Voronoi regions to combine for track shape.
+            bounds: Tuple (min_bound, max_bound) for the generation area.
+            cone_spacing: Target distance between cones along boundaries (m).
+        """
+        self.TRACK_WIDTH = track_width
+        self.MIN_LENGTH = min_length
+        self.MAX_LENGTH = max_length
+        self.CURVATURE_THRESHOLD = curvature_threshold
         self.STRAIGHT_THRESHOLD = straight_threshold
-        self.LENGTH_START_AREA = length_start_area # meters
+        self.START_STRAIGHT_LENGTH = start_straight_length
 
-        # Generation parameters (scaled up)
-        self.N_POINTS = 60          # Keep high number of points for detail
-        self.N_REGIONS = 20          # Keep regions for complexity
-        self.MAX_BOUND = 200         # Original bound
-        self.MIN_BOUND = 0   
-        
-        # Modified spacing parameters
-        self.CONE_SPACING = 4.0      # Original spacing
-        
+        self.N_POINTS = n_points
+        self.N_REGIONS = n_regions
+        self.MIN_BOUND, self.MAX_BOUND = bounds
+        self.CONE_SPACING = cone_spacing
+
         self.visualize = visualize
-        self.base_dir = base_dir
-        self.output_dir = os.path.join(base_dir, "generated_tracks")
-        self.metadata_file = os.path.join(base_dir, "track_metadata.csv")
-        self._ensure_directories()
-        
-        self.track_points = None
-        self.cones_left = None
-        self.cones_right = None
-        self.track_polygon = None
-        self.start_line = None
-        self.start_position = None
-        self.start_heading = None
-    
-    def _scale_track(self, track_data: np.ndarray) -> np.ndarray:
-        """Scale track coordinates to match Formula Student specifications"""
-        return track_data / self.SCALE_FACTOR
+        self.base_dir = base_dir # For metadata
+        self.output_dir = output_dir_override if output_dir_override else os.path.join(base_dir, "generated_tracks")
+        self.metadata_file = os.path.join(self.base_dir, "track_metadata.csv")
 
+        self._ensure_directories()
+
+        # Internal state, reset per generation
+        self.track_centerline_x: Optional[np.ndarray] = None
+        self.track_centerline_y: Optional[np.ndarray] = None
+        self.track_curvature: Optional[np.ndarray] = None
+        self.track_length: Optional[float] = None
+        self.cones_left: Optional[np.ndarray] = None
+        self.cones_right: Optional[np.ndarray] = None
+        self.start_position: Optional[np.ndarray] = None # Center of start line
+        self.start_heading: Optional[float] = None # Heading angle in radians
+        self.start_cones: Optional[np.ndarray] = None # Orange cones for start/finish
 
     def _ensure_directories(self):
-        """Create necessary directories and metadata file"""
+        """Create output directory and metadata file if they don't exist."""
         os.makedirs(self.output_dir, exist_ok=True)
-        
-        if not os.path.exists(self.metadata_file):
-            headers = [
-                'filename', 'filepath', 'track_length', 'num_cones',
-                'track_width', 'generation_mode', 'generation_time'
-            ]
-            with open(self.metadata_file, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(headers)
+        # Also ensure base_dir exists for metadata
+        os.makedirs(self.base_dir, exist_ok=True)
 
-    def _closest_node(self, node: np.ndarray, nodes: np.ndarray, k: int) -> int:
-        """Returns the index of the k-th closest node"""
+        if not os.path.exists(self.metadata_file):
+            headers = ['filename', 'filepath', 'track_length', 'num_cones',
+                       'track_width', 'generation_mode', 'generation_time',
+                       'min_radius', 'avg_radius'] # Added radius stats
+            try:
+                with open(self.metadata_file, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(headers)
+            except IOError as e:
+                 logger.error(f"Failed to create metadata file {self.metadata_file}: {e}")
+
+
+    def _closest_node(self, node: np.ndarray, nodes: np.ndarray, k: int = 0) -> int:
+        """Finds the index of the k-th closest node in 'nodes' to 'node'."""
+        if k >= len(nodes): k = len(nodes) - 1 # Prevent index error
         deltas = nodes - node
-        dist_2 = np.einsum('ij,ij->i', deltas, deltas)
-        return np.argpartition(dist_2, k)[k]
+        dist_sq = np.einsum('ij,ij->i', deltas, deltas) # More efficient squared distance
+        # Use argpartition for efficiency (finds k-th smallest without full sort)
+        return np.argpartition(dist_sq, k)[k]
 
     def _clockwise_sort(self, points: np.ndarray) -> np.ndarray:
-        """Sorts nodes in clockwise order"""
+        """Sorts 2D points clockwise around their centroid."""
         center = np.mean(points, axis=0)
-        angles = np.arctan2(points[:,0] - center[0], points[:,1] - center[1])
+        # Calculate angles relative to the center point
+        angles = np.arctan2(points[:, 1] - center[1], points[:, 0] - center[0])
+        # Sort points based on angle
         return points[np.argsort(angles)]
 
-    def _calculate_curvature(self, dx_dt, d2x_dt2, dy_dt, d2y_dt2):
-        """Calculates the curvature along a line"""
-        return (dx_dt**2 + dy_dt**2)**-1.5 * (dx_dt * d2y_dt2 - dy_dt * d2x_dt2)
+    def _calculate_curvature(self, x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Calculates curvature and radius using finite differences."""
+        # Use numpy gradient for derivatives
+        dx_dt = np.gradient(x)
+        dy_dt = np.gradient(y)
+        d2x_dt2 = np.gradient(dx_dt)
+        d2y_dt2 = np.gradient(dy_dt)
 
-    def _arc_length(self, x: np.ndarray, y: np.ndarray, R: np.ndarray) -> np.ndarray:
-        """Calculate arc length between points based on radius of curvature"""
-        x0, x1 = x[:-1], x[1:]
-        y0, y1 = y[:-1], y[1:]
-        R = R[:-1]
-        
-        distance = np.sqrt((x1 - x0)**2 + (y1 - y0)**2)
-        theta = 2 * np.arcsin(0.5 * distance / R)
-        return R * theta
+        # Curvature formula: k = (dx*d2y - dy*d2x) / (dx^2 + dy^2)^(3/2)
+        numerator = dx_dt * d2y_dt2 - dy_dt * d2x_dt2
+        denominator = (dx_dt**2 + dy_dt**2)**1.5
+
+        # Avoid division by zero for stationary points
+        curvature = np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 1e-9)
+
+        # Radius of curvature R = 1 / |k|
+        radius = np.divide(1.0, np.abs(curvature), out=np.full_like(curvature, float('inf')), where=np.abs(curvature) > 1e-9)
+
+        return curvature, radius
 
     def _bounded_voronoi(self, points: np.ndarray):
-        """Creates a bounded Voronoi diagram"""
-        def mirror_points(boundary: float, axis: int) -> np.ndarray:
-            mirrored = np.copy(points_center)
-            mirrored[:, axis] = 2 * boundary - mirrored[:, axis]
-            return mirrored
-            
-        points_center = points
+        """Creates a Voronoi diagram bounded by reflecting points."""
+        # Mirror points across boundaries to enforce boundary conditions
         x_min, x_max = self.MIN_BOUND, self.MAX_BOUND
         y_min, y_max = self.MIN_BOUND, self.MAX_BOUND
-        
-        # Mirror points around boundaries with additional margin
-        margin = (x_max - x_min) * 0.1  # 10% margin
-        all_points = np.concatenate([
-            points_center,
-            mirror_points(x_min - margin, 0),
-            mirror_points(x_max + margin, 0),
-            mirror_points(y_min - margin, 1),
-            mirror_points(y_max + margin, 1)
-        ])
-        
-        vor = spatial.Voronoi(all_points)
-        vor.filtered_points = points_center
-        vor.filtered_regions = [
-            region for region in vor.regions 
-            if -1 not in region and len(region) > 2
-        ]
-        return vor
+        margin = (x_max - x_min) * 0.2 # Use a slightly larger margin
 
-    def _validate_track(self, track: Polygon) -> bool:
-        """Enhanced track validation"""
-        if not track.is_valid:
+        mirrored_x_min = np.copy(points); mirrored_x_min[:, 0] = 2 * (x_min - margin) - points[:, 0]
+        mirrored_x_max = np.copy(points); mirrored_x_max[:, 0] = 2 * (x_max + margin) - points[:, 0]
+        mirrored_y_min = np.copy(points); mirrored_y_min[:, 1] = 2 * (y_min - margin) - points[:, 1]
+        mirrored_y_max = np.copy(points); mirrored_y_max[:, 1] = 2 * (y_max + margin) - points[:, 1]
+
+        # Combine original and mirrored points
+        all_points = np.vstack([points, mirrored_x_min, mirrored_x_max, mirrored_y_min, mirrored_y_max])
+
+        try:
+            vor = spatial.Voronoi(all_points)
+            # Filter regions to keep only those corresponding to original points
+            # and that are finite (not open to infinity)
+            vor.filtered_points = points # Store original points
+            vor.filtered_regions = []
+            for i, region_idx in enumerate(vor.point_region[:len(points)]): # Only check original points
+                 region = vor.regions[region_idx]
+                 if region and -1 not in region: # Check if region is bounded
+                      vor.filtered_regions.append(region)
+            return vor
+        except spatial.qhull.QhullError as e:
+            logger.error(f"QhullError during Voronoi generation: {e}. Points might be degenerate.")
+            return None # Indicate failure
+
+    def _get_track_polygon(self, vor, mode: TrackMode) -> Optional[Polygon]:
+        """Selects Voronoi regions and creates the track outline polygon."""
+        if not vor or not vor.filtered_regions:
+             logger.warning("No valid filtered Voronoi regions available.")
+             return None
+
+        input_points = vor.filtered_points
+        num_input_points = len(input_points)
+        num_filtered_regions = len(vor.filtered_regions)
+
+        if num_filtered_regions < self.N_REGIONS:
+             logger.warning(f"Only {num_filtered_regions} finite regions found, less than requested {self.N_REGIONS}.")
+             if num_filtered_regions < 3: return None # Need at least 3 regions
+             num_to_select = num_filtered_regions
+        else:
+             num_to_select = self.N_REGIONS
+
+        # --- Select Regions ---
+        if mode == TrackMode.EXPAND:
+            # Start from a random point and expand outwards
+            start_idx = random.randrange(num_input_points)
+            selected_indices = {start_idx}
+            queue = [start_idx]
+            while len(selected_indices) < num_to_select and queue:
+                current_idx = queue.pop(0)
+                # Find neighbors (this requires analyzing Voronoi connectivity, simplified here)
+                # Simplified: find k-nearest neighbors
+                for k in range(1, min(num_to_select + 5, num_input_points)): # Look at nearby points
+                     neighbor_idx = self._closest_node(input_points[current_idx], input_points, k=k)
+                     if neighbor_idx not in selected_indices:
+                          selected_indices.add(neighbor_idx)
+                          queue.append(neighbor_idx)
+                          if len(selected_indices) >= num_to_select: break
+            selected_point_indices = list(selected_indices)
+
+        elif mode == TrackMode.EXTEND:
+             # Select points close to a random line segment
+             p1_idx, p2_idx = random.sample(range(num_input_points), 2)
+             line = LineString([input_points[p1_idx], input_points[p2_idx]])
+             distances = [Point(p).distance(line) for p in input_points]
+             # Partition to find indices of N smallest distances
+             selected_point_indices = np.argpartition(distances, num_to_select)[:num_to_select]
+
+        else: # RANDOM
+            selected_point_indices = random.sample(range(num_input_points), num_to_select)
+
+        # --- Combine Regions ---
+        selected_vertices = set()
+        point_region_map = vor.point_region
+        for idx in selected_point_indices:
+             region_indices = vor.regions[point_region_map[idx]]
+             if region_indices and -1 not in region_indices:
+                 selected_vertices.update(region_indices)
+
+        if not selected_vertices:
+             logger.warning("No valid vertices selected for the track polygon.")
+             return None
+
+        # Get coordinates of selected vertices
+        track_vertices = vor.vertices[list(selected_vertices)]
+
+        # Sort vertices to form a polygon
+        try:
+            sorted_track_vertices = self._clockwise_sort(track_vertices)
+            track_polygon = Polygon(sorted_track_vertices)
+            # Simplify polygon slightly to remove potential self-intersections from Voronoi artifacts
+            track_polygon = track_polygon.simplify(0.1, preserve_topology=True)
+            # Buffer slightly inwards then outwards to smooth small irregularities
+            track_polygon = track_polygon.buffer(-0.05, join_style=2).buffer(0.05, join_style=2)
+
+            if track_polygon.is_empty or not track_polygon.is_valid:
+                 logger.warning("Generated track polygon is invalid or empty after processing.")
+                 return None
+
+            # Ensure it's a single polygon (not MultiPolygon)
+            if track_polygon.geom_type == 'MultiPolygon':
+                 track_polygon = max(track_polygon.geoms, key=lambda p: p.area) # Take largest polygon
+                 if track_polygon.geom_type != 'Polygon': return None # Still not valid
+
+            return track_polygon
+        except Exception as e:
+             logger.error(f"Error creating track polygon from vertices: {e}")
+             return None
+
+
+    def _check_track_constraints(self, x: np.ndarray, y: np.ndarray, curvature: np.ndarray, radius: np.ndarray) -> bool:
+        """Check if the generated track meets length and curvature constraints."""
+        # 1. Calculate Length
+        self.track_length = np.sum(np.sqrt(np.diff(x)**2 + np.diff(y)**2))
+        if not (self.MIN_LENGTH <= self.track_length <= self.MAX_LENGTH):
+            logger.debug(f"Constraint fail: Length {self.track_length:.1f}m not in range [{self.MIN_LENGTH}, {self.MAX_LENGTH}]m")
             return False
-            
-        # Ensure track is a single polygon
-        if track.geom_type != 'Polygon':
+
+        # 2. Check Maximum Curvature (Minimum Radius)
+        # Radius = 1 / Curvature
+        min_radius_found = np.min(radius[radius > 0]) if np.any(radius > 0) else float('inf')
+        min_allowed_radius = 1.0 / self.CURVATURE_THRESHOLD
+        if min_radius_found < min_allowed_radius:
+            logger.debug(f"Constraint fail: Min radius {min_radius_found:.2f}m < allowed {min_allowed_radius:.2f}m")
             return False
-            
-        # Check length is within FS limits
-        length = track.length
-        if length < self.MIN_LENGTH or length > self.MAX_LENGTH:
-            return False
-            
-        # Check width/height ratio
-        bounds = track.bounds
-        width = bounds[2] - bounds[0]
-        height = bounds[3] - bounds[1]
-        if width > self.MAX_BOUND * 1.2 or height > self.MAX_BOUND * 1.2:
-            return False
-            
-        # Check aspect ratio
-        aspect_ratio = max(width, height) / min(width, height)
-        if aspect_ratio > 3.0 or aspect_ratio < 1.0:
-            return False
-            
+
+        # Optional: Check for excessively long straight sections (can lead to boring tracks)
+        # straight_mask = np.abs(curvature) < self.STRAIGHT_THRESHOLD
+        # Add logic to find contiguous straight sections and check length
+
         return True
 
+    def _find_start_position(self, x: np.ndarray, y: np.ndarray, curvature: np.ndarray) -> bool:
+        """Find a suitable start/finish straight."""
+        if len(x) < 3: return False
 
-    def _find_start_position(self, x: np.ndarray, y: np.ndarray, curvature: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
-        """Find suitable start position with straight section that's guaranteed to be on the track"""
-        if self.track_polygon is None:
-            raise ValueError("Track polygon must be generated before finding start position")
-            
-        straight_sections = np.abs(curvature) <= self.STRAIGHT_THRESHOLD
-        if not any(straight_sections):
-            raise ValueError("No suitable straight section found for start position")
-            
-        # Calculate cumulative distances
-        dx = np.diff(x)
-        dy = np.diff(y)
-        segment_lengths = np.sqrt(dx**2 + dy**2)
-        cumulative_length = np.cumsum(segment_lengths)
-        
-        # Find all potential straight sections
-        straight_candidates = []
-        current_length = 0
+        # Calculate segment lengths
+        segment_lengths = np.sqrt(np.diff(x)**2 + np.diff(y)**2)
+        cumulative_length = np.concatenate(([0], np.cumsum(segment_lengths)))
+
+        # Find potential straight sections
+        straight_mask = np.abs(curvature) < self.STRAIGHT_THRESHOLD
+        potential_straights = []
         current_start_idx = None
-        
-        for i in range(len(straight_sections)-1):
-            if straight_sections[i]:
+
+        for i in range(len(straight_mask)):
+            if straight_mask[i]:
                 if current_start_idx is None:
                     current_start_idx = i
-                current_length += segment_lengths[i]
             else:
-                if current_length >= self.LENGTH_START_AREA:
-                    straight_candidates.append({
-                        'start_idx': current_start_idx,
-                        'length': current_length,
-                        'end_idx': i
-                    })
-                current_length = 0
-                current_start_idx = None
-                
-        # Add final section if it's straight
-        if current_length >= self.LENGTH_START_AREA:
-            straight_candidates.append({
-                'start_idx': current_start_idx,
-                'length': current_length,
-                'end_idx': len(straight_sections)-1
-            })
-            
-        if not straight_candidates:
-            raise ValueError(f"No straight section longer than {self.LENGTH_START_AREA}m found")
-            
-        # Sort candidates by length (longest first)
-        straight_candidates.sort(key=lambda x: x['length'], reverse=True)
-        
-        # Try each candidate until we find one that's on the track
-        for candidate in straight_candidates:
-            start_idx = candidate['start_idx']
-            # Take a point slightly ahead for the start line
-            ahead_idx = min(start_idx + int(self.LENGTH_START_AREA / segment_lengths[start_idx]), 
-                        candidate['end_idx'])
-            
-            # Create points to test
-            start_point = Point(x[start_idx], y[start_idx])
-            start_line_point = Point(x[ahead_idx], y[ahead_idx])
-            
-            # Check if both points are within or on the track
-            if self.track_polygon.contains(start_point) or self.track_polygon.touches(start_point):
-                if self.track_polygon.contains(start_line_point) or self.track_polygon.touches(start_line_point):
-                    # Calculate heading
-                    start_heading = float(np.arctan2(
-                        y[ahead_idx] - y[start_idx],
-                        x[ahead_idx] - x[start_idx]
-                    ))
-                    
-                    return (np.array([x[ahead_idx], y[ahead_idx]]), 
-                            np.array([x[start_idx], y[start_idx]]), 
-                            start_heading)
-        
-        raise ValueError("No valid straight section found within track boundaries")
+                if current_start_idx is not None:
+                    # End of a potential straight
+                    end_idx = i - 1
+                    if end_idx > current_start_idx: # Need at least 2 points
+                         length = cumulative_length[end_idx+1] - cumulative_length[current_start_idx]
+                         if length >= self.START_STRAIGHT_LENGTH:
+                              potential_straights.append({'start': current_start_idx, 'end': end_idx, 'length': length})
+                    current_start_idx = None
+            # Handle straight at the end of the track
+            if i == len(straight_mask) - 1 and current_start_idx is not None:
+                 end_idx = i
+                 if end_idx > current_start_idx:
+                    length = cumulative_length[end_idx] - cumulative_length[current_start_idx] # Use end index for length
+                    if length >= self.START_STRAIGHT_LENGTH:
+                        potential_straights.append({'start': current_start_idx, 'end': end_idx, 'length': length})
 
-    def visualize_voronoi(self, vor, sorted_vertices, random_point_indices, input_points, x, y):
-        """Visualizes the Voronoi diagram and resulting track"""
-        plt.figure(figsize=(12, 8))
-        
-        # Plot initial points
-        plt.plot(vor.filtered_points[:, 0], vor.filtered_points[:, 1], 'b.')
-        
-        # Plot vertices points
-        for region in vor.filtered_regions:
-            vertices = vor.vertices[region, :]
-            plt.plot(vertices[:, 0], vertices[:, 1], 'go')
-            
-        # Plot edges
-        for region in vor.filtered_regions:
-            vertices = vor.vertices[region + [region[0]], :]
-            plt.plot(vertices[:, 0], vertices[:, 1], 'k-')
-            
-        # Plot selected vertices
-        plt.scatter(sorted_vertices[:,0], sorted_vertices[:,1], 
-                   color='y', s=200, label='Selected vertices')
-        
-        # Plot selected points
-        plt.scatter(*input_points[random_point_indices].T, 
-                   s=100, marker='x', color='b', label='Selected points')
-        
-        # Plot track
-        plt.scatter(x, y, color='r', s=1, label='Track centerline')
-        
-        plt.xlabel('x [m]')
-        plt.ylabel('y [m]')
-        plt.axis('equal')
-        plt.legend()
-        plt.grid(True)
-        plt.title('Voronoi Diagram and Track Generation')
-        plt.show()
-        
-    def plot_track(self):
-        """Plots the generated track with cones and dynamic start position"""
-        if self.cones_left is None or self.cones_right is None or self.start_position is None:
-            raise ValueError("No track has been generated yet")
-                
-        plt.figure(figsize=(12, 8))
-        
-        # Plot cones
-        plt.scatter(self.cones_left[:, 0], 
-                self.cones_left[:, 1], 
-                color='b', s=30, label='Blue Cones')
-        plt.scatter(self.cones_right[:, 0], 
-                self.cones_right[:, 1], 
-                color='y', s=30, label='Yellow Cones')
-        
-        # Calculate start/finish box positions based on start_position and heading
-        start_direction = np.array([np.cos(self.start_heading), np.sin(self.start_heading)])
-        perpendicular = np.array([-np.sin(self.start_heading), np.cos(self.start_heading)])
-        
-        # Start box cones (2.5m to each side, at start position)
-        start_left = self.start_position + perpendicular * 2.5
-        start_right = self.start_position - perpendicular * 2.5
-        
-        # Finish line cones (2.5m to each side, 2.6m ahead of start)
-        finish_center = self.start_position + start_direction * 2.6
-        finish_left = finish_center + perpendicular * 2.5
-        finish_right = finish_center - perpendicular * 2.5
-        
-        # Store start/finish positions for export
-        self.start_cones = np.array([
-            start_left,
-            start_right,
-            finish_left,
-            finish_right
-        ])
-        
-        # Plot start/finish cones
-        plt.scatter(self.start_cones[:, 0], self.start_cones[:, 1], 
-                color='orange', s=50, label='Start/Finish')
-        
-        plt.xlabel('x [m]')
-        plt.ylabel('y [m]')
-        plt.axis('equal')
-        plt.grid(True)
-        plt.legend()
-        plt.title('Formula Student Track Layout')
-        plt.show()
 
-    def export_track(self, output_path: str, sim_type: SimType = SimType.FSDS):
-        """Export track in specified simulator format"""
-        if sim_type == SimType.FSSIM:
-            self._export_fssim_yaml(output_path)
-        elif sim_type == SimType.FSDS:
-            self._export_fsds_csv(output_path)
-        elif sim_type == SimType.GPX:
-            self._export_gpx(output_path)
+        if not potential_straights:
+            logger.warning(f"Could not find a straight section >= {self.START_STRAIGHT_LENGTH}m for start/finish.")
+            return False
 
-    def _export_fssim_yaml(self, output_path: str):
-        """Exports track in FSSIM YAML format with dynamic start position"""
-        if self.start_cones is None:
-            raise ValueError("Track must be plotted before export to generate start/finish positions")
-            
+        # Select the longest straight section
+        longest_straight = max(potential_straights, key=lambda s: s['length'])
+        start_idx = longest_straight['start']
+        end_idx = longest_straight['end']
+
+        # Position start line near the beginning of the longest straight
+        # Place start position 1m into the straight
+        target_dist_into_straight = 1.0
+        start_line_idx = start_idx
+        dist_covered = 0.0
+        while start_line_idx < end_idx:
+            dist_covered += segment_lengths[start_line_idx]
+            if dist_covered >= target_dist_into_straight:
+                break
+            start_line_idx += 1
+        start_line_idx = min(start_line_idx, end_idx) # Ensure it doesn't go past the end
+
+        # Start position is at start_line_idx
+        self.start_position = np.array([x[start_line_idx], y[start_line_idx]])
+
+        # Calculate heading using the next point on the straight
+        next_idx = min(start_line_idx + 1, len(x) - 1)
+        dx = x[next_idx] - x[start_line_idx]
+        dy = y[next_idx] - y[start_line_idx]
+        self.start_heading = np.arctan2(dy, dx)
+
+        # Calculate orange cone positions based on start position and heading
+        perp_vec = np.array([-np.sin(self.start_heading), np.cos(self.start_heading)])
+        start_box_width = self.TRACK_WIDTH + 1.0 # Slightly wider start box
+
+        # Cones defining the start line itself (at start_position)
+        start_left = self.start_position + perp_vec * start_box_width / 2.0
+        start_right = self.start_position - perp_vec * start_box_width / 2.0
+
+        # Cones defining the finish line (e.g., 1m ahead)
+        finish_center = self.start_position + np.array([np.cos(self.start_heading), np.sin(self.start_heading)]) * 1.0
+        finish_left = finish_center + perp_vec * start_box_width / 2.0
+        finish_right = finish_center - perp_vec * start_box_width / 2.0
+
+        self.start_cones = np.array([start_left, start_right, finish_left, finish_right])
+
+        return True
+
+    def _place_cones(self, x: np.ndarray, y: np.ndarray):
+        """Place cones along the track boundaries."""
+        if len(x) < 2: return
+
+        # Calculate tangent and normal vectors
+        tangents = np.gradient(np.column_stack((x, y)), axis=0)
+        norms = np.linalg.norm(tangents, axis=1)
+        valid = norms > 1e-6
+        tangents[valid] /= norms[valid, np.newaxis]
+        # Handle potential issues at start/end for closed loop
+        if np.allclose(x[0], x[-1]) and np.allclose(y[0], y[-1]):
+             tangents[0] = tangents[-1] = (tangents[1] + tangents[-2]) / 2.0
+             tangents[0] /= np.linalg.norm(tangents[0])
+             tangents[-1] = tangents[0]
+
+        normals = np.zeros_like(tangents)
+        normals[:, 0] = -tangents[:, 1]
+        normals[:, 1] = tangents[:, 0]
+
+        # Create boundary lines
+        half_width = self.TRACK_WIDTH / 2.0
+        left_boundary_pts = np.column_stack((x, y)) + normals * half_width[:, np.newaxis]
+        right_boundary_pts = np.column_stack((x, y)) - normals * half_width[:, np.newaxis]
+
+        # Interpolate points along boundaries for even cone spacing
+        left_line = LineString(left_boundary_pts)
+        right_line = LineString(right_boundary_pts)
+
+        num_cones_left = max(3, int(np.ceil(left_line.length / self.CONE_SPACING)))
+        num_cones_right = max(3, int(np.ceil(right_line.length / self.CONE_SPACING)))
+
+        left_distances = np.linspace(0, left_line.length, num_cones_left)
+        right_distances = np.linspace(0, right_line.length, num_cones_right)
+
+        self.cones_left = np.array([list(left_line.interpolate(d).coords)[0] for d in left_distances])
+        self.cones_right = np.array([list(right_line.interpolate(d).coords)[0] for d in right_distances])
+
+    def generate_track(self, mode: TrackMode = TrackMode.EXTEND, max_retries: int = 20) -> Optional[Dict]:
+        """
+        Main function to generate a valid Formula Student track.
+
+        Args:
+            mode: Track generation mode.
+            max_retries: Maximum attempts to generate a valid track.
+
+        Returns:
+            Dictionary with track metadata if successful, None otherwise.
+        """
+        for retry in range(max_retries):
+            logger.info(f"--- Track Generation Attempt {retry + 1}/{max_retries} (Mode: {mode.name}) ---")
+            try:
+                # 1. Generate initial points
+                input_points = np.random.uniform(self.MIN_BOUND, self.MAX_BOUND, (self.N_POINTS, 2))
+
+                # 2. Create Bounded Voronoi Diagram
+                vor = self._bounded_voronoi(input_points)
+                if vor is None: continue # Retry if Voronoi failed
+
+                # 3. Select Regions and Create Track Polygon
+                track_polygon = self._get_track_polygon(vor, mode)
+                if track_polygon is None: continue # Retry if polygon creation failed
+
+                # 4. Get Centerline from Polygon Exterior
+                x_poly, y_poly = track_polygon.exterior.coords.xy
+                x_poly, y_poly = np.array(x_poly), np.array(y_poly)
+                # Ensure closed loop if it's not already
+                if not np.allclose(x_poly[0], x_poly[-1]) or not np.allclose(y_poly[0], y_poly[-1]):
+                     x_poly = np.append(x_poly, x_poly[0])
+                     y_poly = np.append(y_poly, y_poly[0])
+
+                # 5. Interpolate and Smooth Centerline (more points for smoother curvature)
+                num_centerline_points = max(200, int(track_polygon.length * 2)) # More points based on length
+                try:
+                    # Use periodic spline for closed tracks
+                    tck, u = interpolate.splprep([x_poly, y_poly], s=1.0, per=1) # Allow some smoothing (s=1.0)
+                    t_interp = np.linspace(0, 1, num_centerline_points)
+                    x_center, y_center = interpolate.splev(t_interp, tck, der=0)
+                except Exception as e:
+                     logger.warning(f"Spline interpolation failed: {e}. Using polygon vertices directly.")
+                     x_center, y_center = x_poly, y_poly # Fallback
+
+                # 6. Calculate Curvature and Radius
+                curvature, radius = self._calculate_curvature(x_center, y_center)
+
+                # 7. Check Constraints (Length and Curvature)
+                if not self._check_track_constraints(x_center, y_center, curvature, radius):
+                    logger.debug(f"Attempt {retry+1} failed constraints check.")
+                    continue # Retry
+
+                # 8. Find Start/Finish Position
+                if not self._find_start_position(x_center, y_center, curvature):
+                     logger.debug(f"Attempt {retry+1} failed to find start position.")
+                     continue # Retry
+
+                # 9. Place Cones along Boundaries
+                self._place_cones(x_center, y_center)
+
+                # Store final centerline data
+                self.track_centerline_x = x_center
+                self.track_centerline_y = y_center
+                self.track_curvature = curvature
+
+                # 10. Prepare Metadata
+                # Calculate average radius (excluding straights)
+                corner_radii = radius[radius < (1.0 / self.STRAIGHT_THRESHOLD)]
+                avg_radius = np.mean(corner_radii) if len(corner_radii) > 0 else float('inf')
+                min_radius = np.min(radius[radius > 0]) if np.any(radius > 0) else float('inf')
+
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                mode_str = mode.name.lower()
+                base_filename = f"fs_track_{mode_str}_{timestamp}"
+                csv_filename = f"{base_filename}.csv" # Default save format
+                filepath = os.path.join(self.output_dir, csv_filename)
+
+                metadata = {
+                    'filename': csv_filename,
+                    'filepath': filepath,
+                    'track_length': self.track_length,
+                    'num_cones': len(self.cones_left) + len(self.cones_right) + len(self.start_cones),
+                    'track_width': self.TRACK_WIDTH,
+                    'generation_mode': mode.name,
+                    'generation_time': datetime.now().isoformat(),
+                    'min_radius': min_radius,
+                    'avg_radius': avg_radius
+                }
+
+                # 11. Save default FSDS CSV track file
+                if not self._export_fsds_csv(filepath):
+                     logger.error(f"Failed to save track data to {filepath}")
+                     continue # Retry
+
+                # 12. Append metadata
+                try:
+                    pd.DataFrame([metadata]).to_csv(self.metadata_file, mode='a', header=False, index=False)
+                except IOError as e:
+                     logger.error(f"Failed to append metadata to {self.metadata_file}: {e}")
+                except Exception as e:
+                     logger.error(f"Unexpected error writing metadata: {e}")
+
+
+                logger.info(f"Successfully generated track '{csv_filename}' after {retry + 1} attempts.")
+                return metadata # Success
+
+            except Exception as e:
+                logger.error(f"Error during track generation attempt {retry + 1}: {e}", exc_info=True)
+                # Continue to next retry
+
+        logger.error(f"Failed to generate a valid track after {max_retries} attempts.")
+        return None # Failed after all retries
+
+    def export_track(self, output_path: str, sim_type: SimType = SimType.FSDS) -> bool:
+        """Export the *last generated* track in the specified format."""
+        if self.cones_left is None or self.cones_right is None or self.start_cones is None:
+            logger.error("No track data generated yet to export.")
+            return False
+
+        logger.info(f"Exporting track to {sim_type.name} format: {output_path}")
+        try:
+            if sim_type == SimType.FSSIM:
+                return self._export_fssim_yaml(output_path)
+            elif sim_type == SimType.FSDS:
+                return self._export_fsds_csv(output_path)
+            elif sim_type == SimType.GPX:
+                return self._export_gpx(output_path)
+            else:
+                logger.error(f"Unsupported export format: {sim_type}")
+                return False
+        except Exception as e:
+            logger.error(f"Error during export to {sim_type.name}: {e}", exc_info=True)
+            return False
+
+    def _export_fssim_yaml(self, output_path: str) -> bool:
+        """Exports track in FSSIM YAML format."""
         data = {
             'cones_left': self.cones_left.tolist(),
             'cones_right': self.cones_right.tolist(),
-            'cones_orange': [],
+            'cones_orange': [], # Usually empty unless specific orange cones placed
             'cones_orange_big': self.start_cones.tolist(),
-            'starting_pose_cg': [
+            'starting_pose_cg': [ # Center of gravity starting pose
                 float(self.start_position[0]),
                 float(self.start_position[1]),
-                float(self.start_heading)
-            ],
-            'tk_device': [
-                [self.start_position[0] + 1.3, self.start_position[1] + 3.0],
-                [self.start_position[0] + 1.3, self.start_position[1] - 3.0]
+                float(self.start_heading) # Yaw angle in radians
             ]
+            # Optional: tk_device (timing gates) can be added if calculated
         }
-        
-        with open(output_path, 'w') as f:
-            yaml.dump(data, f)
-            
-    def _export_fsds_csv(self, output_path: str):
-        """Exports track in FSDS CSV format with dynamic start position"""
-        if self.start_cones is None:
-            raise ValueError("Track must be plotted before export to generate start/finish positions")
-            
-        with open(output_path, 'w') as f:
-            # Write left cones
-            for cone in self.cones_left:
-                f.write(f"blue,{cone[0]},{cone[1]},0,0.01,0.01,0\n")
-                
-            # Write right cones
-            for cone in self.cones_right:
-                f.write(f"yellow,{cone[0]},{cone[1]},0,0.01,0.01,0\n")
-                
-            # Write start/finish cones using calculated positions
-            for cone in self.start_cones:
-                f.write(f"big_orange,{cone[0]},{cone[1]},0,0.01,0.01,0\n")
+        try:
+            with open(output_path, 'w') as f:
+                yaml.dump(data, f, default_flow_style=None, sort_keys=False)
+            return True
+        except IOError as e:
+            logger.error(f"Failed to write FSSIM YAML file {output_path}: {e}")
+            return False
+
+    def _export_fsds_csv(self, output_path: str) -> bool:
+        """Exports track in FSDS CSV format."""
+        try:
+            with open(output_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                # Writer header (optional but good practice)
+                # writer.writerow(['color', 'x', 'y', 'z', 'dx', 'dy', 'dz']) # Example header
+
+                # Write left cones (blue)
+                for cone in self.cones_left:
+                    writer.writerow(['blue', f"{cone[0]:.4f}", f"{cone[1]:.4f}", 0, 0.01, 0.01, 0]) # z, dx, dy, dz are often unused placeholders
+
+                # Write right cones (yellow)
+                for cone in self.cones_right:
+                    writer.writerow(['yellow', f"{cone[0]:.4f}", f"{cone[1]:.4f}", 0, 0.01, 0.01, 0])
+
+                # Write start/finish cones (big_orange)
+                for cone in self.start_cones:
+                    writer.writerow(['big_orange', f"{cone[0]:.4f}", f"{cone[1]:.4f}", 0, 0.01, 0.01, 0])
+            return True
+        except IOError as e:
+             logger.error(f"Failed to write FSDS CSV file {output_path}: {e}")
+             return False
 
     def _export_gpx(self, output_path: str, lat_offset=51.197682, lon_offset=5.323411):
-        """Exports track in GPX format"""
+        """Exports track centerline in GPX format."""
+        if self.track_centerline_x is None or self.track_centerline_y is None:
+             logger.error("Cannot export GPX: Track centerline not generated.")
+             return False
+
         gpx = gpxpy.gpx.GPX()
-        gpx_track = gpxpy.gpx.GPXTrack()
+        gpx_track = gpxpy.gpx.GPXTrack(name="Formula Student Generated Track")
         gpx.tracks.append(gpx_track)
-        
-        # Add cone waypoints
-        for cone in self.cones_left:
-            lat = lat_offset + (cone[1] / 6378100) * (180 / math.pi)
-            lon = lon_offset + (cone[0] / 6378100) * (180 / math.pi) / math.cos(lat_offset * math.pi/180)
-            gpx.waypoints.append(gpxpy.gpx.GPXWaypoint(latitude=lat, longitude=lon, elevation=0))
-            
-        with open(output_path, 'w') as f:
-            f.write(gpx.to_xml())
+        gpx_segment = gpxpy.gpx.GPXTrackSegment()
+        gpx_track.segments.append(gpx_segment)
 
-    def generate_track(self, mode: TrackMode = TrackMode.EXTEND, max_retries: int = 20) -> dict:
-        """Generate track with Formula Student constraints"""
-        for retry in range(max_retries):
-            try:
-                # Create initial points
-                input_points = np.random.uniform(
-                    self.MIN_BOUND,
-                    self.MAX_BOUND,
-                    (self.N_POINTS, 2)
-                )
-                
-                # Generate Voronoi diagram
-                vor = self._bounded_voronoi(input_points)
-                
-                # Select regions based on mode
-                try:
-                    if mode == TrackMode.EXTEND:
-                        random_index = np.random.randint(0, len(input_points))
-                        random_heading = np.random.uniform(0, np.pi/2)
-                        random_point = input_points[random_index]
-                        
-                        start = (
-                            random_point[0] - 0.5 * self.MAX_BOUND * np.cos(random_heading),
-                            random_point[1] - 0.5 * self.MAX_BOUND * np.sin(random_heading)
-                        )
-                        end = (
-                            random_point[0] + 0.5 * self.MAX_BOUND * np.cos(random_heading),
-                            random_point[1] + 0.5 * self.MAX_BOUND * np.sin(random_heading)
-                        )
-                        line = LineString([start, end])
-                        distances = [Point(p).distance(line) for p in input_points]
-                        random_point_indices = np.argpartition(distances, self.N_REGIONS)[:self.N_REGIONS]
-                    
-                    elif mode == TrackMode.EXPAND:
-                        random_index = np.random.randint(0, self.N_POINTS)
-                        random_point_indices = [random_index]
-                        random_point = input_points[random_index]
-                        
-                        for i in range(self.N_REGIONS - 1):
-                            closest_point_index = self._closest_node(random_point, input_points, k=i+1)
-                            random_point_indices.append(closest_point_index)
-                    
-                    else:  # RANDOM
-                        random_point_indices = np.random.choice(
-                            len(input_points),
-                            size=self.N_REGIONS,
-                            replace=False
-                        )
-                    
-                    # Get regions belonging to selected points
-                    regions = np.array([np.array(region) for region in vor.regions], dtype=object)
-                    random_region_indices = vor.point_region[random_point_indices]
-                    random_regions = np.concatenate(regions[random_region_indices])
-                    
-                    # Get vertices of random regions
-                    random_vertices = np.unique(vor.vertices[random_regions], axis=0)
-                    
-                    # Sort vertices clockwise and close loop
-                    sorted_vertices = self._clockwise_sort(random_vertices)
-                    sorted_vertices = np.vstack([sorted_vertices, sorted_vertices[0]])
-                    
-                    while True:
-                        # Interpolate with no smoothing
-                        tck, _ = interpolate.splprep([sorted_vertices[:,0], sorted_vertices[:,1]], s=0, per=True)
-                        t = np.linspace(0, 1, 1000)
-                        x, y = interpolate.splev(t, tck, der=0)
-                        dx_dt, dy_dt = interpolate.splev(t, tck, der=1)
-                        d2x_dt2, d2y_dt2 = interpolate.splev(t, tck, der=2)
-                        
-                        # Calculate curvature
-                        k = self._calculate_curvature(dx_dt, d2x_dt2, dy_dt, d2y_dt2)
-                        abs_curvature = np.abs(k)
-                        
-                        # Check curvature peaks
-                        peaks, _ = signal.find_peaks(abs_curvature)
-                        exceeded_peaks = abs_curvature[peaks] > self.CURVATURE_THRESHOLD
-                        
-                        if any(exceeded_peaks):
-                            # Remove vertex at highest curvature
-                            max_peak_index = abs_curvature[peaks].argmax()
-                            max_peak = peaks[max_peak_index]
-                            peak_coordinate = (x[max_peak], y[max_peak])
-                            vertice = self._closest_node(peak_coordinate, sorted_vertices, k=0)
-                            sorted_vertices = np.delete(sorted_vertices, vertice, axis=0)
-                            
-                            if len(sorted_vertices) < 4:
-                                print(f"Retry {retry + 1}: Too few vertices remain after curvature reduction")
-                                break
-                                
-                            # Ensure loop is closed
-                            if not np.array_equal(sorted_vertices[0], sorted_vertices[-1]):
-                                sorted_vertices = np.vstack([sorted_vertices, sorted_vertices[0]])
-                        else:
-                            break
-                    
-                    # Create track boundaries
-                    track = Polygon(zip(x, y))
-                    if not track.is_valid or track.geom_type != 'Polygon':
-                        print(f"Retry {retry + 1}: Invalid track geometry")
-                        continue
-                        
-                    track_left = track.buffer(self.TRACK_WIDTH / 2)
-                    track_right = track.buffer(-self.TRACK_WIDTH / 2)
-                    
-                    if not (track_left.is_valid and track_right.is_valid and 
-                        track_left.geom_type == 'Polygon' and 
-                        track_right.geom_type == 'Polygon'):
-                        print(f"Retry {retry + 1}: Invalid track boundaries")
-                        continue
-                    
-                    # Place cones with even spacing
-                    cone_spacing_left = np.linspace(
-                        0, 
-                        track_left.length, 
-                        np.ceil(track_left.length / self.TRACK_WIDTH).astype(int) + 1
-                    )[:-1]
-                    
-                    cone_spacing_right = np.linspace(
-                        0, 
-                        track_right.length, 
-                        np.ceil(track_right.length / self.TRACK_WIDTH).astype(int) + 1
-                    )[:-1]
-                    
-                    self.cones_left = np.array([
-                        track_left.exterior.interpolate(d).coords[0] 
-                        for d in cone_spacing_left
-                    ])
-                    
-                    self.cones_right = np.array([
-                        track_right.exterior.interpolate(d).coords[0] 
-                        for d in cone_spacing_right
-                    ])
-                    
-                    # Scale down all track components
-                    self.cones_left = self._scale_track(self.cones_left)
-                    self.cones_right = self._scale_track(self.cones_right)
-                    
-                    # Scale track points
-                    x = self._scale_track(x)
-                    y = self._scale_track(y)
-                    
-                    # Scale and store track polygon BEFORE finding start position
-                    scaled_coords = zip(self._scale_track(np.array([p[0] for p in track.exterior.coords])),
-                                    self._scale_track(np.array([p[1] for p in track.exterior.coords])))
-                    track = Polygon(list(scaled_coords))
-                    self.track_polygon = track  # Store track polygon before finding start position
-                    
-                    # Store track points
-                    self.track_points = (x, y)
-                    
-                    # Now find start position
-                    try:
-                        self.start_line, self.start_position, self.start_heading = (
-                            self._find_start_position(x, y, abs_curvature)
-                        )
-                    except ValueError as e:
-                        print(f"Retry {retry + 1}: {str(e)}")
-                        continue
-                    
-                    # Generate visualization if enabled
-                    if self.visualize:
-                        try:
-                            self.visualize_voronoi(vor, sorted_vertices, random_point_indices, input_points, x, y)
-                            self.plot_track()
-                        except Exception as e:
-                            print(f"Visualization error (non-critical): {e}")
-                    
-                    # Save track data and return metadata
-                    filename = f"track_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                    filepath = os.path.join(self.output_dir, filename)
-                    
-                    metadata = {
-                        'filename': filename,
-                        'filepath': filepath,
-                        'track_length': float(track.length),
-                        'num_cones': len(self.cones_left) + len(self.cones_right),
-                        'track_width': self.TRACK_WIDTH,
-                        'generation_mode': mode.value,
-                        'generation_time': datetime.now().isoformat()
-                    }
-                    
-                    pd.DataFrame([metadata]).to_csv(
-                        self.metadata_file, 
-                        mode='a', 
-                        header=False, 
-                        index=False
-                    )
-                    
-                    cone_data = []
-                    for x, y in self.cones_left:
-                        cone_data.append(['blue', x, y, 0])
-                    for x, y in self.cones_right:
-                        cone_data.append(['yellow', x, y, 0])
-                        
-                    pd.DataFrame(
-                        cone_data, 
-                        columns=['color', 'x', 'y', 'z']
-                    ).to_csv(filepath, index=False)
-                    
-                    print(f"Successfully generated track after {retry + 1} attempts")
-                    return metadata
-                    
-                except Exception as e:
-                    print(f"Error during region processing: {str(e)}")
-                    continue
-                    
-            except Exception as e:
-                print(f"Retry {retry + 1} failed: {str(e)}")
-                if retry == max_retries - 1:
-                    raise ValueError(f"Failed to generate valid track after {max_retries} attempts")
-                continue
-        
-        raise ValueError("Could not generate valid track after maximum attempts")
-def generate_multiple_tracks(
-    num_tracks: int = 5,
-    base_dir: str = "./tracks",
-    mode: TrackMode = TrackMode.EXTEND,
-    visualize: bool = False,
-    export_formats: List[SimType] = [SimType.FSDS],
-    max_retries: int = 20
-    ) -> List[Dict]:
-    """Generate multiple tracks and return their metadata"""
-    # Convert base_dir to absolute path and print directory info
-    base_dir = os.path.abspath(base_dir)
-    print(f"\nOutput Directory Information:")
-    print(f"Base directory: {base_dir}")
-    print(f"Generated tracks will be saved in: {os.path.join(base_dir, 'generated_tracks')}\n")
-    
-    generator = FSTrackGenerator(base_dir, visualize=visualize)
-    tracks = []
-    
-    for i in range(num_tracks):
+        # Add centerline points as track points
+        # Convert local X, Y to pseudo Lat, Lon using offset and simple scaling
+        earth_radius = 6371000.0 # meters
+        center_x = np.mean(self.track_centerline_x)
+        center_y = np.mean(self.track_centerline_y)
+
+        for x, y in zip(self.track_centerline_x, self.track_centerline_y):
+            # Simple planar conversion - not geodesically accurate but fine for local tracks
+            lat = lat_offset + math.degrees((y - center_y) / earth_radius)
+            lon = lon_offset + math.degrees((x - center_x) / (earth_radius * math.cos(math.radians(lat_offset))))
+            gpx_segment.points.append(gpxpy.gpx.GPXTrackPoint(latitude=lat, longitude=lon))
+
         try:
-            metadata = generator.generate_track(mode, max_retries=max_retries)
-            tracks.append(metadata)
-            print(f"\nGenerated track {i+1}/{num_tracks}:")
-            print(f"  Base filename: {metadata['filename']}")
-            print(f"  Saving to: {metadata['filepath']}")
-            print(f"  Track length: {metadata['track_length']:.1f}m")
-            print(f"  Number of cones: {metadata['num_cones']}")
-            
-            # Export in requested formats
-            basename = os.path.splitext(metadata['filename'])[0]
-            for fmt in export_formats:
-                output_path = os.path.join(
-                    generator.output_dir,
-                    f"{basename}.{fmt.value}"
-                )
-                generator.export_track(output_path, fmt)
-                print(f"  Also exported as: {output_path}")
-            
-        except Exception as e:
-            print(f"Failed to generate track {i+1}: {str(e)}")
-            continue
-    
-    # Print summary statistics with file locations
-    if tracks:
-        print(f"\nMetadata saved to: {generator.metadata_file}")
-        df = pd.read_csv(generator.metadata_file)
-        print("\nGeneration Summary:")
-        print(f"Successfully generated: {len(tracks)}/{num_tracks} tracks")
-        print(f"Average track length: {df['track_length'].mean():.1f}m")
-        print(f"Average number of cones: {df['num_cones'].mean():.1f}")
-        print(f"Generation modes used: {df['generation_mode'].value_counts().to_dict()}")
-    
-    return tracks
+            with open(output_path, 'w') as f:
+                f.write(gpx.to_xml(version='1.1')) # Specify version
+            return True
+        except IOError as e:
+            logger.error(f"Failed to write GPX file {output_path}: {e}")
+            return False
 
+    def plot_track(self):
+        """Plots the generated track with cones and start/finish line."""
+        if self.cones_left is None or self.cones_right is None or self.start_cones is None or self.start_position is None:
+            logger.warning("Cannot plot track: Generation not complete or failed.")
+            return
+
+        plt.figure(figsize=(12, 10))
+        ax = plt.gca()
+
+        # Plot cones
+        ax.scatter(self.cones_left[:, 0], self.cones_left[:, 1], color='blue', s=25, label='Left Cones (Blue)')
+        ax.scatter(self.cones_right[:, 0], self.cones_right[:, 1], color='yellow', s=25, label='Right Cones (Yellow)', edgecolors='k', linewidths=0.5)
+        ax.scatter(self.start_cones[:, 0], self.start_cones[:, 1], color='orange', s=50, label='Start/Finish Cones', edgecolors='k')
+
+        # Plot start position and heading arrow
+        ax.plot(self.start_position[0], self.start_position[1], 'go', markersize=10, label='Start Line Center')
+        dir_vec = np.array([np.cos(self.start_heading), np.sin(self.start_heading)])
+        ax.arrow(self.start_position[0], self.start_position[1], dir_vec[0]*5, dir_vec[1]*5,
+                 head_width=1.5, head_length=2.0, fc='green', ec='green', linewidth=1.5, zorder=5)
+
+        # Plot centerline for reference
+        if self.track_centerline_x is not None:
+             ax.plot(self.track_centerline_x, self.track_centerline_y, 'k--', alpha=0.4, linewidth=1, label='Centerline (Approx)')
+
+        ax.set_aspect('equal', adjustable='box')
+        _apply_common_ax_settings(ax, xlabel='X (m)', ylabel='Y (m)', title='Generated Formula Student Track')
+        ax.legend(loc='best')
+
+        plt.tight_layout()
+        if self.visualize:
+            plt.show()
+        else:
+            # If not visualizing interactively, ensure the plot is closed
+            plt.close()

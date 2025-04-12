@@ -1,18 +1,8 @@
 """
 Transmission module for Formula Student powertrain simulation.
 
-This module provides classes and functions for modeling the transmission system
-of a Formula Student car, including the gearing system, Clutch-less Automatic
-Shifter (CAS) system, and shift strategies optimized for different racing events.
-
-The transmission system consists of:
-1. Gearing components (transmission, final drive, differential)
-2. CAS system for rapid clutch-less gear shifts
-3. Shift strategy management for optimized gear selection
-
-Together, these components provide a complete transmission model that can be
-integrated with the engine and other powertrain components for a Formula Student
-race car simulation.
+Models the gearbox, final drive, differential, clutch-less shifting system (CAS),
+and various shift strategies.
 """
 
 # Import main gearing components
@@ -36,7 +26,9 @@ from .shift_strategy import (
     MaxAccelerationStrategy,
     MaxEfficiencyStrategy,
     EnduranceStrategy,
-    AccelerationEventStrategy,
+    AccelerationEventStrategy, # Keep even if specific event has own file
+    SkidpadStrategy, # Added for clarity
+    AutocrossStrategy, # Added for clarity
     StrategyManager,
     create_formula_student_strategies,
     ShiftPoint,
@@ -51,18 +43,20 @@ __all__ = [
     'FinalDrive',
     'Differential',
     'DrivetrainSystem',
-    
+
     # CAS system components
     'CASSystem',
     'ShiftState',
     'ShiftDirection',
-    
+
     # Shift strategy components
     'ShiftStrategy',
     'MaxAccelerationStrategy',
     'MaxEfficiencyStrategy',
     'EnduranceStrategy',
     'AccelerationEventStrategy',
+    'SkidpadStrategy',
+    'AutocrossStrategy',
     'StrategyManager',
     'create_formula_student_strategies',
     'ShiftPoint',

@@ -1,28 +1,35 @@
-﻿# Transmission Configuration for Formula Student
+﻿# Transmission and Drivetrain Configuration for Formula Student
 
-# Gear ratios (Honda CBR600F4i)
-gear_ratios:
-  - 2.750  # 1st gear
-  - 2.000  # 2nd gear
-  - 1.667  # 3rd gear
-  - 1.444  # 4th gear
-  - 1.304  # 5th gear
-  - 1.208  # 6th gear
+# Transmission (Gearbox) Parameters
+transmission:
+  # Gear ratios for Honda CBR600F4i (adjust if different gearbox used)
+  gear_ratios:
+    - 2.750  # 1st gear
+    - 2.000  # 2nd gear
+    - 1.667  # 3rd gear
+    - 1.444  # 4th gear
+    - 1.304  # 5th gear
+    - 1.208  # 6th gear
+  efficiency: 0.96               # Mechanical efficiency of the gearbox (power loss)
+  shift_time: 0.040              # seconds - Base shift time (can be overridden by CAS system)
 
-# Final drive configuration
+# Final Drive Configuration (Chain Drive)
 final_drive:
-  drive_sprocket_teeth: 14
-  driven_sprocket_teeth: 53
-  chain_pitch: 0.0125            # m (12.5mm standard pitch)
-  efficiency: 0.95
+  drive_sprocket_teeth: 14       # Number of teeth on the front (drive) sprocket
+  driven_sprocket_teeth: 53      # Number of teeth on the rear (driven) sprocket
+  chain_pitch: 0.0127            # m (0.5 inch or 12.7mm standard pitch for 520 chain)
+  efficiency: 0.97               # Efficiency of the chain drive system
 
-# Differential configuration
+# Differential Configuration
 differential:
-  locked: true                   # Solid axle for Formula Student
-  ratio: 1.0                     # Direct drive ratio
-  efficiency: 0.97
+  type: "LOCKED"                 # Options: "OPEN", "LOCKED", "LIMITED_SLIP"
+  ratio: 1.0                     # Differential ratio (typically 1.0 for direct drive from final sprocket)
+  efficiency: 0.98               # Efficiency of the differential/axle
+  # For LIMITED_SLIP type:
+  # torque_bias_ratio: 2.5       # Ratio of torque distribution (higher = more locking)
+  # preload_torque: 10           # Nm - Preload torque for clutch-based LSD
 
-# Vehicle parameters
+# Vehicle parameters related to drivetrain calculations
 vehicle:
-  wheel_radius: 0.2286           # m (9-inch for 13-inch wheels)
-  drivetrain_inertia: 0.25       # kg·m²
+  wheel_radius: 0.2286           # m (9-inch effective radius for typical 18" OD FS tires on 10" rims)
+  drivetrain_inertia: 0.15       # kg·m² - Equivalent rotational inertia of the drivetrain (estimated)

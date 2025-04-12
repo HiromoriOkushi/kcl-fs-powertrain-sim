@@ -1,18 +1,8 @@
 """
-Clutch-less Automatic Shifter (CAS) system for Formula Student powertrain.
+Clutch-less Automatic Shifter (CAS) system model.
 
-This module provides classes and functions for modeling and simulating the
-Clutch-less Automatic Shifter (CAS) system used in the KCL Formula Student car.
-The CAS system enables rapid, clutch-less gear shifts by momentarily cutting ignition
-and controlling the throttle during gear changes, resulting in faster shift times
-and improved vehicle performance.
-
-The system includes:
-- Electronic throttle control for precise engine management during shifts
-- Ignition cut functionality for seamless gear transitions
-- Optimized shift point calculation based on engine performance data
-- Over-rev protection to prevent engine damage
-- Fail-safe neutral engagement for vehicle startup and shutdown
+Simulates the behavior and timing of a CAS system, including ignition cuts,
+throttle blips (optional), and shift actuation for rapid gear changes.
 """
 
 import time
@@ -20,181 +10,179 @@ import numpy as np
 from enum import Enum, auto
 import logging
 from typing import Dict, List, Tuple, Optional, Union, Callable
+import os
+import yaml
+
+# Assuming MotorcycleEngine might be needed for properties like redline
+try:
+    from ..engine.motorcycle_engine import MotorcycleEngine
+except ImportError:
+    class MotorcycleEngine: pass # Placeholder
+    MotorcycleEngine = None
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
 logger = logging.getLogger("CAS_System")
 
 
 class ShiftState(Enum):
-    """Enumeration of possible shift states for the CAS system."""
-    IDLE = auto()           # No shifting activity
-    PREPARING = auto()       # Preparing for gear shift
-    IGNITION_CUT = auto()    # Cutting ignition during shift
-    SHIFTING = auto()        # Actuating the shift mechanism
-    RECOVERING = auto()      # Restoring normal operation post-shift
-    COOLING = auto()         # Cooling period between shifts
-    ERROR = auto()           # Error state
+    """Possible states of the CAS during a shift sequence."""
+    IDLE = auto()           # Ready for shift command
+    PREPARE_UPSHIFT = auto() # Reducing throttle/preparing cut
+    PREPARE_DOWNSHIFT = auto()# Preparing blip/cut
+    IGNITION_CUT = auto()    # Ignition is cut
+    ACTUATING_SHIFT = auto() # Solenoid/actuator is moving forks
+    THROTTLE_BLIP = auto()   # Throttle is blipped (downshift only)
+    RECOVERY = auto()        # Ignition/throttle restored, stabilizing
+    COOLDOWN = auto()        # Minimum interval between shifts
+    ERROR = auto()           # System error
 
 
 class ShiftDirection(Enum):
-    """Enumeration of possible shift directions."""
-    UP = auto()         # Upshift to higher gear
-    DOWN = auto()       # Downshift to lower gear
-    NEUTRAL = auto()    # Shift to neutral
+    """Direction of the requested shift."""
+    UP = 1
+    DOWN = -1
+    NEUTRAL = 0
 
 
 class CASSystem:
     """
-    Clutch-less Automatic Shifter (CAS) system for Formula Student car.
-    
-    This class models the behavior of a CAS system, which enables rapid gear shifts
-    without using a traditional clutch. The system uses electronic throttle control
-    and ignition cut to facilitate smooth gear changes.
+    Models a Clutch-less Automatic Shifter (CAS) system.
+    Simulates timing and control actions for rapid gear changes.
     """
-    
-    def __init__(self, gear_ratios: List[float], engine=None):
+    def __init__(self, gear_ratios: List[float], engine: Optional[MotorcycleEngine] = None,
+                 config_path: Optional[str] = None):
         """
-        Initialize the CAS system with configuration parameters.
-        
+        Initialize the CAS system.
+
         Args:
-            gear_ratios: List of gear ratios (ordered from first to last gear)
-            engine: Optional reference to the engine object for integration
+            gear_ratios: List of transmission gear ratios.
+            engine: Optional MotorcycleEngine instance for RPM limits etc.
+            config_path: Optional path to YAML config file for CAS parameters.
         """
-        # System configuration
         self.gear_ratios = gear_ratios
         self.num_gears = len(gear_ratios)
-        self.engine = engine
-        
-        # Default timing parameters (in milliseconds)
-        self.ignition_cut_time = 20  # ms - duration to cut ignition
-        self.shift_actuation_time = 15  # ms - time to physically shift gear
-        self.throttle_blip_time = 25  # ms - time for throttle blip on downshift
-        self.recovery_time = 10  # ms - time to recover after shift
-        self.minimum_shift_interval = 200  # ms - minimum time between shifts
-        
-        # Default actuation parameters
-        self.upshift_rpm_threshold = 500  # RPM below redline for upshift
-        self.downshift_rpm_threshold = 1500  # RPM above idle for downshift
-        self.throttle_cut_percentage = 80  # % reduction during upshift
-        self.throttle_blip_percentage = 40  # % increase during downshift
-        
-        # Default safety parameters
-        self.max_shifts_per_minute = 30  # Limit to prevent system overheating
-        self.neutral_safety_enabled = True  # Require neutral at startup
-        self.overrev_protection_enabled = True  # Prevent shifting that would overrev
-        
-        # Current state
-        self.current_gear = 0  # 0 = neutral, 1-N = gear number
-        self.last_shift_time = 0  # Timestamp of last shift
-        self.shifts_in_last_minute = 0  # Counter for shift frequency
-        self.state = ShiftState.IDLE
-        self.error_code = 0
-        self.error_message = ""
-        
-        # Shift optimization data
-        self.optimal_shift_points = self._calculate_initial_shift_points()
-        
-        # Initialize performance metrics
-        self.shift_times = []  # List of recorded shift durations
-        self.shift_counts = {i: 0 for i in range(self.num_gears + 1)}  # Count shifts by gear
-        
-        logger.info(f"CAS System initialized with {self.num_gears} gears")
-    
-    def _calculate_initial_shift_points(self) -> Dict[int, Tuple[int, int]]:
+        self.engine = engine # Store reference for potential use (e.g., redline)
+
+        # --- Default Timing Parameters (ms) ---
+        self.ignition_cut_time_ms: float = 25.0
+        self.shift_actuation_time_ms: float = 18.0
+        self.throttle_blip_time_ms: float = 30.0
+        self.recovery_time_ms: float = 15.0
+        self.prepare_time_ms: float = 5.0 # Time before cut/blip starts
+
+        # --- Default Control Parameters ---
+        self.throttle_cut_percent: float = 80.0 # % reduction for upshift
+        self.throttle_blip_increase_percent: float = 40.0 # % increase for downshift blip
+
+        # --- Default Constraints ---
+        self.min_shift_interval_ms: float = 150.0 # Cooldown between shifts
+        self.max_shifts_per_minute: int = 40
+        self.overrev_protection_rpm_margin: float = 300 # RPM below redline allowed on downshift
+
+        # Load from config if provided
+        if config_path and os.path.exists(config_path):
+            self._load_config(config_path)
+        elif engine and hasattr(engine, 'config') and 'cas' in engine.config:
+             # Try loading from engine's main config if 'cas' section exists
+             self._load_config_dict(engine.config.get('cas', {}))
+
+        # State Variables
+        self.current_gear: int = 0 # Start in Neutral
+        self.system_state: ShiftState = ShiftState.IDLE
+        self.last_shift_finish_time_ms: float = -self.min_shift_interval_ms # Allow immediate first shift
+        self.shift_start_time_ms: float = 0.0
+        self.shift_log: List[Dict] = [] # Store details of each shift
+        # Basic shift frequency tracking
+        self._shift_timestamps: List[float] = []
+
+        logger.info(f"CAS System initialized. Ignition Cut: {self.ignition_cut_time_ms}ms, Actuation: {self.shift_actuation_time_ms}ms")
+
+    def _load_config(self, config_path: str):
+        """Load CAS parameters from YAML file."""
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            cas_config = config.get('cas', {}) # Look for 'cas' section
+            self._load_config_dict(cas_config)
+            logger.info(f"CAS config loaded from {config_path}")
+        except Exception as e:
+            logger.error(f"Error loading CAS config from {config_path}: {e}. Using defaults.")
+
+    def _load_config_dict(self, config: Dict):
+         """Load CAS parameters from dictionary."""
+         self.ignition_cut_time_ms = float(config.get('ignition_cut_time', self.ignition_cut_time_ms))
+         self.shift_actuation_time_ms = float(config.get('shift_actuation_time', self.shift_actuation_time_ms))
+         self.throttle_blip_time_ms = float(config.get('throttle_blip_time', self.throttle_blip_time_ms))
+         self.recovery_time_ms = float(config.get('recovery_time', self.recovery_time_ms))
+         self.prepare_time_ms = float(config.get('prepare_time', self.prepare_time_ms))
+         self.min_shift_interval_ms = float(config.get('minimum_shift_interval', self.min_shift_interval_ms))
+         self.throttle_cut_percent = float(config.get('throttle_cut_percentage', self.throttle_cut_percent))
+         self.throttle_blip_increase_percent = float(config.get('throttle_blip_percentage', self.throttle_blip_increase_percent))
+         self.max_shifts_per_minute = int(config.get('max_shifts_per_minute', self.max_shifts_per_minute))
+         self.overrev_protection_rpm_margin = float(config.get('overrev_protection_margin', self.overrev_protection_rpm_margin))
+         # Note: Safety enables like neutral_safety, overrev_protection are usually handled by calling code
+
+
+    def _check_shift_readiness(self, current_time_ms: float) -> bool:
+        """Check if the system is ready for a new shift command."""
+        if self.system_state != ShiftState.IDLE:
+            logger.debug(f"Shift rejected: System busy ({self.system_state.name}).")
+            return False
+
+        time_since_last = current_time_ms - self.last_shift_finish_time_ms
+        if time_since_last < self.min_shift_interval_ms:
+            logger.debug(f"Shift rejected: Cooldown active ({time_since_last:.0f} < {self.min_shift_interval_ms:.0f} ms).")
+            return False
+
+        # Check shift frequency (shifts in the last 60 seconds)
+        sixty_seconds_ago = current_time_ms - 60000.0
+        self._shift_timestamps = [t for t in self._shift_timestamps if t > sixty_seconds_ago]
+        if len(self._shift_timestamps) >= self.max_shifts_per_minute:
+            logger.warning(f"Shift rejected: Exceeded max shifts per minute ({self.max_shifts_per_minute}).")
+            return False
+
+        return True
+
+    def _check_overrev(self, target_gear: int, current_rpm: float) -> bool:
+         """Check if shifting to target_gear would cause overrev."""
+         if self.engine is None or current_rpm <= 0 or self.current_gear <= 0 or target_gear >= self.current_gear:
+             return False # Cannot check or not a downshift
+
+         if target_gear < 1: return False # Shifting to neutral is fine
+
+         # Calculate expected RPM after downshift
+         current_ratio = self.gear_ratios[self.current_gear - 1]
+         target_ratio = self.gear_ratios[target_gear - 1]
+         expected_rpm = current_rpm * (current_ratio / target_ratio)
+
+         redline = self.engine.redline_rpm
+         if expected_rpm > (redline - self.overrev_protection_rpm_margin):
+              logger.warning(f"Overrev Protection: Shift {self.current_gear}->{target_gear} rejected. "
+                             f"Current RPM {current_rpm:.0f}, Expected RPM {expected_rpm:.0f} > Limit {redline - self.overrev_protection_rpm_margin:.0f}")
+              return True # Overrev detected
+         return False # No overrev predicted
+
+    def request_shift(self, direction: ShiftDirection, target_gear_override: Optional[int] = None) -> bool:
         """
-        Calculate initial optimal shift points based on gear ratios.
-        This is a simplified placeholder model that would be tuned with real data.
-        
-        Returns:
-            Dictionary mapping gear numbers to (upshift_rpm, downshift_rpm) tuples
-        """
-        # Default values if no engine data available
-        default_max_rpm = 14000 if self.engine is None else self.engine.redline
-        default_idle_rpm = 1300 if self.engine is None else self.engine.idle_rpm
-        default_peak_torque_rpm = 10500  # Typical for CBR600F4i
-        
-        # Simple model: upshift near redline, downshift to keep in power band
-        shift_points = {}
-        
-        # For each gear, calculate optimal shift points
-        for gear in range(1, self.num_gears + 1):
-            # Upshift point: RPM at which to shift up from this gear
-            if gear < self.num_gears:
-                upshift_rpm = default_max_rpm - self.upshift_rpm_threshold
-            else:
-                upshift_rpm = default_max_rpm  # No upshift from highest gear
-            
-            # Downshift point: RPM at which to shift down to this gear from gear+1
-            if gear > 1:
-                # Calculate RPM after downshift to keep engine in power band
-                next_ratio = self.gear_ratios[gear-1]
-                current_ratio = self.gear_ratios[gear-2]
-                target_rpm = default_peak_torque_rpm
-                downshift_rpm = target_rpm * (current_ratio / next_ratio)
-            else:
-                downshift_rpm = default_idle_rpm + 1000  # Arbitrary for first gear
-            
-            shift_points[gear] = (upshift_rpm, downshift_rpm)
-        
-        return shift_points
-    
-    def update_shift_points(self, engine_torque_curve=None, vehicle_speed=None):
-        """
-        Update shift points based on current engine performance data and vehicle conditions.
-        This would use more sophisticated algorithms in a real implementation.
-        
+        Request a gear shift. Checks readiness and constraints.
+
         Args:
-            engine_torque_curve: Optional torque curve data for optimizing shift points
-            vehicle_speed: Optional current vehicle speed for context
-        """
-        # This would implement a more complex algorithm using engine performance data
-        # to dynamically optimize shift points based on conditions
-        # Placeholder for demonstration purposes
-        
-        if engine_torque_curve is not None:
-            logger.info("Updating shift points based on engine torque curve")
-            # Example: Find peak torque RPM and set shift points to stay near it
-            # Implementation would depend on the format of the torque curve data
-        
-        if vehicle_speed is not None:
-            logger.info(f"Contextualizing shift points for vehicle speed: {vehicle_speed} km/h")
-            # Example: Adjust shift points based on vehicle speed (e.g., different
-            # strategies for acceleration vs. cruising)
-    
-    def request_shift(self, direction: ShiftDirection, target_gear: Optional[int] = None) -> bool:
-        """
-        Request a gear shift in the specified direction.
-        
-        Args:
-            direction: Shift direction (UP, DOWN, or NEUTRAL)
-            target_gear: Optional specific gear to shift to
-            
+            direction: UP, DOWN, or NEUTRAL.
+            target_gear_override: Optional specific gear number to shift to.
+
         Returns:
-            True if shift request was accepted, False otherwise
+            True if the shift process was initiated, False otherwise.
         """
-        current_time = time.time() * 1000  # Current time in ms
-        
-        # Check if system is ready for another shift
-        if self.state != ShiftState.IDLE:
-            logger.warning(f"Shift rejected: System busy in state {self.state}")
+        current_time_ms = time.monotonic() * 1000.0
+        if not self._check_shift_readiness(current_time_ms):
             return False
-        
-        # Check minimum interval between shifts
-        if current_time - self.last_shift_time < self.minimum_shift_interval:
-            logger.warning("Shift rejected: Too soon after previous shift")
-            return False
-        
-        # Check shift frequency limit
-        if self.shifts_in_last_minute >= self.max_shifts_per_minute:
-            logger.warning("Shift rejected: Maximum shift frequency exceeded")
-            return False
-        
-        # Determine target gear based on direction if not specified
+
+        # Determine target gear
+        target_gear = target_gear_override
         if target_gear is None:
             if direction == ShiftDirection.UP and self.current_gear < self.num_gears:
                 target_gear = self.current_gear + 1
@@ -202,318 +190,177 @@ class CASSystem:
                 target_gear = self.current_gear - 1
             elif direction == ShiftDirection.NEUTRAL:
                 target_gear = 0
-        
+            else:
+                logger.info(f"Shift request ignored: Cannot shift {direction.name} from gear {self.current_gear}.")
+                return False # Invalid shift direction from current gear
+
         # Validate target gear
-        if target_gear is None or target_gear < 0 or target_gear > self.num_gears:
-            logger.warning(f"Shift rejected: Invalid target gear {target_gear}")
+        if target_gear < 0 or target_gear > self.num_gears:
+            logger.warning(f"Shift rejected: Invalid target gear {target_gear}.")
             return False
-        
-        # Check for unnecessary shift
         if target_gear == self.current_gear:
-            logger.info(f"Shift ignored: Already in gear {target_gear}")
-            return True  # Not an error, just no action needed
-        
-        # Check for overrev protection
-        if self.overrev_protection_enabled and self.engine is not None:
-            if direction == ShiftDirection.DOWN:
-                # Calculate engine RPM after downshift
-                speed_factor = self.gear_ratios[self.current_gear-1] / self.gear_ratios[target_gear-1]
-                new_rpm = self.engine.current_rpm * speed_factor
-                
-                if new_rpm > self.engine.redline:
-                    logger.warning(f"Shift rejected: Downshift would cause overrev to {new_rpm} RPM")
-                    return False
-        
-        logger.info(f"Shift request accepted: {direction.name} to gear {target_gear}")
-        # Execute the shift
-        return self._execute_shift(direction, target_gear)
-    
-    def _execute_shift(self, direction: ShiftDirection, target_gear: int) -> bool:
-        """
-        Execute the actual gear shift operation.
-        
-        Args:
-            direction: Shift direction (UP, DOWN, or NEUTRAL)
-            target_gear: Target gear to shift to
-            
-        Returns:
-            True if shift was successful, False otherwise
-        """
-        shift_start_time = time.time() * 1000  # Start time in ms
-        
+             logger.debug(f"Shift ignored: Already in gear {target_gear}.")
+             return True # No error, just no action needed
+
+        # Check overrev on downshifts (requires engine RPM)
+        if direction == ShiftDirection.DOWN and self.engine:
+             if self._check_overrev(target_gear, self.engine.current_rpm):
+                 return False # Overrev prevented shift
+
+        # --- If all checks pass, initiate shift ---
+        self.shift_start_time_ms = current_time_ms
+        logger.info(f"Initiating shift: {self.current_gear} -> {target_gear}")
+
+        # Simulate the sequence (in reality, this would involve hardware commands)
+        # The actual gear change happens at the end of the sequence
+        if self._simulate_shift_sequence(direction):
+             self.current_gear = target_gear # Update gear state *after* successful sequence
+             self.last_shift_finish_time_ms = time.monotonic() * 1000.0
+             self._shift_timestamps.append(self.last_shift_finish_time_ms)
+             self._log_shift(self.current_gear, target_gear, self.last_shift_finish_time_ms - self.shift_start_time_ms)
+             return True
+        else:
+             # Shift failed during simulation
+             return False
+
+    def _simulate_shift_sequence(self, direction: ShiftDirection) -> bool:
+        """Internal helper to simulate the timed sequence of a shift."""
         try:
-            # 1. Prepare for shift
-            self.state = ShiftState.PREPARING
-            
-            # 2. Adjust throttle based on shift direction
-            if direction == ShiftDirection.UP:
-                self._reduce_throttle()
-            elif direction == ShiftDirection.DOWN:
-                # For downshifts, we'll blip the throttle later during the shift sequence
-                pass
-            
-            # 3. Cut ignition
-            self.state = ShiftState.IGNITION_CUT
-            self._cut_ignition()
-            time.sleep(self.ignition_cut_time / 1000)  # Convert ms to seconds
-            
-            # 4. Actuate the shift
-            self.state = ShiftState.SHIFTING
-            
-            # For downshifts, blip the throttle to match revs
+            # 1. Preparation Phase
+            self.system_state = ShiftState.PREPARE_UPSHIFT if direction == ShiftDirection.UP else ShiftState.PREPARE_DOWNSHIFT
+            # Simulate throttle adjustment (reduction for up, prep for blip for down)
+            # logger.debug(f" {self.system_state.name}...")
+            time.sleep(self.prepare_time_ms / 1000.0)
+
+            # 2. Ignition Cut
+            self.system_state = ShiftState.IGNITION_CUT
+            # logger.debug(" Ignition Cut...")
+            # Simulate cutting ignition - engine torque goes to ~0
+            time.sleep(self.ignition_cut_time_ms / 1000.0)
+
+            # 3. Actuation & Throttle Blip (if downshift)
+            self.system_state = ShiftState.ACTUATING_SHIFT
+            # logger.debug(" Actuating Shift...")
             if direction == ShiftDirection.DOWN:
-                self._blip_throttle()
-                time.sleep(self.throttle_blip_time / 1000)
-            
-            # Simulating the physical gear change
-            time.sleep(self.shift_actuation_time / 1000)
-            
-            # 5. Recover normal operation
-            self.state = ShiftState.RECOVERING
-            self._restore_ignition()
-            self._restore_throttle()
-            time.sleep(self.recovery_time / 1000)
-            
-            # 6. Update state
-            self.current_gear = target_gear
-            self.state = ShiftState.IDLE
-            
-            # 7. Record metrics
-            shift_end_time = time.time() * 1000
-            shift_duration = shift_end_time - shift_start_time
-            self.shift_times.append(shift_duration)
-            self.shift_counts[target_gear] += 1
-            self.shifts_in_last_minute += 1
-            self.last_shift_time = shift_end_time
-            
-            logger.info(f"Shift completed: now in gear {self.current_gear}, took {shift_duration:.1f}ms")
+                 self.system_state = ShiftState.THROTTLE_BLIP
+                 # logger.debug(" Throttle Blip...")
+                 # Simulate throttle blip
+                 time.sleep(self.throttle_blip_time_ms / 1000.0)
+                 self.system_state = ShiftState.ACTUATING_SHIFT # Back to actuating after blip finishes
+
+            # Simulate mechanical actuation
+            time.sleep(self.shift_actuation_time_ms / 1000.0)
+
+            # 4. Recovery Phase
+            self.system_state = ShiftState.RECOVERY
+            # logger.debug(" Recovery...")
+            # Simulate restoring ignition and throttle
+            time.sleep(self.recovery_time_ms / 1000.0)
+
+            # 5. Back to Idle
+            self.system_state = ShiftState.IDLE
+            # logger.debug(" Shift sequence complete.")
             return True
-            
+
         except Exception as e:
-            self.state = ShiftState.ERROR
-            self.error_code = 1
-            self.error_message = f"Shift error: {str(e)}"
-            logger.error(self.error_message)
-            
-            # Try to restore normal operation
-            self._restore_ignition()
-            self._restore_throttle()
-            return False
-    
-    def _reduce_throttle(self):
-        """Reduce throttle for upshift."""
-        if self.engine is not None:
-            current_throttle = self.engine.throttle_position
-            reduced_throttle = current_throttle * (1 - self.throttle_cut_percentage / 100)
-            logger.debug(f"Reducing throttle from {current_throttle:.2f} to {reduced_throttle:.2f}")
-            # In a real implementation, this would command the engine throttle
-        else:
-            logger.debug("Simulating throttle reduction")
-    
-    def _blip_throttle(self):
-        """Blip throttle for downshift."""
-        if self.engine is not None:
-            current_throttle = self.engine.throttle_position
-            blipped_throttle = min(1.0, current_throttle + self.throttle_blip_percentage / 100)
-            logger.debug(f"Blipping throttle from {current_throttle:.2f} to {blipped_throttle:.2f}")
-            # In a real implementation, this would command the engine throttle
-        else:
-            logger.debug("Simulating throttle blip")
-    
-    def _restore_throttle(self):
-        """Restore normal throttle operation."""
-        logger.debug("Restoring throttle control")
-        # In a real implementation, this would restore normal throttle control
-    
-    def _cut_ignition(self):
-        """Cut ignition for shift."""
-        logger.debug("Cutting ignition")
-        # In a real implementation, this would send a signal to the engine control
-        # to temporarily interrupt ignition
-    
-    def _restore_ignition(self):
-        """Restore ignition after shift."""
-        logger.debug("Restoring ignition")
-        # In a real implementation, this would send a signal to restore ignition
-    
-    def engage_neutral(self) -> bool:
-        """
-        Engage neutral gear (safety function for startup/shutdown).
-        
-        Returns:
-            True if neutral was successfully engaged, False otherwise
-        """
-        return self.request_shift(ShiftDirection.NEUTRAL)
-    
-    def get_optimal_rpm_for_shift(self, gear: int, direction: ShiftDirection) -> Optional[int]:
-        """
-        Get the optimal RPM for shifting from the current gear.
-        
-        Args:
-            gear: Current gear
-            direction: Shift direction
-            
-        Returns:
-            Optimal RPM for shift or None if not applicable
-        """
-        if gear < 1 or gear > self.num_gears:
-            return None
-        
-        if direction == ShiftDirection.UP and gear < self.num_gears:
-            return self.optimal_shift_points[gear][0]
-        elif direction == ShiftDirection.DOWN and gear > 1:
-            return self.optimal_shift_points[gear-1][1]
-        
-        return None
-    
-    def should_shift(self, current_rpm: float, current_throttle: float) -> Optional[ShiftDirection]:
-        """
-        Determine if a shift should be made based on current conditions.
-        
-        Args:
-            current_rpm: Current engine RPM
-            current_throttle: Current throttle position (0-1)
-            
-        Returns:
-            Recommended shift direction or None if no shift recommended
-        """
-        # Don't shift if in neutral or if throttle is very low (likely preparing to stop)
-        if self.current_gear == 0 or current_throttle < 0.1:
-            return None
-        
-        # Check for upshift condition
-        if (self.current_gear < self.num_gears and 
-            current_rpm >= self.optimal_shift_points[self.current_gear][0] and
-            current_throttle > 0.5):  # Only upshift under load
-            return ShiftDirection.UP
-        
-        # Check for downshift condition
-        if (self.current_gear > 1 and 
-            current_rpm <= self.optimal_shift_points[self.current_gear-1][1] and
-            current_throttle > 0.3):  # Only downshift with some throttle applied
-            return ShiftDirection.DOWN
-        
-        return None
-    
-    def get_system_status(self) -> Dict:
-        """
-        Get the current status of the CAS system.
-        
-        Returns:
-            Dictionary with current CAS system status
-        """
-        avg_shift_time = sum(self.shift_times) / len(self.shift_times) if self.shift_times else 0
-        
+             logger.error(f"Error during shift sequence simulation: {e}")
+             self.system_state = ShiftState.ERROR
+             return False
+
+    def _log_shift(self, from_gear: int, to_gear: int, duration_ms: float):
+         """Log details of a completed shift."""
+         record = {
+             'timestamp': time.monotonic(),
+             'from_gear': from_gear,
+             'to_gear': to_gear,
+             'duration_ms': duration_ms,
+             'engine_rpm': self.engine.current_rpm if self.engine else None # Log RPM at completion
+         }
+         self.shift_log.append(record)
+
+    def get_total_shift_time_ms(self, direction: ShiftDirection) -> float:
+        """Calculate the total theoretical time for a shift."""
+        total_time = self.prepare_time_ms + \
+                     self.ignition_cut_time_ms + \
+                     self.shift_actuation_time_ms + \
+                     self.recovery_time_ms
+        if direction == ShiftDirection.DOWN:
+            total_time += self.throttle_blip_time_ms
+        return total_time
+
+    def get_status(self) -> Dict:
+        """Get current status and basic stats."""
+        current_time_ms = time.monotonic() * 1000.0
+        time_since_last = current_time_ms - self.last_shift_finish_time_ms
+        ready_to_shift = time_since_last >= self.min_shift_interval_ms and self.system_state == ShiftState.IDLE
+
+        # Recalculate shifts in last minute
+        sixty_seconds_ago = current_time_ms - 60000.0
+        self._shift_timestamps = [t for t in self._shift_timestamps if t > sixty_seconds_ago]
+        shifts_last_minute = len(self._shift_timestamps)
+
+        avg_shift_time = np.mean([s['duration_ms'] for s in self.shift_log]) if self.shift_log else 0
+
         return {
             'current_gear': self.current_gear,
-            'state': self.state.name,
-            'shifts_in_last_minute': self.shifts_in_last_minute,
-            'last_shift_time': self.last_shift_time,
-            'average_shift_time_ms': avg_shift_time,
-            'shift_counts': self.shift_counts,
-            'error_code': self.error_code,
-            'error_message': self.error_message
+            'system_state': self.system_state.name,
+            'ready_to_shift': ready_to_shift,
+            'time_since_last_shift_ms': time_since_last if self.last_shift_finish_time_ms > 0 else None,
+            'shifts_last_minute': shifts_last_minute,
+            'avg_shift_time_ms': avg_shift_time,
+            'total_shifts_logged': len(self.shift_log)
         }
-    
-    def simulate_shift(self, direction: ShiftDirection, engine_rpm: float) -> Dict:
-        """
-        Simulate a shift for testing without actual hardware.
-        
-        Args:
-            direction: Shift direction
-            engine_rpm: Current engine RPM
-            
-        Returns:
-            Dictionary with simulation results
-        """
-        target_gear = None
-        if direction == ShiftDirection.UP and self.current_gear < self.num_gears:
-            target_gear = self.current_gear + 1
-        elif direction == ShiftDirection.DOWN and self.current_gear > 1:
-            target_gear = self.current_gear - 1
-        elif direction == ShiftDirection.NEUTRAL:
-            target_gear = 0
-        
-        # Calculate expected RPM after shift
-        expected_rpm = None
-        if target_gear != 0 and self.current_gear != 0:  # Not involving neutral
-            if direction == ShiftDirection.UP:
-                ratio_change = self.gear_ratios[self.current_gear-1] / self.gear_ratios[target_gear-1]
-                expected_rpm = engine_rpm * ratio_change
-            elif direction == ShiftDirection.DOWN:
-                ratio_change = self.gear_ratios[self.current_gear-1] / self.gear_ratios[target_gear-1]
-                expected_rpm = engine_rpm * ratio_change
-        
-        # Simulate the shift
-        shift_success = self.request_shift(direction, target_gear)
-        
-        return {
-            'requested_direction': direction.name,
-            'initial_gear': self.current_gear if not shift_success else target_gear,
-            'target_gear': target_gear,
-            'initial_rpm': engine_rpm,
-            'expected_rpm': expected_rpm,
-            'shift_success': shift_success,
-            'shift_time_ms': self.shift_times[-1] if shift_success and self.shift_times else None
-        }
-    
-    def reset_shift_statistics(self):
-        """Reset shift statistics and counters."""
-        self.shift_times = []
-        self.shift_counts = {i: 0 for i in range(self.num_gears + 1)}
-        self.shifts_in_last_minute = 0
-        logger.info("Shift statistics reset")
-    
-    def update(self, dt: float):
-        """
-        Update the system state based on elapsed time.
-        
-        Args:
-            dt: Time elapsed since last update in seconds
-        """
-        # Update shift frequency counter
-        if self.shifts_in_last_minute > 0:
-            # Simple decay of shift counter over time (60 seconds)
-            decay_rate = dt / 60.0
-            self.shifts_in_last_minute = max(0, self.shifts_in_last_minute - decay_rate * self.max_shifts_per_minute)
-        
-        # Add cooling period if needed
-        if self.state == ShiftState.COOLING:
-            if time.time() * 1000 - self.last_shift_time > self.minimum_shift_interval:
-                self.state = ShiftState.IDLE
-                logger.debug("Cooling period complete, system ready")
 
+    def reset_statistics(self):
+         """Reset shift logs and counters."""
+         self.shift_log = []
+         self._shift_timestamps = []
+         logger.info("CAS statistics reset.")
 
-# Example usage
+# Example Usage
 if __name__ == "__main__":
-    # Define gear ratios for Honda CBR600F4i (example values)
-    gear_ratios = [2.750, 2.000, 1.667, 1.444, 1.304, 1.208]
-    
-    # Create CAS system
-    cas = CASSystem(gear_ratios)
-    
-    # Simulate a series of shifts
-    print("Simulating upshifts through all gears...")
-    
-    # Start in first gear
-    cas.current_gear = 1
-    
-    # Simulate sequential upshifts
-    for i in range(1, len(gear_ratios)):
-        # Simulate engine at optimal shift point
-        engine_rpm = cas.get_optimal_rpm_for_shift(i, ShiftDirection.UP)
-        
-        print(f"\nAt {engine_rpm} RPM in gear {i}:")
-        result = cas.simulate_shift(ShiftDirection.UP, engine_rpm)
-        
-        print(f"  Shifted from gear {i} to {result['target_gear']}")
-        print(f"  Engine RPM changed from {result['initial_rpm']} to approximately {result['expected_rpm']:.0f}")
-        print(f"  Shift took {result['shift_time_ms']:.1f}ms")
-        
-        # Add a small delay between shifts
-        time.sleep(0.3)
-    
-    print("\nSystem status after all shifts:")
-    status = cas.get_system_status()
-    for key, value in status.items():
-        print(f"  {key}: {value}")
+    gears = [2.9, 2.1, 1.6, 1.3, 1.1, 0.95] # Example ratios
+    # Mock engine for RPM limits
+    mock_engine = type('MockEngine', (object,), {'redline_rpm': 13000, 'current_rpm': 8000})()
+    cas = CASSystem(gears, mock_engine)
+
+    print("Initial Status:", cas.get_status())
+
+    # Simulate requesting an upshift
+    print("\nRequesting UPSHIFT from Neutral...")
+    success = cas.request_shift(ShiftDirection.UP, target_gear_override=1) # Specify target for N->1
+    print(f"Shift success: {success}")
+    print("Status after shift:", cas.get_status())
+
+    # Simulate another upshift too quickly
+    print("\nRequesting UPSHIFT immediately...")
+    mock_engine.current_rpm = 11000 # Set RPM for readiness check
+    success = cas.request_shift(ShiftDirection.UP)
+    print(f"Shift success: {success}") # Expected: False (too soon)
+
+    # Wait and try again
+    print("\nWaiting for cooldown...")
+    time.sleep(cas.min_shift_interval_ms / 1000.0 + 0.01)
+    print("Requesting UPSHIFT from 1 to 2...")
+    success = cas.request_shift(ShiftDirection.UP)
+    print(f"Shift success: {success}")
+    print("Status after shift:", cas.get_status())
+
+    # Simulate downshift causing overrev
+    print("\nRequesting DOWNSHIFT from 2 to 1 (likely overrev)...")
+    mock_engine.current_rpm = 12500 # High RPM in 2nd
+    success = cas.request_shift(ShiftDirection.DOWN)
+    print(f"Shift success: {success}") # Expected: False (overrev)
+    print("Status after failed shift:", cas.get_status())
+
+    # Simulate downshift from higher gear
+    print("\nRequesting DOWNSHIFT from 3 to 2...")
+    cas.current_gear = 3
+    mock_engine.current_rpm = 6000
+    success = cas.request_shift(ShiftDirection.DOWN)
+    print(f"Shift success: {success}")
+    print("Status after shift:", cas.get_status())
+
+    print("\nShift Log:")
+    for log in cas.shift_log:
+        print(f" - {log['timestamp']:.1f}: {log['from_gear']}->{log['to_gear']} ({log['duration_ms']:.1f}ms)")

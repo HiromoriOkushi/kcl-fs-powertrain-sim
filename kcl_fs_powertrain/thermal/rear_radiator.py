@@ -18,976 +18,645 @@ import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional, Union, Callable
 import logging
 from enum import Enum, auto
+import yaml
 
-# Import base cooling system module
-from .cooling_system import (
-    Radiator, RadiatorType, CoolingFan, FanType, Thermostat, CoolingSystem
-)
+# Import base components (handle potential import errors if run standalone)
+try:
+    from .cooling_system import Radiator, RadiatorType, CoolingFan, FanType
+except ImportError:
+    # Placeholders if run directly
+    class Radiator: pass
+    class CoolingFan: pass
+    class RadiatorType(Enum): SINGLE_CORE_ALUMINUM=auto(); DOUBLE_CORE_ALUMINUM=auto()
+    class FanType(Enum): VARIABLE_SPEED=auto(); DUAL_FAN=auto(); SINGLE_SPEED=auto()
+    logger.warning("Could not import base cooling system components. Using placeholders.")
+
+# Constants (import or define fallback)
+try:
+    from ..utils.constants import AIR_DENSITY_SEA_LEVEL, AIR_SPECIFIC_HEAT_CP, BAR_TO_PA, LITERS_TO_M3
+    from ..utils.plotting import save_plot, _apply_common_ax_settings, COLOR_SCHEMES # Import plotting utils
+except ImportError:
+    AIR_DENSITY_SEA_LEVEL = 1.225
+    AIR_SPECIFIC_HEAT_CP = 1005.0
+    BAR_TO_PA = 100000.0
+    LITERS_TO_M3 = 0.001
+    # Fallback plotting utils
+    def save_plot(fig, path, **kwargs): pass
+    def _apply_common_ax_settings(ax, **kwargs): pass
+    COLOR_SCHEMES = {'default': plt.cm.tab10.colors}
+    logger.warning("Could not import utils.constants or utils.plotting. Using fallback values/functions.")
+
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
-logger = logging.getLogger("Rear_Radiator")
+logger = logging.getLogger("RearRadiator")
 
 
 class MountingPosition(Enum):
-    """Enumeration of possible rear radiator mounting positions."""
-    ABOVE_DIFFUSER = auto()      # Mounted above the diffuser
-    BEHIND_DRIVER = auto()       # Mounted directly behind the driver
-    SIDE_POD_REAR = auto()       # Mounted in rear of side pods
-    ANGLED_UPWARD = auto()       # Angled upward for better natural convection
-    CUSTOM = auto()              # Custom mounting position
-
+    """Possible rear radiator mounting positions."""
+    ABOVE_DIFFUSER = auto()
+    BEHIND_DRIVER = auto()
+    SIDE_POD_REAR_EXIT = auto() # Integrated into sidepod rear
+    ANGLED_UPWARD = auto()      # For natural convection
+    CUSTOM = auto()
 
 class DuctType(Enum):
-    """Enumeration of different duct types for rear radiators."""
-    NACA_INLET = auto()          # NACA duct inlet
-    SIDE_SCOOP = auto()          # Side scoop inlet
-    TOP_INLET = auto()           # Top inlet duct
-    DIFFUSER_INTEGRATED = auto() # Integrated with diffuser
-    CUSTOM = auto()              # Custom duct configuration
-
+    """Types of ducting feeding a rear radiator."""
+    NACA_INLET = auto()
+    SIDE_SCOOP = auto()
+    TOP_INLET = auto()
+    DIFFUSER_INTEGRATED = auto() # Air drawn from under diffuser
+    CUSTOM = auto()
 
 class RearRadiator:
-    """
-    Specialized radiator class for rear-mounted cooling solutions in Formula Student.
-    
-    This class extends the base Radiator class with specific properties and behaviors
-    relevant to rear-mounted radiator configurations.
-    """
-    
-    def __init__(self, 
-                 radiator: Radiator,
+    """Extends Radiator model for rear mounting specifics."""
+    def __init__(self,
+                 radiator: Radiator, # Base radiator object
                  mounting_position: MountingPosition = MountingPosition.ABOVE_DIFFUSER,
-                 angle_degrees: float = 15.0,        # Installation angle in degrees
-                 distance_from_diffuser: float = 0.1, # Meters
+                 angle_degrees: float = 20.0, # Angle relative to vertical
+                 config_path: Optional[str] = None,
                  custom_params: Optional[Dict] = None):
         """
-        Initialize a rear-mounted radiator configuration.
-        
+        Initialize a rear-mounted radiator.
+
         Args:
-            radiator: Base Radiator object
-            mounting_position: Mounting position enum
-            angle_degrees: Installation angle in degrees from vertical
-            distance_from_diffuser: Distance from diffuser in meters
-            custom_params: Optional dictionary with custom parameters
+            radiator: The base Radiator object.
+            mounting_position: Where the radiator is mounted.
+            angle_degrees: Installation angle relative to vertical (0=vertical).
+            config_path: Optional path to YAML config file for rear-specific params.
+            custom_params: Optional dict for CUSTOM type or overrides.
         """
+        if not isinstance(radiator, Radiator):
+             raise TypeError("Radiator must be an instance of the Radiator class.")
         self.base_radiator = radiator
         self.mounting_position = mounting_position
         self.angle_degrees = angle_degrees
-        self.distance_from_diffuser = distance_from_diffuser
-        
-        # Calculate derived properties
         self.angle_radians = np.radians(angle_degrees)
-        self.effective_area = radiator.core_area * np.cos(self.angle_radians)
-        
-        # Default airflow properties based on mounting position
-        if mounting_position == MountingPosition.ABOVE_DIFFUSER:
-            self.natural_airflow_factor = 0.6  # Good airflow from diffuser
-            self.stagnation_factor = 0.3       # Moderate stagnation risk
-        elif mounting_position == MountingPosition.BEHIND_DRIVER:
-            self.natural_airflow_factor = 0.4  # Reduced airflow behind driver
-            self.stagnation_factor = 0.5       # Higher stagnation risk
-        elif mounting_position == MountingPosition.SIDE_POD_REAR:
-            self.natural_airflow_factor = 0.7  # Good side airflow
-            self.stagnation_factor = 0.2       # Lower stagnation risk
-        elif mounting_position == MountingPosition.ANGLED_UPWARD:
-            self.natural_airflow_factor = 0.5  # Moderate airflow
-            self.stagnation_factor = 0.2       # Lower stagnation from convection
-        elif mounting_position == MountingPosition.CUSTOM:
-            # Use custom parameters if provided
-            if custom_params:
-                self.natural_airflow_factor = custom_params.get('natural_airflow_factor', 0.5)
-                self.stagnation_factor = custom_params.get('stagnation_factor', 0.3)
-            else:
-                self.natural_airflow_factor = 0.5
-                self.stagnation_factor = 0.3
-        
-        # Low-speed airflow characteristics
-        self.convection_factor = 0.2 + (angle_degrees / 90.0) * 0.3  # Natural convection factor
-        
-        # High-speed performance characteristics
-        self.drag_impact = self._calculate_drag_impact()
-        
-        logger.info(f"Rear radiator initialized: {mounting_position.name} position, {angle_degrees}° angle")
-    
-    def _calculate_drag_impact(self) -> float:
-        """
-        Calculate the drag impact of the rear radiator installation.
-        
-        Returns:
-            Drag coefficient contribution
-        """
-        # Base drag contribution
-        base_drag = 0.01
-        
-        # Modify based on position and angle
+
+        # Rear-specific airflow factors (defaults, can be overridden)
+        self.base_airflow_efficiency = 0.7 # Base efficiency of capturing free-stream air
+        self.low_speed_airflow_factor = 0.2 # Factor for natural convection/induced flow at low speed
+        self.diffuser_interaction_factor = 1.0 # Multiplier if interacting with diffuser (can be >1 or <1)
+        self.wake_effect_factor = 1.0 # Reduction factor due to driver/bodywork wake
+        self.drag_coefficient_increase = 0.03 # Base increase in Cd
+
+        # Load config or apply custom params
+        rear_config = {}
+        if config_path and os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                rear_config = config.get('rear_radiator', {})
+                # Safely get enum from name
+                mount_pos_name = rear_config.get('mounting_position', self.mounting_position.name).upper()
+                self.mounting_position = MountingPosition[mount_pos_name] if mount_pos_name in MountingPosition.__members__ else self.mounting_position
+                self.angle_degrees = float(rear_config.get('angle_degrees', self.angle_degrees))
+                self.angle_radians = np.radians(self.angle_degrees)
+                logger.info(f"Rear radiator config loaded from {config_path}")
+            except Exception as e:
+                logger.error(f"Error loading rear radiator config from {config_path}: {e}. Using defaults.")
+        if custom_params: rear_config.update(custom_params) # Custom overrides config file
+
+        self._apply_config_and_defaults(rear_config)
+
+        # Derived: Effective area presented to airflow (approx)
+        self.effective_frontal_area = self.base_radiator.core_area * np.cos(self.angle_radians)
+
+        logger.info(f"Rear Radiator initialized: Position={self.mounting_position.name}, Angle={self.angle_degrees:.1f}deg")
+
+    def _apply_config_and_defaults(self, params: Dict):
+        """Apply configuration and set defaults based on mounting position."""
+        self.base_airflow_efficiency = float(params.get('base_airflow_efficiency', 0.7))
+        self.low_speed_airflow_factor = float(params.get('low_speed_airflow_factor', 0.2))
+        self.diffuser_interaction_factor = float(params.get('diffuser_interaction_factor', 1.0))
+        self.wake_effect_factor = float(params.get('wake_effect_factor', 1.0))
+        self.drag_coefficient_increase = float(params.get('drag_coefficient_increase', 0.03))
+
+        # Adjust factors based on mounting position (illustrative)
         if self.mounting_position == MountingPosition.ABOVE_DIFFUSER:
-            position_factor = 1.2  # Higher drag impact above diffuser
+             self.diffuser_interaction_factor = params.get('diffuser_interaction_factor', 1.1)
+             self.wake_effect_factor = params.get('wake_effect_factor', 0.9)
+             self.drag_coefficient_increase = params.get('drag_coefficient_increase', 0.04)
         elif self.mounting_position == MountingPosition.BEHIND_DRIVER:
-            position_factor = 0.8  # Lower drag impact (already in wake)
-        elif self.mounting_position == MountingPosition.SIDE_POD_REAR:
-            position_factor = 1.1  # Moderate drag impact
+             self.wake_effect_factor = params.get('wake_effect_factor', 0.7)
+             self.drag_coefficient_increase = params.get('drag_coefficient_increase', 0.02)
         elif self.mounting_position == MountingPosition.ANGLED_UPWARD:
-            position_factor = 1.3  # Higher drag from angled surface
-        else:
-            position_factor = 1.0
-        
-        # Angle effect - more perpendicular to airflow = more drag
-        angle_factor = 1.0 + (90.0 - self.angle_degrees) / 90.0
-        
-        # Size effect
-        size_factor = self.base_radiator.core_area / 0.15  # Normalized to 0.15m²
-        
-        return base_drag * position_factor * angle_factor * size_factor
-    
-    def calculate_effective_airflow(self, vehicle_speed: float, fan_airflow: float) -> float:
-        """
-        Calculate effective airflow through the rear-mounted radiator.
-        
-        Args:
-            vehicle_speed: Vehicle speed in m/s
-            fan_airflow: Additional airflow from fans in m³/s
-            
-        Returns:
-            Effective airflow through radiator in m³/s
-        """
-        # Base ram air from vehicle speed
-        if vehicle_speed < 5.0:
-            # At very low speeds, ram air is minimal, rely more on natural convection
-            ram_air = vehicle_speed * self.base_radiator.core_area * self.natural_airflow_factor * 0.5
-            # Add natural convection effect which increases with radiator angle
-            convection_air = self.convection_factor * 0.05  # Base convection flow
-        else:
-            # At higher speeds, ram air is more effective
-            speed_factor = min(1.0, vehicle_speed / 20.0)  # Normalize to 20 m/s
-            ram_air = vehicle_speed * self.base_radiator.core_area * self.natural_airflow_factor * speed_factor
-            convection_air = 0.0  # Negligible compared to ram air
-        
-        # Add fan contribution
-        # Fan effectiveness depends on the installation
-        if self.mounting_position == MountingPosition.BEHIND_DRIVER:
-            fan_factor = 0.8  # Slightly reduced effectiveness
-        elif self.mounting_position == MountingPosition.ANGLED_UPWARD:
-            fan_factor = 0.9  # Good effectiveness due to angle
-        else:
-            fan_factor = 0.85  # Standard effectiveness
-            
-        effective_fan_airflow = fan_airflow * fan_factor
-        
-        # Total airflow
-        total_airflow = ram_air + convection_air + effective_fan_airflow
-        
-        # Account for stagnation at low speeds
-        if vehicle_speed < 8.0:
-            # Stagnation factor increases as speed decreases
-            stagnation_effect = self.stagnation_factor * (1.0 - vehicle_speed / 8.0)
-            total_airflow *= (1.0 - stagnation_effect)
-        
-        return total_airflow
-    
-    def calculate_heat_rejection(self, coolant_temp: float, ambient_temp: float, 
-                               coolant_flow_rate: float, vehicle_speed: float, 
-                               fan_airflow: float) -> float:
-        """
-        Calculate heat rejected by the rear-mounted radiator.
-        
-        Args:
-            coolant_temp: Coolant temperature in °C
-            ambient_temp: Ambient air temperature in °C
-            coolant_flow_rate: Coolant flow rate in L/min
-            vehicle_speed: Vehicle speed in m/s
-            fan_airflow: Airflow from cooling fans in m³/s
-            
-        Returns:
-            Heat rejection rate in watts (W)
-        """
-        # Calculate effective airflow
-        effective_airflow = self.calculate_effective_airflow(vehicle_speed, fan_airflow)
-        
-        # Adjust for heat soak in stationary conditions
-        heat_soak_factor = 1.0
-        if vehicle_speed < 3.0:
-            # Heat soak reduces effectiveness at low speeds
-            # More significant for certain mounting positions
-            if self.mounting_position == MountingPosition.BEHIND_DRIVER:
-                heat_soak_factor = 0.8 - 0.1 * (3.0 - vehicle_speed) / 3.0
-            elif self.mounting_position == MountingPosition.ABOVE_DIFFUSER:
-                heat_soak_factor = 0.9 - 0.1 * (3.0 - vehicle_speed) / 3.0
-            else:
-                heat_soak_factor = 0.9 - 0.05 * (3.0 - vehicle_speed) / 3.0
-        
-        # Use base radiator to calculate heat rejection with effective airflow
-        base_rejection = self.base_radiator.calculate_heat_rejection(
-            coolant_temp, ambient_temp, coolant_flow_rate, effective_airflow
+             self.low_speed_airflow_factor = params.get('low_speed_airflow_factor', 0.3)
+             self.drag_coefficient_increase = params.get('drag_coefficient_increase', 0.05)
+        elif self.mounting_position == MountingPosition.SIDE_POD_REAR_EXIT:
+             self.wake_effect_factor = params.get('wake_effect_factor', 0.85)
+             self.drag_coefficient_increase = params.get('drag_coefficient_increase', 0.035)
+
+
+    def calculate_effective_airflow_velocity(self, vehicle_speed_mps: float) -> float:
+        """Estimate the effective air velocity reaching the radiator face."""
+        # Base velocity relative to free stream, considering wake and base efficiency
+        base_velocity = vehicle_speed_mps * self.base_airflow_efficiency * self.wake_effect_factor
+
+        # Add low speed contribution (more effect at lower speeds)
+        # Use exponential decay instead of inverse for smoother behavior near zero
+        low_speed_contribution = self.low_speed_airflow_factor * np.exp(-vehicle_speed_mps / 3.0) * 5.0 # Tunable parameters
+
+        # Diffuser interaction modifies the effective velocity
+        effective_velocity = (base_velocity + low_speed_contribution) * self.diffuser_interaction_factor
+
+        return max(0.1, effective_velocity) # Ensure a small minimum positive velocity
+
+    def calculate_airflow_m3s(self, vehicle_speed_mps: float, fan_airflow_m3s: float = 0.0) -> float:
+        """Calculate total airflow (m³/s) through the radiator including fan assist."""
+        effective_velocity = self.calculate_effective_airflow_velocity(vehicle_speed_mps)
+        ram_air_flow = effective_velocity * self.effective_frontal_area
+
+        # Combine ram air and fan air
+        # Simple addition is a rough approximation. More complex models exist.
+        # Consider if fan helps pull air at speed or fights ram air. Assume additive for now.
+        total_airflow = ram_air_flow + fan_airflow_m3s
+        return max(0.0, total_airflow)
+
+    def calculate_heat_rejection(self, coolant_temp_C: float, ambient_temp_C: float,
+                               coolant_flow_lpm: float, vehicle_speed_mps: float,
+                               fan_airflow_m3s: float = 0.0) -> float:
+        """Calculate heat rejection (W) considering rear mounting specifics."""
+        total_airflow_m3s = self.calculate_airflow_m3s(vehicle_speed_mps, fan_airflow_m3s)
+
+        # Use the base radiator's calculation method
+        heat_rejection_W = self.base_radiator.calculate_heat_rejection(
+            coolant_temp_C, ambient_temp_C, coolant_flow_lpm, total_airflow_m3s
         )
-        
-        # Apply heat soak factor
-        actual_rejection = base_rejection * heat_soak_factor
-        
-        return actual_rejection
-    
+        return heat_rejection_W
+
+    def get_drag_increase(self, vehicle_speed_mps: float, vehicle_frontal_area_m2: float = 1.1) -> float:
+        """Estimate the drag force (N) added by this radiator installation."""
+        dynamic_pressure = 0.5 * AIR_DENSITY_SEA_LEVEL * vehicle_speed_mps**2
+        # Drag increase is applied to the vehicle's overall frontal area
+        drag_force = self.drag_coefficient_increase * vehicle_frontal_area_m2 * dynamic_pressure
+        return drag_force
+
     def get_radiator_specs(self) -> Dict:
-        """
-        Get specifications of the rear radiator.
-        
-        Returns:
-            Dictionary with radiator specifications
-        """
-        # Get base radiator specs
+        """Get combined specifications including rear mounting details."""
         base_specs = self.base_radiator.get_radiator_specs()
-        
-        # Add rear-specific specs
         rear_specs = {
             'mounting_position': self.mounting_position.name,
             'angle_degrees': self.angle_degrees,
-            'distance_from_diffuser': self.distance_from_diffuser,
-            'effective_area': self.effective_area,
-            'natural_airflow_factor': self.natural_airflow_factor,
-            'stagnation_factor': self.stagnation_factor,
-            'convection_factor': self.convection_factor,
-            'drag_impact': self.drag_impact
+            'effective_frontal_area_m2': self.effective_frontal_area,
+            'base_airflow_efficiency': self.base_airflow_efficiency,
+            'low_speed_airflow_factor': self.low_speed_airflow_factor,
+            'diffuser_interaction_factor': self.diffuser_interaction_factor,
+            'wake_effect_factor': self.wake_effect_factor,
+            'drag_coefficient_increase': self.drag_coefficient_increase
         }
-        
-        # Combine the dictionaries
         return {**base_specs, **rear_specs}
 
 
 class RearRadiatorDuct:
-    """
-    Ducting system for rear-mounted radiators.
-    
-    This class models the air intake and exhaust ducting for a rear-mounted
-    radiator, including airflow calculations and pressure effects.
-    """
-    
-    def __init__(self, 
+    """Models the ducting associated with a rear radiator."""
+    def __init__(self,
                  duct_type: DuctType = DuctType.NACA_INLET,
-                 inlet_area: float = 0.025,         # m²
-                 outlet_area: float = 0.03,         # m²
-                 duct_length: float = 0.4,          # m
-                 duct_efficiency: float = 0.8,      # 0-1 efficiency factor
+                 inlet_area_m2: float = 0.03,
+                 outlet_area_m2: float = 0.04, # Typically matches radiator area
+                 length_m: float = 0.4,
+                 efficiency: float = 0.85, # Overall pressure recovery efficiency
+                 config_path: Optional[str] = None,
                  custom_params: Optional[Dict] = None):
         """
-        Initialize a radiator duct system.
-        
+        Initialize the duct model.
+
         Args:
-            duct_type: Type of duct system
-            inlet_area: Inlet area in m²
-            outlet_area: Outlet area in m²
-            duct_length: Duct length in m
-            duct_efficiency: Duct efficiency factor (0-1)
-            custom_params: Optional dictionary with custom parameters
+            duct_type: Type of duct inlet/design.
+            inlet_area_m2: Area of the duct inlet (m²).
+            outlet_area_m2: Area of the duct outlet (m²).
+            length_m: Length of the duct (m).
+            efficiency: Duct pressure recovery efficiency (0-1).
+            config_path: Optional path to YAML config file.
+            custom_params: Optional dictionary for CUSTOM type or overrides.
         """
         self.duct_type = duct_type
-        self.inlet_area = inlet_area
-        self.outlet_area = outlet_area
-        self.duct_length = duct_length
-        self.duct_efficiency = duct_efficiency
-        
-        # Derived properties
-        self.expansion_ratio = outlet_area / inlet_area
-        
-        # Set duct-specific properties based on type
-        if duct_type == DuctType.NACA_INLET:
-            self.inlet_efficiency = 0.85  # Good efficiency for NACA ducts
-            self.pressure_recovery = 0.80 # Good pressure recovery
-            self.drag_coefficient = 0.03  # Low drag
-        elif duct_type == DuctType.SIDE_SCOOP:
-            self.inlet_efficiency = 0.75  # Moderate efficiency
-            self.pressure_recovery = 0.65 # Lower pressure recovery
-            self.drag_coefficient = 0.08  # Higher drag
-        elif duct_type == DuctType.TOP_INLET:
-            self.inlet_efficiency = 0.70  # Moderate efficiency
-            self.pressure_recovery = 0.60 # Lower pressure recovery
-            self.drag_coefficient = 0.06  # Moderate drag
-        elif duct_type == DuctType.DIFFUSER_INTEGRATED:
-            self.inlet_efficiency = 0.90  # Very good efficiency
-            self.pressure_recovery = 0.85 # Very good pressure recovery
-            self.drag_coefficient = 0.02  # Very low drag
-        elif duct_type == DuctType.CUSTOM:
-            # Use custom parameters if provided
-            if custom_params:
-                self.inlet_efficiency = custom_params.get('inlet_efficiency', 0.75)
-                self.pressure_recovery = custom_params.get('pressure_recovery', 0.70)
-                self.drag_coefficient = custom_params.get('drag_coefficient', 0.05)
-            else:
-                self.inlet_efficiency = 0.75
-                self.pressure_recovery = 0.70
-                self.drag_coefficient = 0.05
-        
-        # Calculate flow resistance
-        self.flow_resistance = self._calculate_flow_resistance()
-        
-        logger.info(f"Radiator duct initialized: {duct_type.name}, {inlet_area:.3f}m² inlet area")
-    
-    def _calculate_flow_resistance(self) -> float:
-        """
-        Calculate flow resistance of the duct system.
-        
-        Returns:
-            Flow resistance coefficient
-        """
-        # Base resistance from duct length and expansion
-        # This is a simplified model - a full CFD analysis would be more accurate
-        base_resistance = 1.5 * self.duct_length / (self.inlet_area ** 0.5)
-        
-        # Adjust for expansion ratio - expanding ducts increase resistance
-        if self.expansion_ratio > 1.0:
-            expansion_factor = 1.0 + 0.2 * (self.expansion_ratio - 1.0)
-        else:
-            expansion_factor = 1.0
-        
-        # Adjust for duct type
+        self.inlet_area_m2 = inlet_area_m2
+        self.outlet_area_m2 = outlet_area_m2
+        self.length_m = length_m
+        self.efficiency = efficiency # Pressure recovery efficiency
+
+        # Duct drag coefficient (Cd based on inlet area) - Default, override below
+        self.drag_coefficient = 0.05
+        # Flow resistance coefficient (k where DeltaP = k * 0.5 * rho * v^2) - Default
+        self.flow_resistance_k = 1.5
+
+        # Load config or apply custom params
+        duct_config = {}
+        if config_path and os.path.exists(config_path):
+             try:
+                 with open(config_path, 'r') as f:
+                     config = yaml.safe_load(f)
+                 # Assuming duct config might be under 'rear_radiator' or a specific 'duct' key
+                 duct_config = config.get('rear_duct', config.get('inlet_duct', {})) # Check multiple keys
+                 # Safely get enum from name
+                 duct_type_name = duct_config.get('duct_type', self.duct_type.name).upper()
+                 self.duct_type = DuctType[duct_type_name] if duct_type_name in DuctType.__members__ else self.duct_type
+                 self.inlet_area_m2 = float(duct_config.get('inlet_area_m2', self.inlet_area_m2))
+                 self.outlet_area_m2 = float(duct_config.get('outlet_area_m2', self.outlet_area_m2))
+                 self.length_m = float(duct_config.get('length_m', self.length_m))
+                 self.efficiency = float(duct_config.get('efficiency', self.efficiency))
+                 logger.info(f"Rear duct config loaded from {config_path}")
+             except Exception as e:
+                 logger.error(f"Error loading rear duct config from {config_path}: {e}. Using defaults.")
+        if custom_params: duct_config.update(custom_params)
+
+        self._apply_type_defaults_and_custom(duct_config)
+        self.flow_resistance_k = self._calculate_flow_resistance_k() # Calculate after defaults applied
+
+        logger.info(f"Rear Duct initialized: Type={self.duct_type.name}, Inlet={self.inlet_area_m2:.3f}m², Outlet={self.outlet_area_m2:.3f}m², Efficiency={self.efficiency:.2f}")
+
+    def _apply_type_defaults_and_custom(self, params: Dict):
+        """Apply duct type specific defaults and custom parameters."""
+        defaults = {}
+        # Efficiency here refers to pressure recovery efficiency
         if self.duct_type == DuctType.NACA_INLET:
-            type_factor = 0.8  # Low resistance
-        elif self.duct_type == DuctType.DIFFUSER_INTEGRATED:
-            type_factor = 0.7  # Very low resistance
+            defaults = {'efficiency': 0.88, 'drag_coefficient': 0.02, 'base_resistance_k': 0.5}
         elif self.duct_type == DuctType.SIDE_SCOOP:
-            type_factor = 1.1  # Higher resistance
-        else:
-            type_factor = 1.0  # Baseline
-        
-        # Calculate overall resistance
-        resistance = base_resistance * expansion_factor * type_factor
-        
-        # Apply efficiency factor (lower efficiency = higher resistance)
-        resistance = resistance / self.duct_efficiency
-        
-        return resistance
-    
-    def calculate_airflow(self, vehicle_speed: float) -> float:
-        """
-        Calculate airflow through the duct at given vehicle speed.
-        
-        Args:
-            vehicle_speed: Vehicle speed in m/s
-            
-        Returns:
-            Airflow through duct in m³/s
-        """
-        if vehicle_speed <= 0:
-            return 0.0
-        
-        # Base flow rate assuming ideal conditions
-        # Q = A * v * efficiency
-        ideal_flow = self.inlet_area * vehicle_speed * self.inlet_efficiency
-        
-        # Apply resistance effects - flow decreases with resistance
-        # This is a simplified model based on pressure loss principles
-        air_density = 1.2  # kg/m³
-        dynamic_pressure = 0.5 * air_density * vehicle_speed ** 2
-        
-        # Pressure loss due to resistance
-        pressure_loss = dynamic_pressure * (1.0 - self.pressure_recovery)
-        
-        # Flow reduction factor based on pressure loss
-        # In reality, this would be calculated from the system curve
-        flow_factor = 1.0 / (1.0 + (self.flow_resistance * pressure_loss / 100))
-        
-        # Apply flow factor to ideal flow
-        actual_flow = ideal_flow * flow_factor
-        
-        return actual_flow
-    
-    def calculate_drag(self, vehicle_speed: float) -> float:
-        """
-        Calculate drag force contributed by the duct system.
-        
-        Args:
-            vehicle_speed: Vehicle speed in m/s
-            
-        Returns:
-            Drag force in Newtons
-        """
-        if vehicle_speed <= 0:
-            return 0.0
-        
-        # Calculate dynamic pressure
-        air_density = 1.2  # kg/m³
-        dynamic_pressure = 0.5 * air_density * vehicle_speed ** 2
-        
-        # Calculate drag force (F = C_d * A * q)
-        drag_force = self.drag_coefficient * self.inlet_area * dynamic_pressure
-        
+            defaults = {'efficiency': 0.75, 'drag_coefficient': 0.06, 'base_resistance_k': 1.0}
+        elif self.duct_type == DuctType.TOP_INLET:
+            defaults = {'efficiency': 0.80, 'drag_coefficient': 0.04, 'base_resistance_k': 0.8}
+        elif self.duct_type == DuctType.DIFFUSER_INTEGRATED:
+            defaults = {'efficiency': 0.92, 'drag_coefficient': 0.015, 'base_resistance_k': 0.4}
+        elif self.duct_type == DuctType.CUSTOM:
+             defaults = {'efficiency': 0.80, 'drag_coefficient': 0.05, 'base_resistance_k': 0.8}
+
+        self.efficiency = float(params.get('efficiency', defaults.get('efficiency', 0.85)))
+        self.drag_coefficient = float(params.get('drag_coefficient', defaults.get('drag_coefficient', 0.05)))
+        self.base_resistance_k = float(params.get('base_resistance_k', defaults.get('base_resistance_k', 0.8)))
+
+    def _calculate_flow_resistance_k(self) -> float:
+        """Estimate the flow resistance coefficient k (for DeltaP = k * 0.5 * rho * v^2)."""
+        # Start with base resistance for the duct type
+        k = self.base_resistance_k
+        # Add effect of length (longer ducts = more friction loss)
+        k += 0.05 * (self.length_m / 0.5) # Add 0.05 to k for every 0.5m length
+        # Add effect of expansion/contraction
+        area_ratio = self.outlet_area_m2 / self.inlet_area_m2
+        if area_ratio > 1.1: # Expansion loss
+             k += 0.2 * (area_ratio - 1.0)**1.5
+        elif area_ratio < 0.9: # Contraction loss
+             k += 0.1 * (1.0 - area_ratio)**1.5
+        # Modify by overall efficiency (higher efficiency means lower k)
+        k /= (self.efficiency**0.5) # Inverse relationship, square root scaling is arbitrary
+        return max(0.1, k) # Ensure minimum resistance
+
+    def calculate_pressure_recovery_pa(self, vehicle_speed_mps: float) -> float:
+        """Calculate the static pressure potentially recovered at the outlet (Pa)."""
+        dynamic_pressure = 0.5 * AIR_DENSITY_SEA_LEVEL * vehicle_speed_mps**2
+        pressure_recovery = dynamic_pressure * self.efficiency
+        return pressure_recovery
+
+    def calculate_pressure_drop_pa(self, airflow_m3s: float) -> float:
+        """Calculate the pressure drop through the duct for a given airflow (Pa)."""
+        if self.inlet_area_m2 <= 0: return float('inf')
+        avg_velocity = airflow_m3s / self.inlet_area_m2 # Use inlet area for velocity calc
+        dynamic_pressure = 0.5 * AIR_DENSITY_SEA_LEVEL * avg_velocity**2
+        pressure_drop = self.flow_resistance_k * dynamic_pressure
+        return pressure_drop
+
+    def calculate_duct_airflow_m3s(self, pressure_diff_pa: float) -> float:
+         """Calculate airflow (m³/s) driven by a pressure difference across the duct."""
+         # DeltaP = k * 0.5 * rho * v^2 => v = sqrt(2 * DeltaP / (k * rho))
+         # Q = A * v = A * sqrt(2 * DeltaP / (k * rho))
+         if pressure_diff_pa <= 0 or self.flow_resistance_k <= 0:
+             return 0.0
+         velocity = np.sqrt(2 * pressure_diff_pa / (self.flow_resistance_k * AIR_DENSITY_SEA_LEVEL))
+         airflow = self.inlet_area_m2 * velocity # Based on inlet area velocity
+         return airflow
+
+    def calculate_drag_force_N(self, vehicle_speed_mps: float) -> float:
+        """Calculate the aerodynamic drag force (N) of the duct based on inlet area."""
+        dynamic_pressure = 0.5 * AIR_DENSITY_SEA_LEVEL * vehicle_speed_mps**2
+        drag_force = self.drag_coefficient * self.inlet_area_m2 * dynamic_pressure
         return drag_force
-    
+
     def get_duct_specs(self) -> Dict:
-        """
-        Get specifications of the duct system.
-        
-        Returns:
-            Dictionary with duct specifications
-        """
+        """Get duct specifications."""
         return {
             'duct_type': self.duct_type.name,
-            'inlet_area': self.inlet_area,
-            'outlet_area': self.outlet_area,
-            'duct_length': self.duct_length,
-            'expansion_ratio': self.expansion_ratio,
-            'duct_efficiency': self.duct_efficiency,
-            'inlet_efficiency': self.inlet_efficiency,
-            'pressure_recovery': self.pressure_recovery,
+            'inlet_area_m2': self.inlet_area_m2,
+            'outlet_area_m2': self.outlet_area_m2,
+            'length_m': self.length_m,
+            'efficiency': self.efficiency,
             'drag_coefficient': self.drag_coefficient,
-            'flow_resistance': self.flow_resistance
+            'flow_resistance_k': self.flow_resistance_k
         }
 
 
 class RearRadiatorSystem:
-    """
-    Complete rear radiator system for Formula Student car.
-    
-    This class integrates the rear-mounted radiator, ducting, and fans into
-    a complete system for cooling simulation.
-    """
-    
-    def __init__(self, 
+    """Integrates rear radiator, ducts, and optional fan."""
+    def __init__(self,
                  rear_radiator: RearRadiator,
                  inlet_duct: RearRadiatorDuct,
-                 outlet_duct: Optional[RearRadiatorDuct] = None,
+                 outlet_duct: Optional[RearRadiatorDuct] = None, # Outlet optional
                  cooling_fan: Optional[CoolingFan] = None):
         """
         Initialize the complete rear radiator system.
-        
+
         Args:
-            rear_radiator: RearRadiator object
-            inlet_duct: Inlet duct system
-            outlet_duct: Optional outlet duct system
-            cooling_fan: Optional cooling fan
+            rear_radiator: RearRadiator instance.
+            inlet_duct: Inlet duct instance.
+            outlet_duct: Optional outlet duct instance.
+            cooling_fan: Optional CoolingFan instance positioned relative to radiator.
         """
         self.radiator = rear_radiator
         self.inlet_duct = inlet_duct
         self.outlet_duct = outlet_duct
         self.cooling_fan = cooling_fan
-        
-        # If no outlet duct specified, create a default one
+
+        # If no outlet duct specified, create a simple default one
         if self.outlet_duct is None:
             self.outlet_duct = RearRadiatorDuct(
                 duct_type=DuctType.CUSTOM,
-                inlet_area=inlet_duct.outlet_area,  # Match inlet duct outlet
-                outlet_area=inlet_duct.outlet_area * 1.2,  # Slightly larger
-                duct_length=0.2,
-                duct_efficiency=0.9
+                inlet_area_m2=inlet_duct.outlet_area_m2, # Match inlet outlet
+                outlet_area_m2=inlet_duct.outlet_area_m2 * 1.1, # Slight expansion
+                length_m=0.1,
+                efficiency=0.9
             )
-        
-        # Current state
-        self.current_airflow = 0.0  # m³/s through radiator
-        self.fan_control_signal = 0.0  # 0-1
-        self.heat_rejection = 0.0  # W
-        
-        logger.info("Rear radiator system initialized")
-    
+            logger.info("Default outlet duct created for RearRadiatorSystem.")
+
+
+        # State
+        self.current_airflow_m3s: float = 0.0
+        self.heat_rejection_W: float = 0.0
+        self.total_drag_N: float = 0.0
+        self.system_pressure_drop_pa: float = 0.0 # Total pressure drop across rad+ducts
+
+        logger.info("Rear Radiator System initialized.")
+
     def update_fan_control(self, control_signal: float):
-        """
-        Update cooling fan control.
-        
-        Args:
-            control_signal: Fan control signal (0-1)
-        """
+        """Update fan speed based on control signal (0-1)."""
         if self.cooling_fan:
-            self.fan_control_signal = max(0.0, min(1.0, control_signal))
-            self.cooling_fan.update_control(self.fan_control_signal)
-    
-    def calculate_system_airflow(self, vehicle_speed: float) -> float:
-        """
-        Calculate airflow through the complete system.
-        
-        Args:
-            vehicle_speed: Vehicle speed in m/s
-            
-        Returns:
-            Total system airflow in m³/s
-        """
-        # Calculate duct airflow
-        duct_airflow = self.inlet_duct.calculate_airflow(vehicle_speed)
-        
-        # Add fan airflow if present
-        fan_airflow = 0.0
-        if self.cooling_fan:
-            fan_airflow = self.cooling_fan.current_airflow
-        
-        # Total airflow is the sum of duct and fan airflow
-        # In reality, the interaction is more complex and would need CFD analysis
-        total_airflow = duct_airflow + fan_airflow
-        
-        # Limit airflow by outlet duct capacity
-        outlet_capacity = self.outlet_duct.calculate_airflow(vehicle_speed) * 1.2  # Allow some backpressure
-        total_airflow = min(total_airflow, outlet_capacity)
-        
-        self.current_airflow = total_airflow
-        return total_airflow
-    
-    def calculate_system_drag(self, vehicle_speed: float) -> float:
-        """
-        Calculate total drag from the rear radiator system.
-        
-        Args:
-            vehicle_speed: Vehicle speed in m/s
-            
-        Returns:
-            Total drag force in Newtons
-        """
-        # Calculate duct drag
-        inlet_drag = self.inlet_duct.calculate_drag(vehicle_speed)
-        outlet_drag = self.outlet_duct.calculate_drag(vehicle_speed)
-        
-        # Calculate radiator drag (pressure drop effect)
-        # This is a simplified model
-        air_density = 1.2  # kg/m³
-        if self.current_airflow > 0:
-            flow_velocity = self.current_airflow / self.radiator.effective_area
-            radiator_drag = 0.5 * air_density * flow_velocity**2 * self.radiator.effective_area * 0.5
+            self.cooling_fan.update_control(control_signal)
+        # else: logger.warning("Attempted to control fan, but no fan is present.") # Reduce verbosity
+
+    def _calculate_system_pressure_drop(self, airflow_m3s: float) -> float:
+         """Estimate the total pressure drop across the system for a given airflow."""
+         # Pressure drop = Inlet Duct + Radiator + Outlet Duct
+         inlet_drop = self.inlet_duct.calculate_pressure_drop_pa(airflow_m3s)
+         radiator_drop = self.radiator.base_radiator.calculate_pressure_drop_air_pa(airflow_m3s)
+         outlet_drop = self.outlet_duct.calculate_pressure_drop_pa(airflow_m3s) if self.outlet_duct else 0.0
+         return inlet_drop + radiator_drop + outlet_drop
+
+    def calculate_system_airflow_m3s(self, vehicle_speed_mps: float) -> float:
+        """Calculate airflow (m³/s) through the system considering ram air, fan, and resistance."""
+        # --- This requires solving the system operating point ---
+        # Find airflow Q where FanPressure(Q) + RamPressure(Q) = SystemResistance(Q)
+
+        # 1. Fan pressure curve: P_fan = Pmax_fan(speed) * (1 - (Q / Qmax_fan(speed))^2)
+        # 2. Ram pressure effective at radiator inlet: P_ram = InletDuctRecovery(V_veh) - InletDuctLoss(Q)
+        # 3. System resistance pressure drop: P_sys = RadDrop(Q) + OutletDuctLoss(Q)
+
+        # --- Simplified Iterative Approach ---
+        # Start with an initial guess for airflow (e.g., based on ram air only)
+        initial_ram_pressure = self.inlet_duct.calculate_pressure_recovery_pa(vehicle_speed_mps)
+        q_guess = self.inlet_duct.calculate_duct_airflow_m3s(initial_ram_pressure / 2.0) # Guess flow based on half the pressure
+
+        max_iterations = 10
+        tolerance = 0.001 # m³/s
+
+        for _ in range(max_iterations):
+             # Calculate system pressure drop at current flow guess
+             system_drop = self._calculate_system_pressure_drop(q_guess)
+
+             # Calculate fan pressure contribution at current flow guess
+             fan_p_max = self.cooling_fan.max_static_pressure_pa * self.cooling_fan.current_duty_cycle**2 if self.cooling_fan else 0.0
+             fan_q_max = self.cooling_fan.max_airflow_m3s * self.cooling_fan.current_duty_cycle**3 if self.cooling_fan else 0.0
+             if fan_p_max > 0 and fan_q_max > 0 and q_guess < fan_q_max:
+                 fan_pressure = fan_p_max * (1.0 - (q_guess / fan_q_max)**2)
+             else:
+                 fan_pressure = 0.0
+
+             # Calculate effective ram pressure at radiator inlet
+             inlet_pressure_recovery = self.inlet_duct.calculate_pressure_recovery_pa(vehicle_speed_mps)
+             inlet_duct_drop = self.inlet_duct.calculate_pressure_drop_pa(q_guess)
+             ram_pressure_at_rad = inlet_pressure_recovery - inlet_duct_drop
+
+             # Total driving pressure = Ram Pressure + Fan Pressure
+             driving_pressure = ram_pressure_at_rad + fan_pressure
+
+             # Required pressure drop for the rest of the system (Radiator + Outlet)
+             required_downstream_drop = driving_pressure
+             downstream_resistance_k = self.radiator.base_radiator._calculate_flow_resistance_k() + \
+                                      (self.outlet_duct.flow_resistance_k if self.outlet_duct else 0.0)
+
+             # Estimate new flow based on downstream resistance and driving pressure
+             # Q = A * sqrt(2*DeltaP / (k*rho)) -> Use radiator area as reference A
+             if required_downstream_drop > 0 and downstream_resistance_k > 0:
+                  new_q = self.radiator.base_radiator.core_area * \
+                          np.sqrt(2 * required_downstream_drop / (downstream_resistance_k * AIR_DENSITY_SEA_LEVEL))
+             else:
+                  new_q = 0.0
+
+             # Check for convergence
+             if abs(new_q - q_guess) < tolerance:
+                  q_guess = new_q
+                  break
+
+             q_guess = 0.8 * q_guess + 0.2 * new_q # Damped update
+
         else:
-            radiator_drag = 0.0
-        
-        # Add drag from mounting position
-        position_drag = 0.5 * air_density * vehicle_speed**2 * self.radiator.drag_impact
-        
-        # Total drag
-        total_drag = inlet_drag + outlet_drag + radiator_drag + position_drag
-        
-        return total_drag
-    
-    def calculate_heat_rejection(self, coolant_temp: float, ambient_temp: float, 
-                               coolant_flow_rate: float, vehicle_speed: float) -> float:
-        """
-        Calculate heat rejected by the rear radiator system.
-        
-        Args:
-            coolant_temp: Coolant temperature in °C
-            ambient_temp: Ambient air temperature in °C
-            coolant_flow_rate: Coolant flow rate in L/min
-            vehicle_speed: Vehicle speed in m/s
-            
-        Returns:
-            Heat rejection rate in watts (W)
-        """
-        # Get fan airflow if present
-        fan_airflow = 0.0
-        if self.cooling_fan:
-            fan_airflow = self.cooling_fan.current_airflow
-        
-        # Calculate system airflow
-        airflow = self.calculate_system_airflow(vehicle_speed)
-        
-        # Calculate heat rejection
-        self.heat_rejection = self.radiator.calculate_heat_rejection(
-            coolant_temp, ambient_temp, coolant_flow_rate, vehicle_speed, fan_airflow
+             logger.debug(f"Airflow calculation did not fully converge after {max_iterations} iterations.")
+
+        self.current_airflow_m3s = max(0.0, q_guess)
+        self.system_pressure_drop_pa = self._calculate_system_pressure_drop(self.current_airflow_m3s)
+
+        return self.current_airflow_m3s
+
+    def calculate_heat_rejection(self, coolant_temp_C: float, ambient_temp_C: float,
+                               coolant_flow_lpm: float, vehicle_speed_mps: float) -> float:
+        """Calculate heat rejection (W) for the entire system."""
+        # Calculate system airflow first to know the actual airflow through the radiator
+        system_airflow_m3s = self.calculate_system_airflow_m3s(vehicle_speed_mps)
+
+        # Use the base radiator's calculation method with the calculated system airflow
+        self.heat_rejection_W = self.radiator.base_radiator.calculate_heat_rejection(
+             coolant_temp_C, ambient_temp_C, coolant_flow_lpm, system_airflow_m3s
         )
-        
-        return self.heat_rejection
-    
-    def calculate_coolant_exit_temp(self, inlet_temp: float, coolant_flow_rate: float) -> float:
-        """
-        Calculate coolant exit temperature.
-        
-        Args:
-            inlet_temp: Coolant inlet temperature in °C
-            coolant_flow_rate: Coolant flow rate in L/min
-            
-        Returns:
-            Coolant exit temperature in °C
-        """
-        return self.radiator.base_radiator.calculate_coolant_exit_temp(
-            inlet_temp, self.heat_rejection, coolant_flow_rate
-        )
-    
-    def automatic_fan_control(self, coolant_temp: float, target_temp: float = 90.0, 
-                            hysteresis: float = 5.0, vehicle_speed: float = 0.0):
-        """
-        Apply automatic fan control based on temperature.
-        
-        Args:
-            coolant_temp: Current coolant temperature in °C
-            target_temp: Target coolant temperature in °C
-            hysteresis: Temperature hysteresis band in °C
-            vehicle_speed: Current vehicle speed in m/s for conditional control
-        """
-        if self.cooling_fan is None:
-            return
-        
-        # Base control on temperature difference from target
-        if coolant_temp >= target_temp + hysteresis:
-            fan_control = 1.0  # Full fan if temp is very high
-        elif coolant_temp > target_temp:
-            # Linear ramp from 0 to 1 over the hysteresis range
-            fan_control = (coolant_temp - target_temp) / hysteresis
-        else:
-            fan_control = 0.0  # Fan off if below target
-        
-        # Modify control based on vehicle speed
-        # At high speeds, ram air may be sufficient and fan can be reduced
-        if vehicle_speed > 15.0:
-            speed_factor = min(1.0, (30.0 - vehicle_speed) / 15.0)
-            fan_control *= speed_factor
-        
-        # Apply control
-        self.update_fan_control(fan_control)
-    
+        return self.heat_rejection_W
+
+    def calculate_total_drag_N(self, vehicle_speed_mps: float) -> float:
+        """Calculate the total drag force (N) added by the system."""
+        inlet_drag = self.inlet_duct.calculate_drag_force_N(vehicle_speed_mps)
+        outlet_drag = self.outlet_duct.calculate_drag_force_N(vehicle_speed_mps) if self.outlet_duct else 0.0
+        radiator_installation_drag = self.radiator.get_drag_increase(vehicle_speed_mps)
+
+        # Internal drag (momentum loss of air passing through system)
+        # Use airflow calculated at this speed
+        system_airflow = self.calculate_system_airflow_m3s(vehicle_speed_mps)
+        # Estimate exit velocity relative to free stream (highly approximate)
+        exit_velocity_factor = 0.6 # Assume air exits slower than vehicle speed
+        internal_drag = AIR_DENSITY_SEA_LEVEL * system_airflow * (vehicle_speed_mps * (1.0 - exit_velocity_factor))
+
+        self.total_drag_N = inlet_drag + outlet_drag + radiator_installation_drag + internal_drag
+        return self.total_drag_N
+
+    def simulate_step(self, coolant_temp_C: float, ambient_temp_C: float,
+                      coolant_flow_lpm: float, vehicle_speed_mps: float,
+                      auto_fan_control: bool = True, target_temp: float = 90.0) -> Dict:
+        """Simulate one step of the system."""
+        if auto_fan_control and self.cooling_fan:
+            temp_error = coolant_temp_C - target_temp
+            control_signal = np.clip(temp_error / 10.0, 0.0, 1.0) # Ramp over 10C
+            speed_factor = max(0.0, 1.0 - vehicle_speed_mps / 20.0) # Reduce fan at speed > 20 m/s
+            self.update_fan_control(control_signal * speed_factor)
+        elif not self.cooling_fan:
+             self.update_fan_control(0.0)
+
+        self.calculate_heat_rejection(coolant_temp_C, ambient_temp_C, coolant_flow_lpm, vehicle_speed_mps)
+        self.calculate_total_drag_N(vehicle_speed_mps)
+        # Note: Doesn't update coolant temp; that's done in the main thermal sim loop
+
+        return self.get_system_state()
+
     def get_system_state(self) -> Dict:
-        """
-        Get current state of the rear radiator system.
-        
-        Returns:
-            Dictionary with current system state
-        """
+        """Get current state of the system."""
         state = {
-            'current_airflow': self.current_airflow,
-            'heat_rejection': self.heat_rejection,
-            'fan_control_signal': self.fan_control_signal,
+            'airflow_m3s': self.current_airflow_m3s,
+            'heat_rejection_W': self.heat_rejection_W,
+            'total_drag_N': self.total_drag_N,
+            'system_pressure_drop_pa': self.system_pressure_drop_pa,
         }
-        
-        # Add fan state if present
         if self.cooling_fan:
-            state['cooling_fan'] = self.cooling_fan.get_fan_state()
-        
+             state['fan_state'] = self.cooling_fan.get_fan_state()
         return state
-    
+
     def get_system_specs(self) -> Dict:
-        """
-        Get specifications of the complete rear radiator system.
-        
-        Returns:
-            Dictionary with system specifications
-        """
+        """Get specifications of the system."""
         specs = {
             'radiator': self.radiator.get_radiator_specs(),
             'inlet_duct': self.inlet_duct.get_duct_specs(),
-            'outlet_duct': self.outlet_duct.get_duct_specs(),
+            'outlet_duct': self.outlet_duct.get_duct_specs() if self.outlet_duct else None,
         }
-        
-        # Add fan specs if present
         if self.cooling_fan:
             specs['cooling_fan'] = self.cooling_fan.get_fan_specs()
-        
         return specs
-    
-    def analyze_performance(self, vehicle_speed_range: List[float], 
-                          coolant_temp: float = 90.0,
-                          ambient_temp: float = 25.0,
+
+    def analyze_performance(self, vehicle_speed_range: np.ndarray,
+                          coolant_temp: float = 90.0, ambient_temp: float = 25.0,
                           coolant_flow_rate: float = 50.0) -> Dict:
-        """
-        Analyze system performance across a range of vehicle speeds.
-        
-        Args:
-            vehicle_speed_range: List of vehicle speeds to analyze (m/s)
-            coolant_temp: Coolant temperature for analysis in °C
-            ambient_temp: Ambient temperature for analysis in °C
-            coolant_flow_rate: Coolant flow rate for analysis in L/min
-            
-        Returns:
-            Dictionary with performance results
-        """
-        # Initialize result arrays
-        n_speeds = len(vehicle_speed_range)
-        airflows = np.zeros(n_speeds)
-        heat_rejections = np.zeros(n_speeds)
-        drags = np.zeros(n_speeds)
-        
-        # Apply fan control appropriate for analysis
-        # Use full fan for a conservative analysis
-        if self.cooling_fan:
-            self.update_fan_control(1.0)
-        
-        # Run analysis for each speed
-        for i, speed in enumerate(vehicle_speed_range):
-            airflows[i] = self.calculate_system_airflow(speed)
-            heat_rejections[i] = self.calculate_heat_rejection(
-                coolant_temp, ambient_temp, coolant_flow_rate, speed
-            )
-            drags[i] = self.calculate_system_drag(speed)
-        
-        return {
-            'vehicle_speeds': vehicle_speed_range,
-            'airflows': airflows,
-            'heat_rejections': heat_rejections,
-            'drags': drags,
-            'analysis_conditions': {
-                'coolant_temp': coolant_temp,
-                'ambient_temp': ambient_temp,
-                'coolant_flow_rate': coolant_flow_rate
-            }
-        }
-    
+        """Analyze system performance over a range of speeds."""
+        results = {'vehicle_speeds_mps': vehicle_speed_range, 'airflows': [], 'heat_rejections': [], 'drags': []}
+        # Simulate with full fan for max cooling potential
+        self.update_fan_control(1.0)
+
+        for speed in vehicle_speed_range:
+            state = self.simulate_step(coolant_temp, ambient_temp, coolant_flow_rate, speed, auto_fan_control=False)
+            results['airflows'].append(state['airflow_m3s'])
+            results['heat_rejections'].append(state['heat_rejection_W'])
+            results['drags'].append(state['total_drag_N'])
+
+        # Convert lists to numpy arrays
+        for key in ['airflows', 'heat_rejections', 'drags']:
+            results[key] = np.array(results[key])
+        results['conditions'] = {'coolant_temp':coolant_temp, 'ambient_temp':ambient_temp, 'flow_rate':coolant_flow_rate}
+        return results
+
     def plot_performance_curves(self, analysis_results: Dict, save_path: Optional[str] = None):
-        """
-        Plot system performance curves from analysis results.
-        
-        Args:
-            analysis_results: Results from analyze_performance
-            save_path: Optional path to save the plot
-        """
-        # Extract data
-        speeds = analysis_results['vehicle_speeds']
+        """Plot performance curves using the centralized plotting utility."""
+        from ..utils.plotting import save_plot, _apply_common_ax_settings, COLOR_SCHEMES # Local import
+
+        speeds = analysis_results['vehicle_speeds_mps']
         airflows = analysis_results['airflows']
         heat_rejections = analysis_results['heat_rejections']
         drags = analysis_results['drags']
-        
-        # Create figure with multiple subplots
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
-        
-        # Plot airflow
-        ax1.plot(speeds, airflows, 'b-', linewidth=2)
-        ax1.set_ylabel('Airflow (m³/s)')
-        ax1.set_title('Rear Radiator System Performance')
-        ax1.grid(True, linestyle='--', alpha=0.7)
-        
-        # Plot heat rejection
-        ax2.plot(speeds, heat_rejections / 1000, 'r-', linewidth=2)
-        ax2.set_ylabel('Heat Rejection (kW)')
-        ax2.grid(True, linestyle='--', alpha=0.7)
-        
-        # Plot drag
-        ax3.plot(speeds, drags, 'g-', linewidth=2)
-        ax3.set_xlabel('Vehicle Speed (m/s)')
-        ax3.set_ylabel('Drag Force (N)')
-        ax3.grid(True, linestyle='--', alpha=0.7)
-        
-        # Get analysis conditions for title
-        conditions = analysis_results['analysis_conditions']
-        plt.figtext(0.02, 0.02, f"Analysis Conditions: {conditions['coolant_temp']}°C coolant, "
-                   f"{conditions['ambient_temp']}°C ambient, {conditions['coolant_flow_rate']} L/min flow",
-                   fontsize=9)
-        
-        plt.tight_layout()
-        
-        # Save plot if requested
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            
-        plt.show()
+        conditions = analysis_results['conditions']
 
+        fig, axes = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
+
+        axes[0].plot(speeds, airflows, color=COLOR_SCHEMES['default'][0])
+        _apply_common_ax_settings(axes[0], ylabel='Airflow (m³/s)', title='Rear Radiator System Performance')
+
+        axes[1].plot(speeds, heat_rejections / 1000.0, color=COLOR_SCHEMES['default'][1]) # kW
+        _apply_common_ax_settings(axes[1], ylabel='Heat Rejection (kW)')
+
+        axes[2].plot(speeds, drags, color=COLOR_SCHEMES['default'][2])
+        _apply_common_ax_settings(axes[2], xlabel='Vehicle Speed (m/s)', ylabel='Total System Drag (N)')
+
+        fig.suptitle(f"Conditions: {conditions['coolant_temp']}°C Coolant, {conditions['ambient_temp']}°C Ambient, {conditions['flow_rate']} LPM Flow")
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+        if save_path: save_plot(fig, save_path)
+        plt.show()
+        plt.close(fig)
+
+
+# --- Factory Functions ---
+# (Keep existing factory functions, potentially update defaults if needed)
 
 def create_default_rear_radiator_system() -> RearRadiatorSystem:
-    """
-    Create a default rear radiator system configuration for Formula Student.
-    
-    Returns:
-        Configured RearRadiatorSystem
-    """
-    from .cooling_system import Radiator, RadiatorType, CoolingFan, FanType
-    
-    # Create base radiator
-    base_radiator = Radiator(
-        radiator_type=RadiatorType.SINGLE_CORE_ALUMINUM,
-        core_area=0.16,
-        core_thickness=0.04,
-        fin_density=16,
-        tube_rows=2
-    )
-    
-    # Create rear radiator
-    rear_radiator = RearRadiator(
-        radiator=base_radiator,
-        mounting_position=MountingPosition.ABOVE_DIFFUSER,
-        angle_degrees=20.0,
-        distance_from_diffuser=0.08
-    )
-    
-    # Create inlet duct
-    inlet_duct = RearRadiatorDuct(
-        duct_type=DuctType.NACA_INLET,
-        inlet_area=0.03,
-        outlet_area=0.04,
-        duct_length=0.35
-    )
-    
-    # Create outlet duct
-    outlet_duct = RearRadiatorDuct(
-        duct_type=DuctType.CUSTOM,
-        inlet_area=0.04,
-        outlet_area=0.05,
-        duct_length=0.15,
-        duct_efficiency=0.9
-    )
-    
-    # Create cooling fan
-    cooling_fan = CoolingFan(
-        fan_type=FanType.VARIABLE_SPEED,
-        max_airflow=0.3,
-        diameter=0.28
-    )
-    
-    # Create complete system
-    system = RearRadiatorSystem(
-        rear_radiator=rear_radiator,
-        inlet_duct=inlet_duct,
-        outlet_duct=outlet_duct,
-        cooling_fan=cooling_fan
-    )
-    
-    return system
-
+    """Create a default rear radiator system configuration."""
+    try:
+        base_radiator = Radiator(radiator_type=RadiatorType.SINGLE_CORE_ALUMINUM, core_area=0.16)
+        rear_radiator = RearRadiator(base_radiator, mounting_position=MountingPosition.ABOVE_DIFFUSER, angle_degrees=20.0)
+        inlet_duct = RearRadiatorDuct(duct_type=DuctType.NACA_INLET, inlet_area_m2=0.03, outlet_area_m2=0.04)
+        outlet_duct = RearRadiatorDuct(duct_type=DuctType.CUSTOM, inlet_area_m2=0.04, outlet_area_m2=0.05, length_m=0.15)
+        cooling_fan = CoolingFan(fan_type=FanType.VARIABLE_SPEED, max_airflow_m3s=0.3, diameter_m=0.28)
+        return RearRadiatorSystem(rear_radiator, inlet_duct, outlet_duct, cooling_fan)
+    except Exception as e:
+        logger.error(f"Error creating default rear radiator: {e}. Using basic fallback.")
+        return RearRadiatorSystem(RearRadiator(Radiator()), RearRadiatorDuct(), cooling_fan=CoolingFan()) # Basic fallback
 
 def create_optimized_rear_radiator_system() -> RearRadiatorSystem:
-    """
-    Create an optimized rear radiator system for Formula Student racing.
-    
-    Returns:
-        Optimized RearRadiatorSystem
-    """
-    from .cooling_system import Radiator, RadiatorType, CoolingFan, FanType
-    
-    # Create high-performance radiator
-    base_radiator = Radiator(
-        radiator_type=RadiatorType.DOUBLE_CORE_ALUMINUM,
-        core_area=0.18,
-        core_thickness=0.045,
-        fin_density=18,
-        tube_rows=2
-    )
-    
-    # Create rear radiator with optimal mounting
-    rear_radiator = RearRadiator(
-        radiator=base_radiator,
-        mounting_position=MountingPosition.SIDE_POD_REAR,  # Better airflow than directly behind driver
-        angle_degrees=15.0,  # Moderate angle for balance of airflow and packaging
-        distance_from_diffuser=0.1
-    )
-    
-    # Create aerodynamically optimized inlet duct
-    inlet_duct = RearRadiatorDuct(
-        duct_type=DuctType.DIFFUSER_INTEGRATED,  # Integrated with diffuser for best aero performance
-        inlet_area=0.035,
-        outlet_area=0.05,
-        duct_length=0.3,
-        duct_efficiency=0.9
-    )
-    
-    # Create optimized outlet duct
-    outlet_duct = RearRadiatorDuct(
-        duct_type=DuctType.CUSTOM,
-        inlet_area=0.05,
-        outlet_area=0.06,
-        duct_length=0.12,  # Shorter for less resistance
-        duct_efficiency=0.95
-    )
-    
-    # Create high-performance cooling fan
-    cooling_fan = CoolingFan(
-        fan_type=FanType.DUAL_FAN,  # Dual fans for better airflow
-        max_airflow=0.4,
-        diameter=0.22  # Smaller diameter fans can fit better in rear packaging
-    )
-    
-    # Create complete system
-    system = RearRadiatorSystem(
-        rear_radiator=rear_radiator,
-        inlet_duct=inlet_duct,
-        outlet_duct=outlet_duct,
-        cooling_fan=cooling_fan
-    )
-    
-    return system
+    """Create an optimized rear radiator system."""
+    try:
+        base_radiator = Radiator(radiator_type=RadiatorType.DOUBLE_CORE_ALUMINUM, core_area=0.18, fin_density=18)
+        rear_radiator = RearRadiator(base_radiator, mounting_position=MountingPosition.DIFFUSER_INTEGRATED, angle_degrees=10)
+        inlet_duct = RearRadiatorDuct(duct_type=DuctType.DIFFUSER_INTEGRATED, inlet_area_m2=0.035, outlet_area_m2=0.05, efficiency=0.92)
+        outlet_duct = RearRadiatorDuct(duct_type=DuctType.CUSTOM, inlet_area_m2=0.05, outlet_area_m2=0.06, length_m=0.12, efficiency=0.95)
+        cooling_fan = CoolingFan(fan_type=FanType.DUAL_FAN, max_airflow_m3s=0.4, diameter_m=0.22)
+        return RearRadiatorSystem(rear_radiator, inlet_duct, outlet_duct, cooling_fan)
+    except Exception as e:
+        logger.error(f"Error creating optimized rear radiator: {e}. Using default.")
+        return create_default_rear_radiator_system()
 
 
 def create_minimal_weight_rear_radiator_system() -> RearRadiatorSystem:
-    """
-    Create a minimal weight rear radiator system for Formula Student.
-    
-    Returns:
-        Weight-optimized RearRadiatorSystem
-    """
-    from .cooling_system import Radiator, RadiatorType, CoolingFan, FanType
-    
-    # Create lightweight radiator (smaller but still adequate)
-    base_radiator = Radiator(
-        radiator_type=RadiatorType.SINGLE_CORE_ALUMINUM,
-        core_area=0.14,  # Smaller core area
-        core_thickness=0.035,  # Thinner core
-        fin_density=20,  # Higher fin density for better efficiency
-        tube_rows=1  # Single row for weight reduction
-    )
-    
-    # Create angled rear radiator for better natural convection
-    rear_radiator = RearRadiator(
-        radiator=base_radiator,
-        mounting_position=MountingPosition.ANGLED_UPWARD,
-        angle_degrees=30.0,  # Steeper angle for better natural convection
-        distance_from_diffuser=0.12
-    )
-    
-    # Create minimal inlet duct
-    inlet_duct = RearRadiatorDuct(
-        duct_type=DuctType.TOP_INLET,  # Direct top inlet for simplicity
-        inlet_area=0.025,
-        outlet_area=0.03,
-        duct_length=0.25,
-        duct_efficiency=0.75
-    )
-    
-    # Create minimal outlet duct
-    outlet_duct = RearRadiatorDuct(
-        duct_type=DuctType.CUSTOM,
-        inlet_area=0.03,
-        outlet_area=0.035,
-        duct_length=0.1,
-        duct_efficiency=0.85
-    )
-    
-    # Create lightweight single fan
-    cooling_fan = CoolingFan(
-        fan_type=FanType.SINGLE_SPEED,  # Simpler fan control
-        max_airflow=0.2,
-        diameter=0.25
-    )
-    
-    # Create complete system
-    system = RearRadiatorSystem(
-        rear_radiator=rear_radiator,
-        inlet_duct=inlet_duct,
-        outlet_duct=outlet_duct,
-        cooling_fan=cooling_fan
-    )
-    
-    return system
+    """Create a minimal weight rear radiator system."""
+    try:
+        base_radiator = Radiator(radiator_type=RadiatorType.SINGLE_CORE_ALUMINUM, core_area=0.14, core_thickness=0.035, tube_rows=1)
+        rear_radiator = RearRadiator(base_radiator, mounting_position=MountingPosition.ANGLED_UPWARD, angle_degrees=30.0)
+        inlet_duct = RearRadiatorDuct(duct_type=DuctType.TOP_INLET, inlet_area_m2=0.025, outlet_area_m2=0.03)
+        outlet_duct = RearRadiatorDuct(duct_type=DuctType.CUSTOM, inlet_area_m2=0.03, outlet_area_m2=0.035, length_m=0.1)
+        cooling_fan = CoolingFan(fan_type=FanType.SINGLE_SPEED, max_airflow_m3s=0.2, diameter_m=0.25, weight_kg=0.4) # Lighter fan
+        return RearRadiatorSystem(rear_radiator, inlet_duct, outlet_duct, cooling_fan)
+    except Exception as e:
+        logger.error(f"Error creating minimal weight rear radiator: {e}. Using default.")
+        return create_default_rear_radiator_system()
 
 
-# Example usage
+# Example Usage
 if __name__ == "__main__":
-    # Create an optimized rear radiator system
-    system = create_optimized_rear_radiator_system()
-    
-    print("Rear Radiator System Specifications:")
-    specs = system.get_system_specs()
-    
-    # Print radiator specs
-    print("\nRadiator:")
-    for key, value in specs['radiator'].items():
-        print(f"  {key}: {value}")
-    
-    # Print inlet duct specs
-    print("\nInlet Duct:")
-    for key, value in specs['inlet_duct'].items():
-        print(f"  {key}: {value}")
-    
-    # Test performance at different speeds
-    print("\nPerformance Analysis:")
-    vehicle_speeds = np.linspace(0, 30, 7)  # 0-30 m/s (0-108 km/h)
-    
-    # Run performance analysis
-    performance = system.analyze_performance(
-        vehicle_speed_range=vehicle_speeds,
-        coolant_temp=90.0,
-        ambient_temp=25.0,
-        coolant_flow_rate=50.0
-    )
-    
-    # Print performance at key speeds
-    print("\nAirflow and Heat Rejection:")
-    print("  Speed (m/s) | Airflow (m³/s) | Heat Rejection (kW) | Drag (N)")
-    print("  " + "-" * 65)
-    
-    for i, speed in enumerate(performance['vehicle_speeds']):
-        airflow = performance['airflows'][i]
-        heat_rej = performance['heat_rejections'][i] / 1000  # Convert to kW
-        drag = performance['drags'][i]
-        print(f"  {speed:6.1f}      | {airflow:7.3f}      | {heat_rej:10.2f}        | {drag:6.1f}")
-    
-    # Plot performance curves
-    system.plot_performance_curves(performance)
-    
-    print("\nAnalysis complete!")
+    opt_system = create_optimized_rear_radiator_system()
+    print("\n--- Optimized Rear Radiator System Specs ---")
+    specs = opt_system.get_system_specs()
+    # Use yaml dump for cleaner printing of nested dicts
+    print(yaml.dump(specs, default_flow_style=False, sort_keys=False))
+
+    print("\n--- Analyzing Optimized System Performance ---")
+    speeds = np.linspace(0, 30, 11)
+    perf_data = opt_system.analyze_performance(speeds)
+
+    print("\nPerformance Summary:")
+    print("Speed (m/s) | Airflow (m³/s) | Heat Rej (kW) | Drag (N)")
+    print("-" * 55)
+    for i, speed in enumerate(perf_data['vehicle_speeds_mps']):
+        airflow = perf_data['airflows'][i]
+        heat_rej_kw = perf_data['heat_rejections'][i] / 1000.0
+        drag = perf_data['drags'][i]
+        print(f"{speed:^11.1f} | {airflow:^14.3f} | {heat_rej_kw:^15.2f} | {drag:^8.1f}")
+
+    # Plotting (requires utils.plotting)
+    try:
+         from ..utils.plotting import set_plot_style
+         set_plot_style('clean')
+         opt_system.plot_performance_curves(perf_data) # Show plot
+         # opt_system.plot_performance_curves(perf_data, save_path="plots/rear_radiator_optimized_perf.png") # Save plot
+    except ImportError:
+         print("\nPlotting skipped: utils.plotting not found.")
+    except Exception as e:
+        print(f"\nPlotting error: {e}")

@@ -1,14 +1,35 @@
 ﻿# Track Generator Configuration
 
 # Default track generation parameters
-track_width: 3.0  # meters
-min_length: 200   # meters
-max_length: 300   # meters
-curvature_threshold: 0.267  # 1/3.75
+generation:
+  track_width: 3.0              # meters - Standard FS track width
+  min_length: 250               # meters - Minimum desired track centerline length
+  max_length: 450               # meters - Maximum desired track centerline length
+  curvature_threshold: 0.3      # 1/radius (e.g., 0.3 corresponds to ~3.33m radius) - maximum allowed curvature
+  straight_threshold: 0.05      # 1/radius (e.g., 0.05 corresponds to 20m radius) - curvature below this is considered straight
+  min_straight_length: 10.0     # meters - Minimum length for a straight section
+  cone_spacing: 3.5             # meters - Target spacing between cones along boundaries
+  n_points_voronoi: 60          # Number of initial points for Voronoi diagram
+  n_regions_select: 20          # Number of Voronoi regions to select for track shape
+  max_bounds: 150.0             # meters - Maximum extent of the generation area
+  min_bounds: 0.0               # meters - Minimum extent of the generation area
 
 # Generation mode preference
-preferred_mode: "extend"  # One of: "expand", "extend", "random"
+preferred_mode: "EXTEND"        # Options: "EXPAND", "EXTEND", "RANDOM" (controls Voronoi region selection)
+
+# Start/Finish line parameters
+start_finish:
+  min_straight_length: 15.0     # meters - Minimum straight length required for start/finish area
+  start_box_width: 5.0          # meters - Width of the start box area
 
 # Visualization settings
-visualize_generation: true
-visualize_results: true
+visualization:
+  visualize_voronoi: false      # Show intermediate Voronoi diagram plot
+  visualize_track: true         # Show final track plot after generation
+  save_plots: true              # Save visualization plots to file
+
+# Output settings
+output:
+  default_format: "FSDS"        # Default export format (Options: "FSSIM", "FSDS", "GPX")
+  base_output_dir: "data/output/tracks" # Base directory for generated tracks
+  metadata_filename: "track_metadata.csv" # File to store metadata of generated tracks

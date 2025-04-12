@@ -1,12 +1,5 @@
 """
-Vehicle module for Formula Student powertrain simulation.
-
-This module defines the Vehicle class, which integrates all powertrain components
-(engine, transmission, thermal systems) and provides methods for simulating
-vehicle dynamics, calculating performance metrics, and visualizing results.
-
-The Vehicle class serves as the central point of the powertrain simulation,
-connecting all subsystems and enabling comprehensive vehicle performance analysis.
+Vehicle model integrating powertrain, thermal, and basic dynamics.
 """
 
 import os
@@ -16,1696 +9,837 @@ import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional, Union, Callable
 import yaml
 import logging
+import copy
 
-# Import powertrain components
-from ..engine import MotorcycleEngine, TorqueCurve
-from ..transmission import DrivetrainSystem, CASSystem, StrategyManager
-from ..thermal import CoolingSystem, DualSidePodSystem, RearRadiatorSystem, CoolingAssistSystem
+# Import powertrain components (handle potential errors)
+try:
+    from ..engine.motorcycle_engine import MotorcycleEngine
+    from ..engine.engine_thermal import EngineHeatModel, ThermalConfig # Assuming thermal model is here
+    from ..transmission.gearing import DrivetrainSystem, Transmission, FinalDrive, Differential
+    from ..transmission.cas_system import CASSystem, ShiftDirection
+    from ..transmission.shift_strategy import StrategyManager, create_formula_student_strategies, StrategyType
+    # Import primary cooling system interface (adjust if needed)
+    # Alias ExternalCoolingSystem to avoid name clash with EngineCoolingSystemComponent if both exist
+    from ..thermal.cooling_system import CoolingSystem as ExternalCoolingSystem
+    from ..thermal.cooling_system import create_formula_student_cooling_system # Import factory
+    from ..thermal.side_pod import DualSidePodSystem, create_standard_side_pod_system
+    from ..thermal.rear_radiator import RearRadiatorSystem, create_default_rear_radiator_system
+    from ..thermal.electric_compressor import CoolingAssistSystem, create_default_cooling_assist_system
+    from ..utils.constants import GRAVITY, AIR_DENSITY_SEA_LEVEL, KW_TO_HP, HP_TO_KW, MS_TO_KMH, MS_TO_MPH
+    from ..utils.plotting import plot_vehicle_performance_summary, plot_acceleration_results as plot_accel_results_util, save_plot
+    from ..performance.lap_time import CorneringPerformance # For cornering calcs
+except ImportError as e:
+    # Define placeholders if imports fail (e.g., for testing)
+    logger = logging.getLogger("Vehicle_Fallback")
+    logger.error(f"Error importing vehicle components: {e}. Using placeholders.")
+    class MotorcycleEngine: pass
+    class DrivetrainSystem: pass
+    class Transmission: pass
+    class FinalDrive: pass
+    class Differential: pass
+    class CASSystem: pass
+    class StrategyManager: pass
+    class ExternalCoolingSystem: pass
+    class DualSidePodSystem: pass
+    class RearRadiatorSystem: pass
+    class CoolingAssistSystem: pass
+    class EngineHeatModel: pass
+    class ThermalConfig: pass
+    class CorneringPerformance: pass
+    def create_formula_student_strategies(*args, **kwargs): return None
+    def create_standard_side_pod_system(*args, **kwargs): return None
+    def create_default_rear_radiator_system(*args, **kwargs): return None
+    def create_default_cooling_assist_system(*args, **kwargs): return None
+    def create_formula_student_cooling_system(*args, **kwargs): return None
+    def plot_vehicle_performance_summary(*args, **kwargs): plt.figure(); plt.plot([0,1]); plt.title("Fallback Plot"); plt.show(); plt.close(); return plt.gcf()
+    def plot_accel_results_util(*args, **kwargs): plt.figure(); plt.plot([0,1]); plt.title("Fallback Plot"); plt.show(); plt.close(); return plt.gcf()
+    def save_plot(fig, path, **kwargs): pass
+    GRAVITY = 9.81; AIR_DENSITY_SEA_LEVEL = 1.225; KW_TO_HP = 1.341; HP_TO_KW = 1/KW_TO_HP; MS_TO_KMH = 3.6; MS_TO_MPH = 2.237
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
 logger = logging.getLogger("Vehicle")
 
 
 class Vehicle:
     """
-    Complete vehicle model for Formula Student powertrain simulation.
-    
-    This class integrates all powertrain components (engine, transmission, cooling)
-    into a complete vehicle model and provides methods for simulating vehicle
-    dynamics, calculating performance metrics, and analyzing results.
+    Integrates powertrain components into a simulated Formula Student vehicle.
+    Handles basic longitudinal dynamics, component interactions, and state updates.
     """
-    
-    def __init__(self, 
+
+    def __init__(self,
                  config_path: Optional[str] = None,
                  engine: Optional[MotorcycleEngine] = None,
                  drivetrain: Optional[DrivetrainSystem] = None,
-                 cooling_system: Optional[CoolingSystem] = None,
+                 cooling_system: Optional[ExternalCoolingSystem] = None, # Main external cooling
+                 shift_manager: Optional[StrategyManager] = None,
+                 cas_system: Optional[CASSystem] = None,
+                 side_pods: Optional[DualSidePodSystem] = None,
+                 rear_radiator: Optional[RearRadiatorSystem] = None,
+                 cooling_assist: Optional[CoolingAssistSystem] = None,
                  team_name: str = "KCL Formula Student"):
         """
         Initialize the vehicle model.
-        
+
         Args:
-            config_path: Path to vehicle configuration file
-            engine: Optional pre-configured engine
-            drivetrain: Optional pre-configured drivetrain
-            cooling_system: Optional pre-configured cooling system
-            team_name: Team name for identification
+            config_path: Path to the main vehicle YAML configuration file.
+            engine, drivetrain, etc.: Optional pre-configured component instances.
+            team_name: Identifying name for the vehicle/team.
         """
         self.team_name = team_name
-        
-        # Default vehicle parameters
-        self.mass = 230.0  # kg, typical for FS car with driver
-        self.frontal_area = 1.0  # m²
-        self.drag_coefficient = 0.8  # Typical for open-wheel race car
-        self.lift_coefficient = -1.5  # Negative for downforce
-        self.rolling_resistance = 0.015  # Typical for racing tires
-        
-        # Tire parameters
-        self.tire_radius = 0.2286  # m (9-inch for 13-inch wheels)
-        self.tire_width = 0.18  # m
-        self.tire_rolling_circumference = 2 * np.pi * self.tire_radius
-        
-        # Performance parameters
-        self.weight_distribution_front = 0.45  # 45% front, 55% rear
-        self.wheelbase = 1.6  # m
-        self.track_width_front = 1.2  # m
-        self.track_width_rear = 1.15  # m
-        self.cg_height = 0.3  # m
-        
-        # Initialize subsystems
-        self.engine = engine
-        self.drivetrain = drivetrain
-        self.cooling_system = cooling_system
-        self.shift_manager = None
-        self.cas_system = None
-        self.side_pods = None
-        self.rear_radiator = None
-        self.cooling_assist = None
-        
-        self.engine_temperature = 25.0  # °C
-        self.coolant_temperature = 25.0  # °C
-        self.oil_temperature = 25.0  # °C
-        self.thermal_factor = 1.0  # Performance multiplier based on temperature
-        self.engine.thermal_factor = 1.0  # Initialize thermal performance factor
-        
-        # Current state
-        self.current_gear = 0  # Neutral
-        self.current_speed = 0.0  # m/s
-        self.current_acceleration = 0.0  # m/s²
-        self.current_position = 0.0  # m
-        self.current_engine_rpm = 0.0  # RPM
-        self.current_engine_torque = 0.0  # Nm
-        self.current_wheel_torque = 0.0  # Nm
-        self.current_throttle = 0.0  # 0-1
-        self.current_brake = 0.0  # 0-1
-        
-        # Load configuration if provided
-        if config_path:
+        self.config_path = config_path
+        self.config: Dict = {} # Stores loaded configuration
+
+        # --- Default Vehicle Parameters ---
+        self.mass: float = 230.0
+        self.frontal_area_m2: float = 1.1
+        self.drag_coefficient: float = 1.0
+        self.lift_coefficient: float = -2.0
+        self.rolling_resistance_coeff: float = 0.015
+        self.weight_distribution_front: float = 0.48
+        self.wheelbase_m: float = 1.58
+        self.track_width_front_m: float = 1.20
+        self.track_width_rear_m: float = 1.15
+        self.cg_height_m: float = 0.28
+        self.tire_radius_m: float = 0.2286
+
+        # Load config first
+        if config_path and os.path.exists(config_path):
             self.load_config(config_path)
-        
-        # Create default subsystems if not provided
-        self._initialize_subsystems()
-        
-        logger.info(f"{team_name} Formula Student vehicle initialized")
-    
+        elif config_path:
+            logger.warning(f"Vehicle config file not found: {config_path}. Using defaults.")
+
+        # --- Component Initialization ---
+        self._initialize_engine(engine)
+        self._initialize_drivetrain(drivetrain)
+        # Pass self to cooling system init for potential back-references if needed by factories
+        self._initialize_cooling_system(cooling_system, self)
+        self._initialize_shifting_systems(shift_manager, cas_system)
+        self._initialize_aero_cooling(side_pods, rear_radiator, cooling_assist)
+
+        # Initialize Cornering Performance calculator after core components
+        self.cornering = CorneringPerformance(self)
+
+        # --- Current State Variables ---
+        self.current_speed_mps: float = 0.0
+        self.current_acceleration_mpss: float = 0.0
+        self.current_position_m: float = 0.0 # Longitudinal position
+        self.current_gear: int = 0 # Neutral initially
+        self.current_engine_rpm: float = self.engine.idle_rpm if self.engine else 0.0
+        # Control inputs (driver commands)
+        self.throttle_input: float = 0.0
+        self.brake_input: float = 0.0
+        self.steering_angle_rad: float = 0.0
+
+        # Internal simulation state
+        self.last_update_time: float = 0.0
+
+        # Initialize thermal state from engine if possible
+        self.engine_temperature = getattr(self.engine, 'engine_temperature', 25.0)
+        self.coolant_temperature = getattr(self.engine, 'coolant_temperature', 25.0)
+        self.oil_temperature = getattr(self.engine, 'oil_temperature', 25.0)
+
+        logger.info(f"{self.team_name} Vehicle initialized. Mass: {self.mass:.1f} kg")
+
     def load_config(self, config_path: str):
-        """
-        Load vehicle configuration from YAML file.
-        
-        Args:
-            config_path: Path to vehicle configuration file
-        """
+        """Load vehicle base parameters from YAML file."""
         if not os.path.exists(config_path):
-            logger.warning(f"Configuration file not found: {config_path}")
+            logger.error(f"Vehicle configuration file not found: {config_path}")
             return
-        
         try:
             with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-            
-            # Load vehicle parameters
-            if 'vehicle' in config:
-                vehicle_config = config['vehicle']
-                self.mass = vehicle_config.get('mass', self.mass)
-                self.frontal_area = vehicle_config.get('frontal_area', self.frontal_area)
-                self.drag_coefficient = vehicle_config.get('drag_coefficient', self.drag_coefficient)
-                self.lift_coefficient = vehicle_config.get('lift_coefficient', self.lift_coefficient)
-                self.rolling_resistance = vehicle_config.get('rolling_resistance', self.rolling_resistance)
-                self.weight_distribution_front = vehicle_config.get('weight_distribution_front', self.weight_distribution_front)
-                self.wheelbase = vehicle_config.get('wheelbase', self.wheelbase)
-                self.track_width_front = vehicle_config.get('track_width_front', self.track_width_front)
-                self.track_width_rear = vehicle_config.get('track_width_rear', self.track_width_rear)
-                self.cg_height = vehicle_config.get('cg_height', self.cg_height)
-            
-            # Load tire parameters
-            if 'tires' in config:
-                tire_config = config['tires']
-                self.tire_radius = tire_config.get('radius', self.tire_radius)
-                self.tire_width = tire_config.get('width', self.tire_width)
-                self.tire_rolling_circumference = 2 * np.pi * self.tire_radius
-            
-            # Store full configuration for subsystem initialization
-            self.config = config
-            
-            logger.info(f"Vehicle configuration loaded from {config_path}")
-        
+                self.config = yaml.safe_load(f) or {} # Ensure config is a dict
+
+            vehicle_cfg = self.config.get('vehicle', {})
+            self.mass = float(vehicle_cfg.get('mass', self.mass))
+            self.frontal_area_m2 = float(vehicle_cfg.get('frontal_area_m2', self.frontal_area_m2))
+            self.drag_coefficient = float(vehicle_cfg.get('drag_coefficient', self.drag_coefficient))
+            self.lift_coefficient = float(vehicle_cfg.get('lift_coefficient', self.lift_coefficient))
+            self.rolling_resistance_coeff = float(vehicle_cfg.get('rolling_resistance_coeff', self.rolling_resistance_coeff))
+            self.weight_distribution_front = float(vehicle_cfg.get('weight_distribution_front', self.weight_distribution_front))
+            self.wheelbase_m = float(vehicle_cfg.get('wheelbase_m', self.wheelbase_m))
+            self.track_width_front_m = float(vehicle_cfg.get('track_width_front_m', self.track_width_front_m))
+            self.track_width_rear_m = float(vehicle_cfg.get('track_width_rear_m', self.track_width_rear_m))
+            self.cg_height_m = float(vehicle_cfg.get('cg_height_m', self.cg_height_m))
+
+            tire_cfg = self.config.get('tires', {})
+            self.tire_radius_m = float(tire_cfg.get('radius_m', self.tire_radius_m))
+
+            logger.info(f"Vehicle base parameters loaded from {config_path}")
+
         except Exception as e:
-            logger.error(f"Error loading configuration: {str(e)}")
-    
-    def _initialize_subsystems(self):
-        """Initialize vehicle subsystems if not already provided."""
-        # Initialize engine if not provided
-        if self.engine is None:
-            try:
-                # Try to create engine from config
-                if hasattr(self, 'config') and 'engine' in self.config:
-                    engine_config = self.config['engine']
-                    if 'config_path' in engine_config:
-                        self.engine = MotorcycleEngine(config_path=engine_config['config_path'])
-                    else:
-                        self.engine = MotorcycleEngine(engine_params=engine_config)
-                else:
-                    # Create default engine
-                    from ..engine import MotorcycleEngine
-                    config_path = os.path.join("configs", "engine", "cbr600f4i.yaml")
-                    if os.path.exists(config_path):
-                        self.engine = MotorcycleEngine(config_path=config_path)
-                    else:
-                        self.engine = MotorcycleEngine()  # Default parameters
-                
-                logger.info("Engine initialized")
-            
-            except Exception as e:
-                logger.error(f"Error initializing engine: {str(e)}")
-                self.engine = MotorcycleEngine()  # Create with defaults
-        
-        # Initialize drivetrain if not provided
-        if self.drivetrain is None:
-            try:
-                # Try to create drivetrain from config
-                from ..transmission import Transmission, FinalDrive, Differential, DrivetrainSystem
-                
-                # Default gear ratios (Honda CBR600F4i)
-                gear_ratios = [2.750, 2.000, 1.667, 1.444, 1.304, 1.208]
-                
-                if hasattr(self, 'config') and 'transmission' in self.config:
-                    trans_config = self.config['transmission']
-                    
-                    # Get gear ratios
-                    if 'gear_ratios' in trans_config:
-                        gear_ratios = trans_config['gear_ratios']
-                    
-                    # Create transmission
-                    transmission = Transmission(gear_ratios)
-                    
-                    # Create final drive
-                    fd_config = trans_config.get('final_drive', {})
-                    drive_teeth = fd_config.get('drive_sprocket_teeth', 14)
-                    driven_teeth = fd_config.get('driven_sprocket_teeth', 53)
-                    final_drive = FinalDrive(drive_teeth, driven_teeth)
-                    
-                    # Create differential
-                    diff_config = trans_config.get('differential', {})
-                    locked = diff_config.get('locked', True)
-                    differential = Differential(locked=locked)
-                    
-                    # Create drivetrain
-                    self.drivetrain = DrivetrainSystem(
-                        transmission, final_drive, differential, 
-                        wheel_radius=self.tire_radius
-                    )
-                else:
-                    # Create default drivetrain
-                    transmission = Transmission(gear_ratios)
-                    final_drive = FinalDrive(14, 53)  # Common for FS
-                    differential = Differential(locked=True)  # Solid axle for FS
-                    
-                    self.drivetrain = DrivetrainSystem(
-                        transmission, final_drive, differential, 
-                        wheel_radius=self.tire_radius
-                    )
-                
-                logger.info("Drivetrain initialized")
-                
-                # Initialize shifting systems
-                self._initialize_shifting_systems()
-                
-            except Exception as e:
-                logger.error(f"Error initializing drivetrain: {str(e)}")
-                # Create minimal drivetrain with defaults
-                from ..transmission import Transmission, FinalDrive, Differential, DrivetrainSystem
-                transmission = Transmission([2.750, 2.000, 1.667, 1.444, 1.304, 1.208])
-                final_drive = FinalDrive(14, 53)
-                differential = Differential(locked=True)
-                self.drivetrain = DrivetrainSystem(
-                    transmission, final_drive, differential, 
-                    wheel_radius=self.tire_radius
-                )
-        
-        # Initialize cooling system if not provided
-        if self.cooling_system is None:
-            try:
-                # Try to create cooling system from config
-                from ..thermal import create_formula_student_cooling_system
+            logger.error(f"Error loading vehicle config from {config_path}: {e}")
+
+
+    def _initialize_engine(self, engine_instance: Optional[MotorcycleEngine]):
+        """Initialize the engine component."""
+        if isinstance(engine_instance, MotorcycleEngine):
+            self.engine = engine_instance
+            logger.info("Using pre-configured Engine instance.")
+        else:
+            engine_config_ref = self.config.get('engine')
+            if isinstance(engine_config_ref, str) and os.path.exists(engine_config_ref):
+                logger.info(f"Initializing Engine from config file: {engine_config_ref}")
+                self.engine = MotorcycleEngine(config_path=engine_config_ref)
+            elif isinstance(engine_config_ref, dict):
+                logger.info("Initializing Engine from inline config.")
+                self.engine = MotorcycleEngine(engine_params=engine_config_ref)
+            else:
+                logger.warning("No valid engine config found. Creating default MotorcycleEngine.")
+                self.engine = MotorcycleEngine()
+
+        # Ensure essential attributes
+        for attr, default in [('idle_rpm', 1300.0), ('redline_rpm', 14000.0),
+                              ('max_torque_nm', 65.0), ('engine_temperature', 25.0),
+                              ('coolant_temperature', 25.0), ('oil_temperature', 25.0),
+                              ('thermal_factor', 1.0)]:
+            if not hasattr(self.engine, attr): setattr(self.engine, attr, default)
+
+
+    def _initialize_drivetrain(self, drivetrain_instance: Optional[DrivetrainSystem]):
+        """Initialize the drivetrain component."""
+        if isinstance(drivetrain_instance, DrivetrainSystem):
+            self.drivetrain = drivetrain_instance
+            logger.info("Using pre-configured Drivetrain instance.")
+        else:
+             # Try loading from config
+             dt_config_ref = self.config.get('drivetrain')
+             trans_config_ref = self.config.get('transmission') # Allow separate file/dict
+             fd_config_ref = self.config.get('final_drive')
+             diff_config_ref = self.config.get('differential')
+
+             transmission = None
+             final_drive = None
+             differential = None
+
+             # Load Transmission
+             if isinstance(trans_config_ref, str) and os.path.exists(trans_config_ref):
+                  with open(trans_config_ref, 'r') as f: trans_params = yaml.safe_load(f).get('transmission', {})
+                  transmission = Transmission(**trans_params)
+             elif isinstance(trans_config_ref, dict):
+                  transmission = Transmission(**trans_config_ref)
+             else: # Default
+                  transmission = Transmission([2.750, 2.000, 1.667, 1.444, 1.304, 1.208])
+
+             # Load Final Drive
+             if isinstance(fd_config_ref, str) and os.path.exists(fd_config_ref):
+                  with open(fd_config_ref, 'r') as f: fd_params = yaml.safe_load(f).get('final_drive', {})
+                  final_drive = FinalDrive(**fd_params)
+             elif isinstance(fd_config_ref, dict):
+                  final_drive = FinalDrive(**fd_config_ref)
+             else: # Default
+                  final_drive = FinalDrive(14, 53)
+
+             # Load Differential
+             if isinstance(diff_config_ref, str) and os.path.exists(diff_config_ref):
+                 with open(diff_config_ref, 'r') as f: diff_params = yaml.safe_load(f).get('differential', {})
+                 differential = Differential(**diff_params)
+             elif isinstance(diff_config_ref, dict):
+                 differential = Differential(**diff_config_ref)
+             else: # Default
+                 differential = Differential(locked=True)
+
+             self.drivetrain = DrivetrainSystem(transmission, final_drive, differential, self.tire_radius_m)
+             logger.info("Drivetrain initialized from config/defaults.")
+
+        if not hasattr(self.drivetrain, 'num_gears'): # Ensure attribute exists
+             self.drivetrain.num_gears = len(getattr(self.drivetrain.transmission, 'gear_ratios', []))
+
+
+    def _initialize_cooling_system(self, cooling_instance: Optional[ExternalCoolingSystem], vehicle_ref):
+        """Initialize the main external cooling system."""
+        if isinstance(cooling_instance, ExternalCoolingSystem):
+            self.cooling_system = cooling_instance
+            logger.info("Using pre-configured external CoolingSystem instance.")
+        else:
+            cooling_config_ref = self.config.get('cooling_system')
+            if isinstance(cooling_config_ref, str) and os.path.exists(cooling_config_ref):
+                logger.info(f"Initializing external CoolingSystem from config file: {cooling_config_ref}")
+                # Assume config file contains component details or use factory
+                self.cooling_system = create_formula_student_cooling_system(config_dir=os.path.dirname(cooling_config_ref))
+            elif isinstance(cooling_config_ref, dict):
+                 logger.info("Initializing external CoolingSystem from inline config.")
+                 # Manually create components from dict - requires component classes
+                 try:
+                      rad_cfg = cooling_config_ref.get('radiator', {})
+                      pump_cfg = cooling_config_ref.get('water_pump', {})
+                      fan_cfg = cooling_config_ref.get('cooling_fan', {})
+                      thermo_cfg = cooling_config_ref.get('thermostat', {})
+                      system_cfg = cooling_config_ref.get('system', {})
+
+                      from ..thermal.cooling_system import Radiator, WaterPump, CoolingFan, Thermostat
+                      radiator = Radiator(**rad_cfg) if rad_cfg else Radiator()
+                      pump = WaterPump(**pump_cfg) if pump_cfg else WaterPump()
+                      fan = CoolingFan(**fan_cfg) if fan_cfg else None # Fan optional
+                      thermostat = Thermostat(**thermo_cfg) if thermo_cfg else Thermostat()
+
+                      self.cooling_system = ExternalCoolingSystem(radiator, pump, fan, thermostat, **system_cfg)
+                 except Exception as e:
+                      logger.error(f"Failed to create cooling system from inline config: {e}. Creating default.")
+                      self.cooling_system = create_formula_student_cooling_system()
+            else:
+                logger.info("No cooling system config found. Creating default FS cooling system.")
                 self.cooling_system = create_formula_student_cooling_system()
-                
-                # Try to initialize side pods
-                self._initialize_thermal_systems()
-                
-                logger.info("Cooling system initialized")
-            
-            except Exception as e:
-                logger.error(f"Error initializing cooling system: {str(e)}")
-                # Create default cooling system
-                from ..thermal import create_formula_student_cooling_system
-                self.cooling_system = create_formula_student_cooling_system()
-    
-    def _initialize_shifting_systems(self):
-        """Initialize shifting strategy and CAS system."""
-        try:
-            from ..transmission import (
-                create_formula_student_strategies, CASSystem,
-                MaxAccelerationStrategy
-            )
-            
-            # Initialize shift strategy manager
+
+        # Ensure essential cooling system attributes exist
+        if not hasattr(self.cooling_system, 'coolant_temp_C'): self.cooling_system.coolant_temp_C = 25.0
+
+
+    def _initialize_shifting_systems(self, manager_instance: Optional[StrategyManager], cas_instance: Optional[CASSystem]):
+        """Initialize shift manager and CAS system."""
+        if isinstance(manager_instance, StrategyManager):
+            self.shift_manager = manager_instance
+            logger.info("Using pre-configured StrategyManager instance.")
+        else:
+            # Create default FS strategies
             if self.engine and self.drivetrain:
-                # Create strategies
-                self.shift_manager = create_formula_student_strategies(
-                    self.engine.redline,
-                    self.engine.max_power_rpm,
-                    self.engine.max_torque_rpm,
-                    self.drivetrain.transmission.gear_ratios,
-                    self.drivetrain.wheel_radius,
-                    self.mass
-                )
-                
-                # Create CAS system
-                self.cas_system = CASSystem(
-                    self.drivetrain.transmission.gear_ratios,
-                    self.engine
-                )
-                
-                logger.info("Shifting systems initialized")
-        except Exception as e:
-            logger.error(f"Error initializing shifting systems: {str(e)}")
-    def update_thermal_state(self, dt: float):
-        """
-        Update the vehicle's thermal state based on engine operation and cooling system.
-        
-        Args:
-            dt: Time step in seconds
-        """
-        if not hasattr(self, 'engine') or self.engine is None:
-            return
-        
-        # Get the current operating conditions
-        engine_rpm = self.current_engine_rpm
-        throttle = self.current_throttle
-        
-        # Calculate heat generation based on operating conditions
-        # More heat is generated at higher RPM and throttle settings
-        rpm_factor = min(1.0, engine_rpm / self.engine.redline)
-        heat_factor = 0.2 + 0.8 * rpm_factor * throttle
-        
-        # Base heat generation (in Watts)
-        base_heat = 20000  # 20 kW at maximum
-        heat_generated = base_heat * heat_factor
-        
-        # Calculate cooling effectiveness based on cooling system and vehicle speed
-        cooling_effectiveness = 0.3  # Base cooling (natural convection)
-        
-        # Add radiator cooling effect if available
-        if hasattr(self, 'cooling_system') and self.cooling_system is not None:
-            # Calculate vehicle speed effect
-            speed_factor = min(1.0, self.current_speed / 20.0)  # Normalized to 20 m/s
-            
-            # Get radiator type factor
-            rad_type_factor = 1.0  # Default
-            if hasattr(self.cooling_system, 'radiator') and hasattr(self.cooling_system.radiator, 'radiator_type'):
-                rad_type = self.cooling_system.radiator.radiator_type.name
-                if rad_type == "DOUBLE_CORE_ALUMINUM":
-                    rad_type_factor = 1.3
-                elif rad_type == "SINGLE_CORE_COPPER":
-                    rad_type_factor = 1.2
-                elif rad_type == "SINGLE_CORE_ALUMINUM":
-                    rad_type_factor = 1.0
-                    
-            # Get radiator size factor
-            rad_size_factor = 1.0  # Default
-            if hasattr(self.cooling_system.radiator, 'core_area'):
-                reference_size = 0.15  # m²
-                rad_size_factor = min(1.5, max(0.6, self.cooling_system.radiator.core_area / reference_size))
-            
-            # Calculate radiator effectiveness
-            radiator_effectiveness = 0.6 * rad_type_factor * rad_size_factor
-            
-            # Side pod effect
-            side_pod_factor = 1.0
-            if hasattr(self, 'side_pod_system') and self.side_pod_system is not None:
-                side_pod_factor = 1.2  # 20% improvement with side pods
-            
-            # Rear radiator effect
-            rear_rad_factor = 1.0
-            if hasattr(self, 'rear_radiator') and self.rear_radiator is not None:
-                rear_rad_factor = 1.15  # 15% improvement with rear radiator
-            
-            # Electric cooling assist effect
-            assist_factor = 1.0
-            if hasattr(self, 'cooling_assist') and self.cooling_assist is not None:
-                # More impact at low speeds
-                assist_effect = max(0.0, 0.3 - 0.015 * self.current_speed)
-                assist_factor = 1.0 + assist_effect
-            
-            # Calculate vehicle speed cooling effect
-            speed_cooling = 0.3 * speed_factor
-            
-            # Calculate fan cooling effect
-            fan_cooling = 0.0
-            if hasattr(self.cooling_system, 'cooling_fan'):
-                fan_duty = self.cooling_system.cooling_fan.current_duty_cycle
-                fan_cooling = 0.15 * fan_duty * (1.0 - min(1.0, speed_factor * 1.5))
-            
-            # Combine all cooling effects
-            cooling_effectiveness = (speed_cooling + fan_cooling) * radiator_effectiveness * side_pod_factor * rear_rad_factor * assist_factor
-        
-        # Heat dissipation based on cooling effectiveness and temperature difference
-        ambient_temp = 25.0  # Default ambient temperature (°C)
-        temp_diff = self.engine.engine_temperature - ambient_temp
-        heat_dissipated = cooling_effectiveness * temp_diff * 500  # Scaling factor for heat transfer
-        
-        # Net heat = generated - dissipated
-        net_heat = heat_generated - heat_dissipated
-        
-        # Temperature change (simplified model)
-        engine_thermal_mass = 50000  # J/°C, thermal mass of engine block and coolant
-        temp_change = net_heat * dt / engine_thermal_mass
-        
-        # Update engine temperature
-        new_temp = self.engine.engine_temperature + temp_change
-        
-        # Limit temperature rise rate
-        max_rate = 5.0 * dt  # Maximum temperature change per time step (°C)
-        if abs(temp_change) > max_rate:
-            temp_change = np.sign(temp_change) * max_rate
-            new_temp = self.engine.engine_temperature + temp_change
-        
-        # Update engine thermal state
-        self.engine.engine_temperature = new_temp
-        self.engine.coolant_temperature = new_temp - 5.0  # Coolant slightly cooler than engine
-        self.engine.oil_temperature = new_temp - 10.0  # Oil typically cooler than coolant
-        
-        # If temperature exceeds critical, apply performance penalty
-        if hasattr(self, 'engine_critical_temp') and new_temp > self.engine_critical_temp:
-            self.engine.thermal_factor = 0.7  # Severe performance loss at critical temperature
-        elif hasattr(self, 'engine_warning_temp') and new_temp > self.engine_warning_temp:
-            self.engine.thermal_factor = 0.9  # Moderate performance loss at warning temperature
-        else:
-            self.engine.thermal_factor = 1.0  # No penalty at normal temperature
-            
-    def _initialize_thermal_systems(self):
-        """Initialize additional thermal systems (side pods, rear radiator, etc.)."""
-        try:
-            from ..thermal import (
-                create_standard_side_pod_system,
-                create_default_rear_radiator_system,
-                create_default_cooling_assist_system
+                 self.shift_manager = create_formula_student_strategies(
+                     engine_max_rpm=self.engine.redline_rpm,
+                     engine_peak_power_rpm=self.engine.max_power_rpm,
+                     engine_peak_torque_rpm=self.engine.max_torque_rpm,
+                     gear_ratios=self.drivetrain.transmission.gear_ratios,
+                     num_gears=self.drivetrain.num_gears, # Pass num_gears
+                     idle_rpm=self.engine.idle_rpm
+                 )
+                 # Optionally load strategy config to customize points
+                 strat_cfg_ref = self.config.get('shift_strategy')
+                 if isinstance(strat_cfg_ref, str) and os.path.exists(strat_cfg_ref):
+                      self.shift_manager.load_strategies_from_config(strat_cfg_ref)
+                 logger.info("Initialized default StrategyManager with FS strategies.")
+            else:
+                 logger.warning("Cannot initialize StrategyManager: Engine or Drivetrain missing.")
+                 self.shift_manager = None
+
+        if isinstance(cas_instance, CASSystem):
+            self.cas_system = cas_instance
+            logger.info("Using pre-configured CASSystem instance.")
+        elif self.drivetrain and self.engine:
+            # Load CAS config if available
+            cas_cfg_ref = self.config.get('cas_system', self.config.get('transmission')) # Check both potential locations
+            cas_config_path = None
+            if isinstance(cas_cfg_ref, str) and os.path.exists(cas_cfg_ref):
+                 cas_config_path = cas_cfg_ref
+            elif isinstance(cas_cfg_ref, dict) and 'cas' in cas_cfg_ref:
+                 # If CAS params are nested within transmission config
+                  cas_config_path = self.config_path # Pass main vehicle config to load nested dict
+
+            self.cas_system = CASSystem(
+                gear_ratios=self.drivetrain.transmission.gear_ratios,
+                engine=self.engine,
+                config_path=cas_config_path
             )
-            
-            # Create side pods
-            self.side_pods = create_standard_side_pod_system()
-            
-            # Create rear radiator
-            self.rear_radiator = create_default_rear_radiator_system()
-            
-            # Create cooling assist
-            self.cooling_assist = create_default_cooling_assist_system()
-            
-            logger.info("Additional thermal systems initialized")
-        except Exception as e:
-            logger.error(f"Error initializing additional thermal systems: {str(e)}")
-    
-    def update_engine_state(self, throttle: float, engine_rpm: float, ambient_temp: float = 25.0):
-        """
-        Update engine state based on inputs.
-        
-        Args:
-            throttle: Throttle position (0-1)
-            engine_rpm: Engine speed in RPM
-            ambient_temp: Ambient temperature in °C
-        """
-        if self.engine is None:
-            return
-        
-        # Update engine state
-        self.engine.throttle_position = max(0.0, min(1.0, throttle))
-        self.engine.current_rpm = max(self.engine.idle_rpm, min(engine_rpm, self.engine.redline))
-        
-        # Calculate torque
-        self.current_engine_torque = self.engine.get_torque(
-            self.engine.current_rpm, 
-            self.engine.throttle_position,
-            self.engine.engine_temperature
-        )
-         # Apply thermal factor if it exists
-        if hasattr(self.engine, 'thermal_factor'):
-            self.current_engine_torque *= self.engine.thermal_factor
-        
-        # Update engine thermal state if cooling system exists
-        if self.cooling_system:
-            # Get cooling effectiveness (simplified)
-            cooling_effectiveness = 0.8
-            
-            # Update engine temperatures
-            self.engine.update_thermal_state(
-                self.engine.current_rpm,
-                self.engine.throttle_position,
-                ambient_temp,
-                cooling_effectiveness,
-                0.1  # Small time step
-            )
-    
-    def update_drivetrain_state(self, gear: int):
-        """
-        Update drivetrain state based on inputs.
-        
-        Args:
-            gear: Target gear number
-        """
-        if self.drivetrain is None:
-            return
-        
-        # Update gear if changed
-        if gear != self.current_gear:
-            # Change gear in drivetrain
-            self.drivetrain.change_gear(gear)
-            self.current_gear = gear
-        
-        # Calculate wheel torque from engine torque
-        self.current_wheel_torque = self.drivetrain.calculate_wheel_torque(
-            self.current_engine_torque, self.current_gear
-        )
-    
-    def update_cooling_system(self, 
-                            coolant_temp: float = 90.0, 
-                            ambient_temp: float = 25.0, 
-                            vehicle_speed: float = 0.0):
-        """
-        Update cooling system state.
-        
-        Args:
-            coolant_temp: Coolant temperature in °C
-            ambient_temp: Ambient temperature in °C
-            vehicle_speed: Vehicle speed in m/s
-        """
-        if self.cooling_system is None:
-            return
-        
-        # Update cooling system
-        self.cooling_system.update_ambient_conditions(ambient_temp, vehicle_speed)
-        
-        # Update engine state in cooling system
-        self.cooling_system.update_engine_state(
-            self.engine.engine_temperature,
-            self.engine.current_rpm,
-            self.engine.throttle_position,
-            30000.0  # Estimated heat input (W) - would be calculated from engine
-        )
-        
-        # Create automatic control
-        self.cooling_system.create_automatic_control(
-            target_temp=90.0,
-            hysteresis=5.0
-        )
-        
-        # Update system state
-        self.cooling_system.update_system_state(0.1)  # Small time step
-    
-    def calculate_acceleration(self, 
-                             throttle: float,
-                             brake: float = 0.0,
-                             gear: Optional[int] = None,
-                             current_speed: Optional[float] = None) -> float:
-        """
-        Calculate vehicle acceleration based on current state.
-        
-        Args:
-            throttle: Throttle position (0-1)
-            brake: Brake position (0-1)
-            gear: Gear number (if None, uses current gear)
-            current_speed: Current speed in m/s (if None, uses current speed)
-            
-        Returns:
-            Acceleration in m/s²
-        """
-        # Use provided values or current state
-        if gear is None:
-            gear = self.current_gear
-        
-        if current_speed is None:
-            current_speed = self.current_speed
-        
-        # Store inputs
-        self.current_throttle = max(0.0, min(1.0, throttle))
-        self.current_brake = max(0.0, min(1.0, brake))
-        
-        # Calculate engine RPM from vehicle speed if in gear
-        if gear > 0:
-            self.current_engine_rpm = self.drivetrain.calculate_engine_speed(current_speed, gear)
+            logger.info("Initialized CASSystem.")
         else:
-            # In neutral, engine RPM is decoupled from wheels
-            self.current_engine_rpm = self.engine.idle_rpm
-        
-        # Update engine state
-        self.update_engine_state(throttle, self.current_engine_rpm)
-        
-        # Update drivetrain state
-        self.update_drivetrain_state(gear)
-        
-        # Calculate tractive force
-        if gear > 0:
-            tractive_force = self.current_wheel_torque / self.tire_radius
-        else:
-            tractive_force = 0.0  # No force in neutral
-        
-        # Calculate resistance forces
-        # Rolling resistance
-        rolling_resistance_force = self.mass * 9.81 * self.rolling_resistance
-        
-        # Aerodynamic drag
-        air_density = 1.225  # kg/m³ at sea level
-        aero_drag = 0.5 * air_density * self.drag_coefficient * self.frontal_area * current_speed**2
-        
-        # Aerodynamic downforce (affects rolling resistance)
-        downforce = 0.5 * air_density * -self.lift_coefficient * self.frontal_area * current_speed**2
-        
-        # Adjust rolling resistance with downforce
-        adjusted_rolling_resistance = rolling_resistance_force + (downforce * self.rolling_resistance)
-        
-        # Braking force
-        max_braking_force = (self.mass * 9.81 + downforce) * 1.5  # 1.5g deceleration
-        braking_force = max_braking_force * self.current_brake
-        
-        # Net force
-        net_force = tractive_force - adjusted_rolling_resistance - aero_drag - braking_force
-        
-        # Calculate acceleration (F = ma)
-        acceleration = net_force / self.mass
-        
-        # Store current acceleration
-        self.current_acceleration = acceleration
-        
-        return acceleration
-    
-    def update_vehicle_state(self, dt: float = 0.01):
-        """
-        Update vehicle state over a time step.
-        
-        Args:
-            dt: Time step in seconds
-        """
-        # Update speed based on acceleration
-        self.current_speed += self.current_acceleration * dt
-        self.current_speed = max(0.0, self.current_speed)  # Prevent negative speed
-        
-        # Update position
-        self.current_position += self.current_speed * dt
-        
-        # Update engine RPM based on speed
+             logger.warning("Cannot initialize CASSystem: Engine or Drivetrain missing.")
+             self.cas_system = None
+
+    def _initialize_aero_cooling(self, side_pods_instance, rear_rad_instance, assist_instance):
+        """Initialize optional side pods, rear radiator, cooling assist."""
+        if isinstance(side_pods_instance, DualSidePodSystem):
+            self.side_pods = side_pods_instance
+        elif self.config.get('side_pods'):
+             # Logic to load/create from config
+             self.side_pods = create_standard_side_pod_system() # Use factory
+             logger.info("Initialized default DualSidePodSystem.")
+        else: self.side_pods = None
+
+        if isinstance(rear_rad_instance, RearRadiatorSystem):
+            self.rear_radiator = rear_rad_instance
+        elif self.config.get('rear_radiator'):
+             self.rear_radiator = create_default_rear_radiator_system()
+             logger.info("Initialized default RearRadiatorSystem.")
+        else: self.rear_radiator = None
+
+        if isinstance(assist_instance, CoolingAssistSystem):
+             self.cooling_assist = assist_instance
+        elif self.config.get('cooling_assist'):
+             self.cooling_assist = create_default_cooling_assist_system()
+             logger.info("Initialized default CoolingAssistSystem.")
+        else: self.cooling_assist = None
+
+
+    def update_engine_state(self):
+        """Update engine RPM and calculate torque based on current vehicle state."""
+        if not self.engine or not self.drivetrain: return
+
+        # Calculate engine RPM from vehicle speed and current gear
         if self.current_gear > 0:
-            self.current_engine_rpm = self.drivetrain.calculate_engine_speed(
-                self.current_speed, self.current_gear
-            )
-        
-        # Update cooling system
-        self.update_cooling_system(
-            coolant_temp=self.engine.coolant_temperature if self.engine else 90.0,
-            ambient_temp=25.0,  # Ambient temp
-            vehicle_speed=self.current_speed
+             self.current_engine_rpm = self.drivetrain.calculate_engine_speed_rpm(
+                 self.current_speed_mps, self.current_gear
+             )
+             # Clamp RPM
+             self.current_engine_rpm = np.clip(self.current_engine_rpm, self.engine.idle_rpm, self.engine.redline_rpm)
+        else: # Neutral
+            # Allow RPM to decay towards idle (simplified)
+            idle = self.engine.idle_rpm
+            decay_rate = 2000.0 # RPM per second decay rate
+            self.current_engine_rpm = max(idle, self.current_engine_rpm - decay_rate * (time.time() - self.last_update_time if self.last_update_time else 0.01))
+
+
+        # Update engine's internal state (needed for temp factor in get_torque)
+        self.engine.current_rpm = self.current_engine_rpm
+        self.engine.throttle_position = self.throttle_input
+
+        # Calculate engine torque based on current RPM, throttle, and *engine's* temperature
+        engine_torque_nm = self.engine.get_torque(
+            rpm=self.current_engine_rpm,
+            throttle=self.throttle_input,
+            engine_temp=self.engine.engine_temperature # Use engine's internal temp
         )
-    
-    def simulate_acceleration_run(self, 
-                               distance: float = 75.0,
-                               max_time: float = 10.0,
-                               dt: float = 0.01) -> Dict:
-        """
-        Simulate an acceleration run over a specified distance.
-        
-        Args:
-            distance: Distance in meters
-            max_time: Maximum simulation time in seconds
-            dt: Time step in seconds
-            
-        Returns:
-            Dictionary with simulation results
-        """
-        # Reset vehicle state
-        self.current_speed = 0.0
-        self.current_position = 0.0
-        self.current_acceleration = 0.0
-        self.current_gear = 1  # Start in first gear
-        self.current_engine_rpm = self.engine.idle_rpm
-        
-        # Initialize results storage
-        time_points = [0.0]
-        speed_points = [0.0]
-        position_points = [0.0]
-        acceleration_points = [0.0]
-        rpm_points = [self.current_engine_rpm]
-        gear_points = [self.current_gear]
-        
-        # Shifting parameters
-        shift_rpm = self.engine.max_power_rpm * 0.98  # Shift at 98% of max power RPM
-        
-        # Initialize engine
-        self.update_engine_state(1.0, self.current_engine_rpm)  # Full throttle
-        
-        # Simulation loop
-        current_time = 0.0
-        
-        while current_time < max_time and self.current_position < distance:
-            # Apply full throttle
-            throttle = 1.0
-            
-            # Check for gear shift
-            if self.current_engine_rpm > shift_rpm and self.current_gear < self.drivetrain.transmission.num_gears:
-                self.current_gear += 1
-            
-            # Calculate acceleration
-            self.calculate_acceleration(throttle, 0.0, self.current_gear, self.current_speed)
-            
-            # Update vehicle state
-            self.update_vehicle_state(dt)
-            
-            # Update time
-            current_time += dt
-            
-            # Store results
-            time_points.append(current_time)
-            speed_points.append(self.current_speed)
-            position_points.append(self.current_position)
-            acceleration_points.append(self.current_acceleration)
-            rpm_points.append(self.current_engine_rpm)
-            gear_points.append(self.current_gear)
-        
-        # Calculate results
-        finish_time = None
-        finish_speed = None
-        
-        # Interpolate to find exact finish time
-        if self.current_position >= distance:
-            idx = np.searchsorted(position_points, distance)
-            if idx > 0 and idx < len(time_points):
-                # Linear interpolation
-                t0, t1 = time_points[idx-1], time_points[idx]
-                p0, p1 = position_points[idx-1], position_points[idx]
-                finish_time = t0 + (t1 - t0) * (distance - p0) / (p1 - p0)
-                
-                # Interpolate finish speed
-                s0, s1 = speed_points[idx-1], speed_points[idx]
-                finish_speed = s0 + (s1 - s0) * (finish_time - t0) / (t1 - t0)
-        
-        # Calculate 0-60 mph time
-        time_to_60mph = None
-        mps_to_mph = 2.23694  # m/s to mph conversion
-        target_speed = 60.0 / mps_to_mph  # 60 mph in m/s
-        
-        if max(speed_points) >= target_speed:
-            idx = np.searchsorted(speed_points, target_speed)
-            if idx > 0 and idx < len(time_points):
-                # Linear interpolation
-                t0, t1 = time_points[idx-1], time_points[idx]
-                s0, s1 = speed_points[idx-1], speed_points[idx]
-                time_to_60mph = t0 + (t1 - t0) * (target_speed - s0) / (s1 - s0)
-        
-        # Compile results
-        results = {
-            'time': np.array(time_points),
-            'speed': np.array(speed_points),
-            'position': np.array(position_points),
-            'acceleration': np.array(acceleration_points),
-            'engine_rpm': np.array(rpm_points),
-            'gear': np.array(gear_points),
-            'finish_time': finish_time,
-            'finish_speed': finish_speed,
-            'time_to_60mph': time_to_60mph
+
+    def update_drivetrain_state(self):
+        """Update drivetrain based on requested gear and engine torque."""
+        if not self.drivetrain or not self.engine: return
+
+        # Gear changing is handled externally by simulator/shift manager potentially calling self.change_gear()
+        # Here, we just calculate wheel torque based on current gear and engine torque
+        # Engine torque should be calculated first in the update cycle
+        engine_torque_nm = self.engine.get_torque(self.current_engine_rpm, self.throttle_input, self.engine.engine_temperature)
+
+        # Calculate total wheel torque
+        # In a more complex model, this might involve wheel slip and differential logic
+        total_wheel_torque_nm = self.drivetrain.calculate_total_wheel_torque(
+            engine_torque_nm=engine_torque_nm,
+            gear=self.current_gear
+        )
+        # Store for force calculation
+        self._current_total_wheel_torque = total_wheel_torque_nm
+
+    def update_thermal_state(self, dt: float, ambient_temp_C: float):
+         """Update the thermal state of the engine and cooling system."""
+         if not self.engine or not self.cooling_system: return
+
+         # 1. Update Engine Internal Thermal State (using its own method)
+         # This calculates heat generation and internal transfers based on current op point
+         if hasattr(self.engine, 'update_thermal_state') and callable(self.engine.update_thermal_state):
+             # Pass necessary external info to engine's thermal update
+             # We need cooling effectiveness from the external system
+             # Placeholder: Estimate effectiveness based on speed/fan (improve this)
+             cooling_effectiveness_est = 0.5 + 0.5 * np.clip(self.current_speed_mps / 20.0, 0, 1)
+             if self.cooling_system.cooling_fan and self.cooling_system.cooling_fan.is_active:
+                  cooling_effectiveness_est = max(cooling_effectiveness_est, 0.8) # Fan boost
+
+             engine_temps = self.engine.update_thermal_state(
+                 ambient_temp=ambient_temp_C,
+                 cooling_effectiveness=cooling_effectiveness_est, # Pass estimated effectiveness
+                 dt=dt
+             )
+             # Update vehicle's temperature mirrors
+             self.engine_temperature = engine_temps.get('engine_temp', self.engine_temperature)
+             self.coolant_temperature = engine_temps.get('coolant_temp', self.coolant_temperature)
+             self.oil_temperature = engine_temps.get('oil_temp', self.oil_temperature)
+
+         # 2. Update External Cooling System State
+         # Provide engine heat input to the external system
+         # This requires the engine model to estimate heat *to the coolant*
+         heat_to_coolant_W = 0.0
+         if hasattr(self.engine, 'heat_model') and hasattr(self.engine.heat_model, 'calculate_heat_generation'):
+              heat_gen = self.engine.heat_model.calculate_heat_generation(self.current_engine_rpm, self.throttle_input)
+              heat_to_coolant_W = heat_gen.get('to_coolant', 0.0)
+         elif self.engine: # Estimate if no detailed model
+             power_kw = self.engine.get_power(self.current_engine_rpm, self.throttle_input)
+             heat_to_coolant_W = power_kw * 1000 * 1.5 # Rough estimate: 1.5x power is heat to coolant
+
+         # Update the external cooling system
+         self.cooling_system.simulate_step(
+              ambient_temp_C=ambient_temp_C,
+              vehicle_speed_mps=self.current_speed_mps,
+              engine_temp=self.engine_temperature, # Pass engine block temp
+              engine_rpm=self.current_engine_rpm,
+              engine_load=self.throttle_input, # Use throttle as load proxy
+              engine_heat_input_W=heat_to_coolant_W,
+              dt=dt
+         )
+         # Update vehicle's coolant temp mirror from the system's result
+         self.coolant_temperature = self.cooling_system.coolant_temp_C
+
+
+    def change_gear(self, target_gear: int) -> bool:
+         """Request a gear change via the CAS system if available, else directly."""
+         if self.cas_system:
+             direction = ShiftDirection.NEUTRAL
+             if target_gear > self.current_gear: direction = ShiftDirection.UP
+             elif target_gear < self.current_gear: direction = ShiftDirection.DOWN
+             success = self.cas_system.request_shift(direction, target_gear)
+             # Update vehicle's current gear if CAS succeeded (CAS updates its internal state)
+             if success: self.current_gear = self.cas_system.current_gear
+             return success
+         elif self.drivetrain:
+              success = self.drivetrain.change_gear(target_gear)
+              if success: self.current_gear = target_gear
+              return success
+         else:
+              logger.error("Cannot change gear: No CAS or Drivetrain system.")
+              return False
+
+    def calculate_forces(self) -> Dict[str, float]:
+        """Calculate major longitudinal forces acting on the vehicle."""
+        # 1. Tractive Force (from wheel torque calculated in drivetrain update)
+        F_tractive = getattr(self, '_current_total_wheel_torque', 0.0) / self.tire_radius_m if self.tire_radius_m > 0 else 0.0
+
+        # 2. Aerodynamic Drag
+        F_drag = 0.5 * AIR_DENSITY_SEA_LEVEL * self.drag_coefficient * self.frontal_area_m2 * self.current_speed_mps**2
+
+        # 3. Aerodynamic Downforce (negative lift)
+        F_downforce = -0.5 * AIR_DENSITY_SEA_LEVEL * self.lift_coefficient * self.frontal_area_m2 * self.current_speed_mps**2
+
+        # 4. Rolling Resistance (increases with downforce)
+        normal_load = self.mass * GRAVITY + F_downforce
+        F_rolling = self.rolling_resistance_coeff * max(0, normal_load) # Ensure normal load isn't negative
+
+        # 5. Braking Force
+        # Max braking force is limited by friction (mu * Normal Load) and brake system capability
+        # Simplified: Use a max G limit affected by downforce
+        max_brake_force = (self.mass * GRAVITY + F_downforce) * self.max_braking_g # Use max_braking_g defined earlier
+        F_brake = self.brake_input * max_brake_force
+
+        return {
+            'tractive': F_tractive,
+            'drag': F_drag,
+            'rolling': F_rolling,
+            'brake': F_brake,
+            'downforce': F_downforce
         }
-        
-        return results
-    
-    def simulate_lap(self, 
-                   track_data: Dict,
-                   max_time: float = 120.0,
-                   dt: float = 0.01) -> Dict:
+
+    def calculate_acceleration(self, throttle: Optional[float] = None, brake: Optional[float] = None) -> float:
         """
-        Simulate a lap around a track.
-        
-        Args:
-            track_data: Track data with distance, curvature, etc.
-            max_time: Maximum simulation time in seconds
-            dt: Time step in seconds
-            
+        Calculate current longitudinal acceleration based on forces.
+        Updates internal throttle/brake inputs if provided.
+
         Returns:
-            Dictionary with simulation results
+            Longitudinal acceleration (m/s²).
         """
-        # This is a simplified implementation - a full lap simulation would be more complex
-        # and would include lateral dynamics, line optimization, etc.
-        
-        # Extract track data
-        distance = track_data.get('distance', np.array([0.0]))
-        curvature = track_data.get('curvature', np.array([0.0]))
-        
-        # Reset vehicle state
-        self.current_speed = 0.0
-        self.current_position = 0.0
-        self.current_acceleration = 0.0
-        self.current_gear = 1  # Start in first gear
-        self.current_engine_rpm = self.engine.idle_rpm
-        
-        # Initialize results storage
-        time_points = [0.0]
-        speed_points = [0.0]
-        position_points = [0.0]
-        acceleration_points = [0.0]
-        rpm_points = [self.current_engine_rpm]
-        gear_points = [self.current_gear]
-        
-        # Initialize engine
-        self.update_engine_state(1.0, self.current_engine_rpm)  # Full throttle
-        
-        # Simulation loop
-        current_time = 0.0
-        track_length = distance[-1]
-        lap_completed = False
-        
-        while current_time < max_time and not lap_completed:
-            # Get current track position (wrap around track length)
-            track_position = self.current_position % track_length
-            
-            # Interpolate curvature at current position
-            current_curvature = np.interp(track_position, distance, curvature)
-            
-            # Calculate target speed based on curvature (simplified)
-            # v² = a_lat / r where r = 1/curvature
-            max_lateral_accel = 1.5 * 9.81  # 1.5g lateral acceleration
-            
-            if abs(current_curvature) > 0.001:  # Non-straight section
-                target_speed = np.sqrt(max_lateral_accel / abs(current_curvature))
-            else:
-                target_speed = float('inf')  # No speed limit on straight
-            
-            # Determine throttle and brake inputs
-            if self.current_speed > target_speed * 1.05:
-                # Need to brake
-                throttle = 0.0
-                brake = min(1.0, (self.current_speed - target_speed) / 10.0)
-            else:
-                # Can accelerate or maintain speed
-                throttle = 1.0
-                brake = 0.0
-            
-            # Determine optimal gear
-            if self.shift_manager and self.drivetrain:
-                # Ask shift manager for recommendation
-                vehicle_state = {
-                    'gear_ratios': self.drivetrain.transmission.gear_ratios,
-                    'current_gear': self.current_gear,
-                    'wheel_radius': self.drivetrain.wheel_radius
-                }
-                self.shift_manager.update_vehicle_state(vehicle_state)
-                
-                if self.current_gear > 0:
-                    shift_direction = self.shift_manager.active_strategy.should_shift(
-                        self.current_engine_rpm, throttle
-                    )
-                    
-                    if shift_direction:
-                        if shift_direction.name == "UP" and self.current_gear < self.drivetrain.transmission.num_gears:
-                            self.current_gear += 1
-                        elif shift_direction.name == "DOWN" and self.current_gear > 1:
-                            self.current_gear -= 1
-            else:
-                # Simple shift strategy
-                if self.current_engine_rpm > self.engine.max_power_rpm * 0.98 and self.current_gear < self.drivetrain.transmission.num_gears:
-                    self.current_gear += 1
-                elif self.current_engine_rpm < self.engine.max_torque_rpm * 0.8 and self.current_gear > 1:
-                    self.current_gear -= 1
-            
-            # Calculate acceleration
-            self.calculate_acceleration(throttle, brake, self.current_gear, self.current_speed)
-            
-            # Update vehicle state
-            self.update_vehicle_state(dt)
-            
-            # Check if lap completed
-            if self.current_position >= track_length:
-                lap_completed = True
-            
-            # Update time
-            current_time += dt
-            
-            # Store results
-            time_points.append(current_time)
-            speed_points.append(self.current_speed)
-            position_points.append(self.current_position)
-            acceleration_points.append(self.current_acceleration)
-            rpm_points.append(self.current_engine_rpm)
-            gear_points.append(self.current_gear)
-        
-        # Compile results
+        # Update inputs if provided
+        if throttle is not None: self.throttle_input = np.clip(throttle, 0.0, 1.0)
+        if brake is not None: self.brake_input = np.clip(brake, 0.0, 1.0)
+
+        # Ensure engine and drivetrain states are updated based on current speed/gear/inputs
+        self.update_engine_state() # Calculates engine torque based on current RPM/throttle/temp
+        self.update_drivetrain_state() # Calculates wheel torque based on engine torque/gear
+
+        # Calculate forces based on the *updated* state
+        forces = self.calculate_forces()
+
+        # Net Force = Tractive - Drag - Rolling - Brake
+        net_force = forces['tractive'] - forces['drag'] - forces['rolling'] - forces['brake']
+
+        # Acceleration = Net Force / Mass
+        self.current_acceleration_mpss = net_force / self.mass
+        return self.current_acceleration_mpss
+
+
+    def update_vehicle_state(self, dt: float, ambient_temp_C: float = 25.0):
+        """
+        Update vehicle kinematics and thermal state over a time step.
+        This is the core physics update step.
+
+        Args:
+            dt: Time step (seconds).
+            ambient_temp_C: Ambient temperature (°C).
+        """
+        if dt <= 0: return # Nothing to update
+
+        start_time = time.monotonic()
+        self.last_update_time = start_time # Store time for internal calculations
+
+        # 1. Calculate current acceleration based on existing state and inputs
+        # Note: calculate_acceleration also calls engine/drivetrain updates internally
+        current_accel = self.calculate_acceleration()
+
+        # 2. Update Kinematics (Speed and Position) - Simple Euler integration
+        self.current_speed_mps += current_accel * dt
+        self.current_speed_mps = max(0.0, self.current_speed_mps) # Prevent negative speed
+        self.current_position_m += self.current_speed_mps * dt
+
+        # 3. Update Engine RPM (based on new speed) - Handled within update_engine_state called by calc_accel
+        # Re-call update_engine_state to ensure RPM is consistent with the *new* speed for the *next* step's torque calc
+        self.update_engine_state()
+
+        # 4. Update Thermal State (Engine internal and External system)
+        if self.include_thermal: # Assuming include_thermal is a class attribute
+             self.update_thermal_state(dt, ambient_temp_C)
+
+        # 5. Update Shift System (e.g., CAS cooldown timer) if applicable
+        if self.cas_system:
+             self.cas_system.update(dt)
+
+        update_duration = time.monotonic() - start_time
+        # logger.debug(f"Vehicle state updated in {update_duration*1000:.2f} ms. Speed: {self.current_speed_mps:.2f} m/s")
+
+
+    # --- Simulation Wrappers ---
+    # These methods might call the specialized simulators from performance package
+    # or implement simplified versions directly using the vehicle's step updates.
+
+    def simulate_acceleration_run(self, distance: float = FS_ACCELERATION_LENGTH,
+                                max_time: float = 10.0, dt: float = 0.01,
+                                use_launch_control: bool = True,
+                                use_optimized_shifts: bool = True) -> Dict:
+        """Simulate a standard acceleration run."""
+        logger.info("Running simulate_acceleration_run within Vehicle class...")
+        # Use the dedicated AccelerationSimulator for consistency
+        accel_sim = AccelerationSimulator(copy.deepcopy(self)) # Simulate on a copy
+        accel_sim.configure(distance_m=distance, time_step_s=dt, max_time_s=max_time)
+        accel_sim.configure_launch_control(use_traction_control=True) # Use default LC params initially
+        accel_sim.configure_shifting(use_optimized=use_optimized_shifts)
+        results = accel_sim.simulate_acceleration(use_launch_control=use_launch_control)
+        return results
+
+    def simulate_skidpad(self, circle_radius_m: float = FS_SKIDPAD_RADIUS,
+                       target_gear: int = 2, max_laps: int = 4, dt: float = 0.01) -> Dict:
+        """Simulate a skidpad event (constant radius cornering)."""
+        logger.info("Running simulate_skidpad within Vehicle class...")
+        # --- Reset ---
+        self.current_speed_mps = 0.0
+        self.change_gear(target_gear)
+        lap_angle = 0.0
+        lap_times = []
+        t = 0.0
+        max_time = max_laps * 10.0 # Estimate max time
+        history = {'time': [], 'speed': [], 'lat_g': []}
+
+        # --- Simulation Loop ---
+        while t < max_time and len(lap_times) < max_laps:
+            # Calculate max speed for this radius
+            max_corner_speed = self.cornering.calculate_max_cornering_speed(circle_radius_m)
+
+            # Control logic: try to maintain max speed
+            throttle = 0.0; brake = 0.0
+            if self.current_speed_mps < max_corner_speed * 0.98:
+                throttle = 0.8
+            elif self.current_speed_mps > max_corner_speed * 1.02:
+                brake = 0.2
+            else: # Maintain speed (balance drag/rolling resistance)
+                 throttle = 0.4 # Needs tuning
+
+            # Calculate acceleration (longitudinal only for this simple model)
+            self.calculate_acceleration(throttle=throttle, brake=brake)
+
+            # Update speed
+            self.current_speed_mps += self.current_acceleration_mpss * dt
+            self.current_speed_mps = max(0.0, self.current_speed_mps)
+
+            # Update angle turned
+            angular_vel = self.current_speed_mps / circle_radius_m if circle_radius_m > 0 else 0
+            lap_angle += angular_vel * dt
+            t += dt
+
+            # Store history
+            history['time'].append(t)
+            history['speed'].append(self.current_speed_mps)
+            history['lat_g'].append((self.current_speed_mps**2 / circle_radius_m) / GRAVITY if circle_radius_m > 0 else 0)
+
+            # Check for lap completion
+            if lap_angle >= 2 * np.pi:
+                 lap_time = t - sum(lap_times) # Time for this lap
+                 lap_times.append(lap_time)
+                 lap_angle -= 2 * np.pi # Reset angle for next lap
+                 logger.debug(f"Skidpad lap {len(lap_times)} completed in {lap_time:.3f}s")
+
+        # --- Results ---
+        avg_lap_time = np.mean(lap_times) if lap_times else None
+        max_lat_g = np.max(history['lat_g']) if history['lat_g'] else None
+
         results = {
-            'time': np.array(time_points),
-            'speed': np.array(speed_points),
-            'position': np.array(position_points),
-            'acceleration': np.array(acceleration_points),
-            'engine_rpm': np.array(rpm_points),
-            'gear': np.array(gear_points),
-            'lap_time': current_time if lap_completed else None,
-            'lap_completed': lap_completed
+            'average_lap_time': avg_lap_time,
+            'lap_times': lap_times,
+            'max_lateral_g': max_lat_g,
+            'history': history
         }
-        
+        logger.info(f"Skidpad simulation finished. Avg Lap: {avg_lap_time:.3f}s, Max Lateral G: {max_lat_g:.3f}g")
         return results
-    
-    def calculate_weight_transfer(self, acceleration: float) -> Tuple[float, float]:
-        """
-        Calculate weight transfer during acceleration/braking.
-        
-        Args:
-            acceleration: Longitudinal acceleration in m/s²
-            
-        Returns:
-            Tuple of (front_weight_fraction, rear_weight_fraction)
-        """
-        # Static weight distribution
-        static_front_weight = self.mass * self.weight_distribution_front
-        static_rear_weight = self.mass * (1 - self.weight_distribution_front)
-        
-        # Weight transfer during acceleration/braking
-        weight_transfer = self.mass * acceleration * self.cg_height / self.wheelbase
-        
-        # New weight distribution
-        front_weight = static_front_weight - weight_transfer
-        rear_weight = static_rear_weight + weight_transfer
-        
-        # Convert to fractions
-        total_weight = front_weight + rear_weight
-        front_fraction = front_weight / total_weight
-        rear_fraction = rear_weight / total_weight
-        
-        return front_fraction, rear_fraction
-    
-    def plot_acceleration_results(self, results: Dict, save_path: Optional[str] = None):
-        """
-        Plot acceleration simulation results.
-        
-        Args:
-            results: Results from simulate_acceleration_run
-            save_path: Optional path to save the plot
-        """
-        # Extract data
-        time = results['time']
-        speed = results['speed']
-        acceleration = results['acceleration']
-        rpm = results['engine_rpm']
-        gear = results['gear']
-        
-        # Convert speed to mph for display
-        speed_mph = speed * 2.23694
-        
-        # Create figure with multiple subplots
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
-        
-        # Plot speed
-        ax1.plot(time, speed_mph, 'b-', linewidth=2)
-        ax1.set_ylabel('Speed (mph)')
-        ax1.set_title('Acceleration Run Results')
-        ax1.grid(True, linestyle='--', alpha=0.7)
-        
-        # Add 0-60 mph time if available
-        if results['time_to_60mph'] is not None:
-            ax1.axhline(y=60, color='r', linestyle='--', alpha=0.5)
-            ax1.axvline(x=results['time_to_60mph'], color='r', linestyle='--', alpha=0.5)
-            ax1.text(
-                results['time_to_60mph'] + 0.1, 
-                62, 
-                f"0-60 mph: {results['time_to_60mph']:.2f}s",
-                color='r',
-                fontweight='bold'
-            )
-        
-        # Plot acceleration
-        ax2.plot(time, acceleration, 'g-', linewidth=2)
-        ax2.set_ylabel('Acceleration (m/s²)')
-        ax2.grid(True, linestyle='--', alpha=0.7)
-        
-        # Plot RPM and gear
-        color1 = 'tab:blue'
-        ax3.set_ylabel('Engine RPM', color=color1)
-        ax3.plot(time, rpm, color=color1, linewidth=2)
-        ax3.tick_params(axis='y', labelcolor=color1)
-        ax3.grid(True, linestyle='--', alpha=0.7)
-        
-        color2 = 'tab:red'
-        ax3_twin = ax3.twinx()
-        ax3_twin.set_ylabel('Gear', color=color2)
-        ax3_twin.step(time, gear, color=color2, linewidth=2, where='post')
-        ax3_twin.tick_params(axis='y', labelcolor=color2)
-        ax3_twin.set_yticks(range(0, self.drivetrain.transmission.num_gears + 1))
-        
-        ax3.set_xlabel('Time (s)')
-        
-        # Add summary text
-        if results['finish_time'] is not None:
-            plt.figtext(
-                0.5, 0.01,
-                f"Distance: 75m, Time: {results['finish_time']:.2f}s, Final Speed: {results['finish_speed'] * 2.23694:.1f} mph",
-                ha='center',
-                fontsize=12,
-                bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray')
-            )
-        
-        plt.tight_layout(rect=[0, 0.03, 1, 1])
-        
-        # Save plot if requested
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            
-        plt.show()
-    
-    def plot_lap_results(self, results: Dict, track_data: Dict, save_path: Optional[str] = None):
-        """
-        Plot lap simulation results.
-        
-        Args:
-            results: Results from simulate_lap
-            track_data: Track data with distance, curvature, etc.
-            save_path: Optional path to save the plot
-        """
-        # Extract data
-        time = results['time']
-        speed = results['speed']
-        position = results['position']
-        rpm = results['engine_rpm']
-        gear = results['gear']
-        
-        # Extract track data
-        distance = track_data.get('distance', np.array([0.0]))
-        curvature = track_data.get('curvature', np.array([0.0]))
-        
-        # Convert speed to mph for display
-        speed_mph = speed * 2.23694
-        
-        # Create figure with multiple subplots
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14), sharex=True)
-        
-        # Plot speed vs. distance
-        ax1.plot(position, speed_mph, 'b-', linewidth=2)
-        ax1.set_ylabel('Speed (mph)')
-        ax1.set_title('Lap Simulation Results')
-        ax1.grid(True, linestyle='--', alpha=0.7)
-        
-        # Plot curvature
-        # Repeat track data if lap is longer than track length
-        track_length = distance[-1]
-        repeated_distance = np.array([])
-        repeated_curvature = np.array([])
-        
-        max_pos = max(position)
-        repetitions = int(np.ceil(max_pos / track_length))
-        
-        for i in range(repetitions):
-            repeated_distance = np.append(repeated_distance, distance + i * track_length)
-            repeated_curvature = np.append(repeated_curvature, curvature)
-        
-        # Plot track curvature
-        ax2.plot(repeated_distance, repeated_curvature, 'r-', linewidth=2)
-        ax2.set_ylabel('Track Curvature (1/m)')
-        ax2.grid(True, linestyle='--', alpha=0.7)
-        
-        # Plot RPM and gear
-        color1 = 'tab:blue'
-        ax3.set_ylabel('Engine RPM', color=color1)
-        ax3.plot(position, rpm, color=color1, linewidth=2)
-        ax3.tick_params(axis='y', labelcolor=color1)
-        ax3.grid(True, linestyle='--', alpha=0.7)
-        
-        color2 = 'tab:red'
-        ax3_twin = ax3.twinx()
-        ax3_twin.set_ylabel('Gear', color=color2)
-        ax3_twin.step(position, gear, color=color2, linewidth=2, where='post')
-        ax3_twin.tick_params(axis='y', labelcolor=color2)
-        ax3_twin.set_yticks(range(0, self.drivetrain.transmission.num_gears + 1))
-        
-        ax3.set_xlabel('Distance (m)')
-        
-        # Add lap time if available
-        if results['lap_time'] is not None:
-            plt.figtext(
-                0.5, 0.01,
-                f"Lap Time: {results['lap_time']:.2f}s, Average Speed: {np.mean(speed_mph):.1f} mph",
-                ha='center',
-                fontsize=12,
-                bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray')
-            )
-        
-        plt.tight_layout(rect=[0, 0.03, 1, 1])
-        
-        # Save plot if requested
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            
-        plt.show()
-    
+
+
+    def simulate_lap(self, track_file: str, include_thermal: bool = True) -> Dict:
+         """Simulate a single lap using the LapTimeSimulator."""
+         logger.info("Running simulate_lap via LapTimeSimulator...")
+         # Use the dedicated LapTimeSimulator for consistency
+         lap_sim = LapTimeSimulator(copy.deepcopy(self), track_file=track_file)
+         results = lap_sim.simulate_lap(include_thermal=include_thermal)
+         # Add metrics for convenience
+         results['metrics'] = lap_sim.analyze_lap_performance(results)
+         return results
+
+    # --- Analysis and Helper Methods ---
+
+    def calculate_weight_transfer(self, longitudinal_accel_mpss: float = 0.0, lateral_accel_mpss: float = 0.0) -> Dict:
+        """Calculate longitudinal and lateral weight transfer."""
+        # Longitudinal Transfer (positive accel = transfer to rear)
+        long_transfer = (self.mass * longitudinal_accel_mpss * self.cg_height_m) / self.wheelbase_m
+
+        # Lateral Transfer (positive accel = transfer to outside, assume right turn)
+        lat_transfer = (self.mass * abs(lateral_accel_mpss) * self.cg_height_m) / self.track_width_rear_m # Use rear track width
+
+        # Static weights per axle/side
+        static_front_N = self.mass * GRAVITY * self.weight_distribution_front
+        static_rear_N = self.mass * GRAVITY * (1.0 - self.weight_distribution_front)
+        static_left_N = self.mass * GRAVITY * 0.5
+        static_right_N = self.mass * GRAVITY * 0.5
+
+        # Dynamic weights per axle
+        dynamic_front_N = static_front_N - long_transfer
+        dynamic_rear_N = static_rear_N + long_transfer
+
+        # Dynamic weights per wheel (simplified, assumes equal distribution per axle)
+        # Positive lateral accel assumed right turn (more weight on left)
+        dynamic_FL_N = dynamic_front_N / 2.0 + lat_transfer / 2.0 # Front axle portion of lat transfer
+        dynamic_FR_N = dynamic_front_N / 2.0 - lat_transfer / 2.0
+        dynamic_RL_N = dynamic_rear_N / 2.0 + lat_transfer / 2.0 # Rear axle portion
+        dynamic_RR_N = dynamic_rear_N / 2.0 - lat_transfer / 2.0
+
+        return {
+            'longitudinal_transfer_N': long_transfer,
+            'lateral_transfer_N': lat_transfer,
+            'dynamic_front_axle_load_N': dynamic_front_N,
+            'dynamic_rear_axle_load_N': dynamic_rear_N,
+            'dynamic_FL_wheel_load_N': max(0, dynamic_FL_N), # Wheels cannot have negative load
+            'dynamic_FR_wheel_load_N': max(0, dynamic_FR_N),
+            'dynamic_RL_wheel_load_N': max(0, dynamic_RL_N),
+            'dynamic_RR_wheel_load_N': max(0, dynamic_RR_N),
+        }
+
     def get_vehicle_specs(self) -> Dict:
-        """
-        Get comprehensive vehicle specifications.
-        
-        Returns:
-            Dictionary with vehicle specifications
-        """
+        """Return a comprehensive dictionary of vehicle specifications."""
         specs = {
             'team_name': self.team_name,
             'vehicle': {
                 'mass': self.mass,
-                'frontal_area': self.frontal_area,
+                'frontal_area_m2': self.frontal_area_m2,
                 'drag_coefficient': self.drag_coefficient,
                 'lift_coefficient': self.lift_coefficient,
-                'rolling_resistance': self.rolling_resistance,
+                'rolling_resistance_coeff': self.rolling_resistance_coeff,
                 'weight_distribution_front': self.weight_distribution_front,
-                'wheelbase': self.wheelbase,
-                'track_width_front': self.track_width_front,
-                'track_width_rear': self.track_width_rear,
-                'cg_height': self.cg_height
+                'wheelbase_m': self.wheelbase_m,
+                'track_width_front_m': self.track_width_front_m,
+                'track_width_rear_m': self.track_width_rear_m,
+                'cg_height_m': self.cg_height_m
             },
             'tires': {
-                'radius': self.tire_radius,
-                'width': self.tire_width,
-                'rolling_circumference': self.tire_rolling_circumference
+                'radius_m': self.tire_radius_m,
+                # Add more tire specs if available in model
             }
         }
-        
-        # Add engine specs if available
-        if self.engine:
-            specs['engine'] = self.engine.get_engine_specs()
-        
-        # Add drivetrain specs if available
-        if self.drivetrain:
-            specs['drivetrain'] = self.drivetrain.get_drivetrain_specs()
-        
-        # Add cooling system specs if available
-        if self.cooling_system:
-            specs['cooling'] = self.cooling_system.get_system_specs()
-        
+        if self.engine: specs['engine'] = self.engine.get_engine_specs()
+        if self.drivetrain: specs['drivetrain'] = self.drivetrain.get_drivetrain_specs()
+        if self.cooling_system: specs['cooling'] = self.cooling_system.get_system_specs()
+        if self.side_pods: specs['side_pods'] = self.side_pods.get_system_specs()
+        if self.rear_radiator: specs['rear_radiator'] = self.rear_radiator.get_system_specs()
+        if self.cooling_assist: specs['cooling_assist'] = self.cooling_assist.get_system_specs()
+        # Add CAS info
+        if self.cas_system: specs['cas'] = self.cas_system.get_status()
+
         return specs
 
+    def calculate_performance_metrics(self) -> Dict:
+        """Calculate key theoretical performance metrics."""
+        metrics = {}
+        # Power-to-weight
+        if self.engine and self.mass > 0:
+             power_kw = self.engine.max_power_hp * HP_TO_KW
+             metrics['power_to_weight_kw_kg'] = power_kw / self.mass
+             metrics['power_to_weight_hp_kg'] = self.engine.max_power_hp / self.mass
 
-def create_formula_student_vehicle() -> Vehicle:
+        # Theoretical Max Speed (drag limited)
+        try:
+             max_speed = self.calculate_max_speed()
+             metrics['max_speed_mps'] = max_speed
+             metrics['max_speed_kph'] = max_speed * MS_TO_KMH
+        except Exception as e:
+             logger.warning(f"Could not calculate max speed: {e}")
+             metrics['max_speed_mps'] = None
+
+        # Theoretical Max Lateral G (using cornering calculator)
+        try:
+             # Calculate at a reference speed (e.g., 20 m/s)
+             max_lat_g = self.cornering.calculate_max_lateral_acceleration(speed_mps=20.0) / GRAVITY
+             metrics['max_lateral_g'] = max_lat_g
+        except Exception as e:
+             logger.warning(f"Could not calculate max lateral G: {e}")
+             metrics['max_lateral_g'] = None
+
+        return metrics
+
+    # --- Plotting Wrappers ---
+    def plot_acceleration_results(self, results: Dict, save_path: Optional[str] = None):
+         """Plot acceleration results using the utility function."""
+         fig = plot_accel_results_util(results, save_path=save_path, plot_wheel_slip=True)
+         # if fig: plt.close(fig)
+
+    # plot_lap_results, plot_skidpad_results, plot_thermal_analysis etc. would be similar wrappers
+    # calling the respective functions from utils.plotting or performance modules.
+
+
+# --- Factory Function ---
+def create_formula_student_vehicle(config_path: Optional[str] = None) -> Vehicle:
     """
-    Create a default Formula Student vehicle configuration.
-    
+    Factory function to create a Vehicle instance with typical FS components.
+    Loads configurations if available, otherwise uses defaults.
+
+    Args:
+        config_path: Optional path to a main vehicle config file.
+
     Returns:
-        Configured Vehicle
+        A configured Vehicle instance.
     """
-    # Create engine
-    from ..engine import MotorcycleEngine
-    engine_config_path = os.path.join("configs", "engine", "cbr600f4i.yaml")
-    engine = MotorcycleEngine(config_path=engine_config_path)
-    
-    # Create drivetrain
-    from ..transmission import (
-        Transmission, FinalDrive, Differential, DrivetrainSystem
-    )
-    
-    gear_ratios = [2.750, 2.000, 1.667, 1.444, 1.304, 1.208]
-    transmission = Transmission(gear_ratios)
-    final_drive = FinalDrive(14, 53)  # 14:53 sprocket ratio
-    differential = Differential(locked=True)  # Solid axle
-    
-    # Standard tire radius for Formula Student (13-inch wheels)
-    tire_radius = 0.2286  # m (9-inch for 13-inch wheels)
-    
-    drivetrain = DrivetrainSystem(
-        transmission, final_drive, differential, wheel_radius=tire_radius
-    )
-    
-    # Create cooling system
-    from ..thermal import create_formula_student_cooling_system
-    cooling_system = create_formula_student_cooling_system()
-    
-    # Create vehicle
-    vehicle = Vehicle(
-        engine=engine,
-        drivetrain=drivetrain,
-        cooling_system=cooling_system,
-        team_name="KCL Formula Student"
-    )
-    
+    logger.info("Creating Formula Student Vehicle...")
+    # Pass the config path to the Vehicle constructor, which handles loading
+    # and initializing components based on the config or defaults.
+    vehicle = Vehicle(config_path=config_path)
+    logger.info("Formula Student Vehicle created successfully.")
     return vehicle
-def simulate_skidpad(self, circle_radius: float = 8.5, max_time: float = 15.0, dt: float = 0.01) -> Dict:
-    """
-    Simulate a skidpad run (figure-8 pattern).
-    
-    Args:
-        circle_radius: Radius of skidpad circle in meters
-        max_time: Maximum simulation time in seconds
-        dt: Time step in seconds
-        
-    Returns:
-        Dictionary with simulation results
-    """
-    # Reset vehicle state
-    self.current_speed = 0.0
-    self.current_position = 0.0
-    self.current_acceleration = 0.0
-    self.current_gear = 1  # Start in first gear
-    self.current_engine_rpm = self.engine.idle_rpm
-    
-    # Initialize results storage
-    time_points = [0.0]
-    speed_points = [0.0]
-    lateral_accel_points = [0.0]
-    position_points = [0.0]
-    rpm_points = [self.current_engine_rpm]
-    gear_points = [self.current_gear]
-    
-    # First corner entry phase - acceleration
-    corner_entry_time = 3.0
-    steady_state_laps = 2
-    
-    # Circle parameters
-    circle_circumference = 2 * np.pi * circle_radius
-    
-    # Simulation loop
-    current_time = 0.0
-    phase = "acceleration"  # Start with acceleration phase
-    lap_count = 0
-    lap_times = []
-    lap_start_time = 0.0
-    
-    while current_time < max_time:
-        # Calculate max cornering speed based on lateral acceleration limit
-        # v² = a_lat * r
-        max_lateral_accel = 1.5 * 9.81  # 1.5g lateral acceleration limit
-        max_corner_speed = np.sqrt(max_lateral_accel * circle_radius)
-        
-        if phase == "acceleration" and current_time < corner_entry_time:
-            # Acceleration phase - build up to cornering speed
-            throttle = 1.0
-            target_speed = min(max_corner_speed, self.current_speed + 1.0 * dt)
-        elif phase == "acceleration" and current_time >= corner_entry_time:
-            # Transition to steady-state cornering
-            phase = "steady_state"
-            lap_start_time = current_time
-        elif phase == "steady_state":
-            # Maintain constant speed around circle
-            if self.current_speed > max_corner_speed * 1.02:
-                # Too fast - reduce speed
-                throttle = 0.3
-            elif self.current_speed < max_corner_speed * 0.98:
-                # Too slow - increase speed
-                throttle = 0.8
-            else:
-                # Maintain speed
-                throttle = 0.5
-                
-            # Calculate position around circle
-            distance_traveled = self.current_speed * dt
-            self.current_position += distance_traveled
-            
-            # Check if lap completed
-            if self.current_position >= circle_circumference and (current_time - lap_start_time) > 1.0:
-                lap_count += 1
-                lap_times.append(current_time - lap_start_time)
-                lap_start_time = current_time
-                self.current_position = 0.0
-                
-                # If completed required laps, end simulation
-                if lap_count >= steady_state_laps:
-                    break
-        
-        # Determine optimal gear (simplified)
-        if self.current_gear > 0:
-            # Simple shift strategy based on RPM
-            if self.current_engine_rpm > self.engine.max_power_rpm * 0.95 and self.current_gear < self.drivetrain.transmission.num_gears:
-                self.current_gear += 1
-            elif self.current_engine_rpm < self.engine.max_torque_rpm * 0.8 and self.current_gear > 1:
-                self.current_gear -= 1
-        
-        # Calculate lateral acceleration
-        lateral_accel = self.current_speed**2 / circle_radius if self.current_speed > 0.1 else 0.0
-        
-        # Calculate longitudinal acceleration
-        self.calculate_acceleration(throttle, 0.0, self.current_gear, self.current_speed)
-        
-        # Update vehicle state
-        self.update_vehicle_state(dt)
-        
-        # Update time
-        current_time += dt
-        
-        # Store results
-        time_points.append(current_time)
-        speed_points.append(self.current_speed)
-        lateral_accel_points.append(lateral_accel)
-        position_points.append(self.current_position)
-        rpm_points.append(self.current_engine_rpm)
-        gear_points.append(self.current_gear)
-    
-    # Calculate average lap time for steady state
-    avg_lap_time = sum(lap_times) / len(lap_times) if lap_times else None
-    
-    # Compile results
-    results = {
-        'time': np.array(time_points),
-        'speed': np.array(speed_points),
-        'lateral_acceleration': np.array(lateral_accel_points),
-        'position': np.array(position_points),
-        'engine_rpm': np.array(rpm_points),
-        'gear': np.array(gear_points),
-        'lap_times': lap_times,
-        'average_lap_time': avg_lap_time,
-        'max_lateral_acceleration': np.max(lateral_accel_points),
-        'max_speed': np.max(speed_points)
-    }
-    
-    return results
 
-def calculate_performance_metrics(self) -> Dict:
-    """
-    Calculate various vehicle performance metrics.
-    
-    Returns:
-        Dictionary with performance metrics
-    """
-    # Calculate power-to-weight ratio
-    if self.engine:
-        # Convert hp to kW for SI units
-        power_kw = self.engine.max_power * 0.7457
-        power_to_weight = power_kw / (self.mass / 1000)  # kW/kg
-    else:
-        power_to_weight = None
-    
-    # Calculate theoretical top speed (simplified)
-    if self.engine and self.drivetrain:
-        # Get maximum torque and corresponding RPM
-        max_torque = self.engine.max_torque
-        
-        # Calculate wheel torque in highest gear
-        highest_gear = self.drivetrain.transmission.num_gears
-        wheel_torque = self.drivetrain.calculate_wheel_torque(max_torque, highest_gear)
-        
-        # Calculate tractive force
-        tractive_force = wheel_torque / self.tire_radius
-        
-        # Iteratively solve for top speed (where tractive force equals drag)
-        speed = 10.0  # m/s initial guess
-        max_iterations = 50
-        tolerance = 0.01
-        
-        for _ in range(max_iterations):
-            # Calculate drag force at current speed
-            air_density = 1.225  # kg/m³
-            drag_force = 0.5 * air_density * self.drag_coefficient * self.frontal_area * speed**2
-            rolling_resistance = self.rolling_resistance * self.mass * 9.81
-            
-            # Calculate net force
-            net_force = tractive_force - drag_force - rolling_resistance
-            
-            # Check if converged
-            if abs(net_force) < tolerance:
-                break
-            
-            # Update speed estimate
-            speed_update = net_force / (air_density * self.drag_coefficient * self.frontal_area * speed)
-            speed += speed_update
-            
-            # Limit to reasonable range
-            speed = max(0.1, min(100.0, speed))
-        
-        top_speed = speed
-    else:
-        top_speed = None
-    
-    # Calculate theoretical max lateral acceleration
-    # Simplified model based on downforce and tire grip
-    base_tire_grip = 1.5  # Lateral g in static condition
-    downforce_coefficient = -self.lift_coefficient  # Convert lift to downforce
-    
-    # Reference speed for downforce calculation
-    reference_speed = 20.0  # m/s (~45 mph)
-    air_density = 1.225  # kg/m³
-    
-    # Downforce at reference speed
-    downforce = 0.5 * air_density * downforce_coefficient * self.frontal_area * reference_speed**2
-    
-    # Additional grip from downforce
-    downforce_grip_contribution = downforce / (self.mass * 9.81) * 0.8  # 80% effectiveness
-    
-    # Total lateral grip
-    max_lateral_accel = (base_tire_grip + downforce_grip_contribution) * 9.81
-    
-    # Compile metrics
-    metrics = {
-        'power_to_weight': power_to_weight,  # kW/kg
-        'top_speed': top_speed,  # m/s
-        'top_speed_mph': top_speed * 2.23694 if top_speed else None,  # mph
-        'max_lateral_acceleration': max_lateral_accel,  # m/s²
-        'max_lateral_acceleration_g': max_lateral_accel / 9.81  # g
-    }
-    
-    return metrics
 
-def analyze_thermal_performance(self, 
-                             ambient_temp: float = 25.0, 
-                             vehicle_speed_range: List[float] = None) -> Dict:
-    """
-    Analyze thermal system performance across a range of vehicle speeds.
-    
-    Args:
-        ambient_temp: Ambient temperature in °C
-        vehicle_speed_range: List of vehicle speeds to analyze in m/s
-        
-    Returns:
-        Dictionary with thermal performance analysis
-    """
-    if vehicle_speed_range is None:
-        vehicle_speed_range = np.linspace(0, 30, 7)  # 0-30 m/s
-    
-    # Initialize result arrays
-    n_speeds = len(vehicle_speed_range)
-    coolant_temps = np.zeros(n_speeds)
-    oil_temps = np.zeros(n_speeds)
-    heat_rejections = np.zeros(n_speeds)
-    
-    # Engine conditions for analysis
-    engine_rpm = 8000  # Representative RPM
-    engine_load = 0.7  # 70% load
-    
-    # Run analysis for each speed
-    for i, speed in enumerate(vehicle_speed_range):
-        # Update engine state
-        if self.engine:
-            self.engine.throttle_position = engine_load
-            self.engine.current_rpm = engine_rpm
-        
-        # Update cooling system
-        if self.cooling_system:
-            self.update_cooling_system(
-                coolant_temp=90.0,  # Start from typical operating temperature
-                ambient_temp=ambient_temp,
-                vehicle_speed=speed
-            )
-            
-            # Simulate for a short time to reach steady state
-            for _ in range(10):
-                self.cooling_system.update_system_state(1.0)  # 1 second steps
-            
-            # Get thermal state
-            state = self.cooling_system.get_system_state()
-            coolant_temps[i] = state['coolant_temp']
-            heat_rejections[i] = state['radiator_heat_rejection']
-        
-        # Get engine temperatures
-        if self.engine:
-            oil_temps[i] = self.engine.oil_temperature
-    
-    # Calculate thermal margins
-    coolant_margins = 105.0 - coolant_temps  # Margin to boiling
-    oil_margins = 130.0 - oil_temps  # Margin to oil degradation
-    
-    # Analyze side pods if available
-    side_pod_performance = None
-    if self.side_pods:
-        side_pod_performance = self.side_pods.analyze_system_performance(
-            vehicle_speed_range=vehicle_speed_range,
-            coolant_temp=90.0,
-            ambient_temp=ambient_temp,
-            coolant_flow_rate=50.0
-        )
-    
-    # Analyze rear radiator if available
-    rear_rad_performance = None
-    if self.rear_radiator:
-        rear_rad_performance = self.rear_radiator.analyze_performance(
-            vehicle_speed_range=vehicle_speed_range,
-            coolant_temp=90.0,
-            ambient_temp=ambient_temp,
-            coolant_flow_rate=50.0
-        )
-    
-    # Compile results
-    results = {
-        'vehicle_speeds': vehicle_speed_range,
-        'coolant_temps': coolant_temps,
-        'oil_temps': oil_temps,
-        'heat_rejections': heat_rejections,
-        'coolant_margins': coolant_margins,
-        'oil_margins': oil_margins,
-        'ambient_temp': ambient_temp,
-        'side_pod_performance': side_pod_performance,
-        'rear_radiator_performance': rear_rad_performance
-    }
-    
-    return results
-
-def plot_thermal_analysis(self, analysis_results: Dict, save_path: Optional[str] = None):
-    """
-    Plot thermal system analysis results.
-    
-    Args:
-        analysis_results: Results from analyze_thermal_performance
-        save_path: Optional path to save the plot
-    """
-    # Extract data
-    speeds = analysis_results['vehicle_speeds']
-    coolant_temps = analysis_results['coolant_temps']
-    oil_temps = analysis_results['oil_temps']
-    heat_rejections = analysis_results['heat_rejections']
-    
-    # Create figure with multiple subplots
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
-    
-    # Plot temperatures
-    color1 = 'tab:red'
-    ax1.set_ylabel('Temperature (°C)', color=color1)
-    ax1.plot(speeds, coolant_temps, color=color1, linewidth=2, marker='o', label='Coolant')
-    ax1.plot(speeds, oil_temps, color='tab:orange', linewidth=2, marker='s', label='Oil')
-    ax1.tick_params(axis='y', labelcolor=color1)
-    ax1.grid(True, linestyle='--', alpha=0.7)
-    ax1.legend(loc='upper right')
-    
-    # Add critical temperature lines
-    ax1.axhline(y=105, color='tab:red', linestyle='--', alpha=0.5, label='Critical Coolant')
-    ax1.axhline(y=130, color='tab:orange', linestyle='--', alpha=0.5, label='Critical Oil')
-    
-    # Plot heat rejection
-    color2 = 'tab:blue'
-    ax2.set_ylabel('Heat Rejection (kW)', color=color2)
-    ax2.plot(speeds, heat_rejections / 1000, color=color2, linewidth=2, marker='o')
-    ax2.tick_params(axis='y', labelcolor=color2)
-    ax2.grid(True, linestyle='--', alpha=0.7)
-    
-    ax2.set_xlabel('Vehicle Speed (m/s)')
-    
-    # Add title
-    ambient_temp = analysis_results['ambient_temp']
-    plt.suptitle(f'Thermal System Performance Analysis (Ambient: {ambient_temp}°C)')
-    
-    plt.tight_layout()
-    
-    # Save plot if requested
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-    plt.show()
-
-def plot_skidpad_results(self, results: Dict, save_path: Optional[str] = None):
-    """
-    Plot skidpad simulation results.
-    
-    Args:
-        results: Results from simulate_skidpad
-        save_path: Optional path to save the plot
-    """
-    # Extract data
-    time = results['time']
-    speed = results['speed']
-    lateral_accel = results['lateral_acceleration']
-    rpm = results['engine_rpm']
-    gear = results['gear']
-    
-    # Convert to more readable units
-    speed_mph = speed * 2.23694
-    lateral_accel_g = lateral_accel / 9.81
-    
-    # Create figure with multiple subplots
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
-    
-    # Plot speed
-    ax1.plot(time, speed_mph, 'b-', linewidth=2)
-    ax1.set_ylabel('Speed (mph)')
-    ax1.set_title('Skidpad Simulation Results')
-    ax1.grid(True, linestyle='--', alpha=0.7)
-    
-    # Plot lateral acceleration
-    ax2.plot(time, lateral_accel_g, 'g-', linewidth=2)
-    ax2.set_ylabel('Lateral Acceleration (g)')
-    ax2.grid(True, linestyle='--', alpha=0.7)
-    
-    # Plot RPM and gear
-    color1 = 'tab:blue'
-    ax3.set_ylabel('Engine RPM', color=color1)
-    ax3.plot(time, rpm, color=color1, linewidth=2)
-    ax3.tick_params(axis='y', labelcolor=color1)
-    ax3.grid(True, linestyle='--', alpha=0.7)
-    
-    color2 = 'tab:red'
-    ax3_twin = ax3.twinx()
-    ax3_twin.set_ylabel('Gear', color=color2)
-    ax3_twin.step(time, gear, color=color2, linewidth=2, where='post')
-    ax3_twin.tick_params(axis='y', labelcolor=color2)
-    ax3_twin.set_yticks(range(0, self.drivetrain.transmission.num_gears + 1))
-    
-    ax3.set_xlabel('Time (s)')
-    
-    # Add lap time if available
-    if results['average_lap_time'] is not None:
-        lap_time = results['average_lap_time']
-        max_lat_g = results['max_lateral_acceleration'] / 9.81
-        plt.figtext(
-            0.5, 0.01,
-            f"Average Lap Time: {lap_time:.2f}s, Max Lateral Acceleration: {max_lat_g:.2f}g",
-            ha='center',
-            fontsize=12,
-            bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray')
-        )
-    
-    plt.tight_layout(rect=[0, 0.03, 1, 1])
-    
-    # Save plot if requested
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-    plt.show()
-
-def optimize_shift_points(self, max_rpm: Optional[float] = None) -> Dict:
-    """
-    Optimize gear shift points for maximum acceleration.
-    
-    Args:
-        max_rpm: Maximum RPM limit (defaults to engine redline)
-        
-    Returns:
-        Dictionary with optimized shift points
-    """
-    if not self.engine or not self.drivetrain:
-        return {}
-    
-    # Use engine redline if max_rpm not specified
-    if max_rpm is None:
-        max_rpm = self.engine.redline
-    
-    # Initialize shift points array
-    shift_points = []
-    
-    # Get gear ratios
-    gear_ratios = self.drivetrain.transmission.gear_ratios
-    
-    # For each gear (except highest)
-    for i in range(1, len(gear_ratios)):
-        current_gear = i
-        next_gear = i + 1
-        
-        # Get gear ratios
-        current_ratio = gear_ratios[current_gear - 1]
-        next_ratio = gear_ratios[next_gear - 1]
-        
-        # Calculate engine RPM after shift for a range of RPMs
-        rpm_range = np.linspace(self.engine.max_torque_rpm, max_rpm, 50)
-        best_shift_rpm = self.engine.max_power_rpm  # Default to max power
-        best_acceleration = 0.0
-        
-        for rpm in rpm_range:
-            # Calculate engine torque at current RPM
-            torque_current = self.engine.get_torque(rpm)
-            
-            # Calculate engine RPM after shift
-            rpm_after_shift = rpm * (current_ratio / next_ratio)
-            
-            # Calculate engine torque after shift
-            torque_after_shift = self.engine.get_torque(rpm_after_shift)
-            
-            # Calculate wheel torque and tractive force for both scenarios
-            wheel_torque_current = self.drivetrain.calculate_wheel_torque(torque_current, current_gear)
-            wheel_torque_after = self.drivetrain.calculate_wheel_torque(torque_after_shift, next_gear)
-            
-            tractive_force_current = wheel_torque_current / self.tire_radius
-            tractive_force_after = wheel_torque_after / self.tire_radius
-            
-            # Calculate acceleration for both scenarios
-            accel_current = tractive_force_current / self.mass
-            accel_after = tractive_force_after / self.mass
-            
-            # If acceleration after shift is better, this is a good shift point
-            if accel_after > accel_current and accel_after > best_acceleration:
-                best_acceleration = accel_after
-                best_shift_rpm = rpm
-        
-        shift_points.append(best_shift_rpm)
-    
-    # Create results dictionary
-    results = {
-        'upshift_points_rpm': shift_points,
-        'upshift_points_by_gear': {i+1: rpm for i, rpm in enumerate(shift_points)}
-    }
-    
-    return results
-
+# Example Usage
 if __name__ == "__main__":
-    # Create a Formula Student vehicle
+    logging.basicConfig(level=logging.INFO)
+    print("Vehicle Module Demo")
+    print("-" * 20)
+
+    # Create vehicle (will try to load default configs if available)
+    # Ensure default config files exist in ../configs/ relative to this file
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
+    # We don't pass a specific vehicle config, so it relies on component defaults/configs
     vehicle = create_formula_student_vehicle()
-    
-    # Print vehicle specifications
+
+    print("\n--- Vehicle Specs ---")
     specs = vehicle.get_vehicle_specs()
-    print(f"Vehicle: {specs['team_name']}")
-    print(f"Mass: {specs['vehicle']['mass']} kg")
-    print(f"Engine: {specs['engine']['make']} {specs['engine']['model']}")
-    print(f"Max Power: {specs['engine']['max_power_hp']} hp @ {specs['engine']['max_power_rpm']} RPM")
-    print(f"Gear Ratios: {specs['drivetrain']['transmission_ratios']}")
-    
-    # Calculate performance metrics
-    print("\nCalculating performance metrics...")
+    # Print selected specs
+    print(f" Mass: {specs['vehicle']['mass']:.1f} kg")
+    print(f" Engine: {specs['engine']['make']} {specs['engine']['model']}")
+    print(f" Max Power: {specs['engine']['max_power_hp']:.1f} HP @ {specs['engine']['max_power_rpm']:.0f} RPM")
+    print(f" Gears: {specs['drivetrain']['num_gears']}")
+    print(f" Final Drive: {specs['drivetrain']['final_drive_ratio']:.3f}")
+
+    print("\n--- Performance Metrics ---")
     metrics = vehicle.calculate_performance_metrics()
-    print(f"Power-to-Weight Ratio: {metrics['power_to_weight']:.2f} kW/kg")
-    print(f"Theoretical Top Speed: {metrics['top_speed_mph']:.1f} mph")
-    print(f"Maximum Lateral Acceleration: {metrics['max_lateral_acceleration_g']:.2f}g")
-    
-    # Optimize shift points
-    print("\nOptimizing shift points...")
-    shift_points = vehicle.optimize_shift_points()
-    print("Optimized Upshift Points (RPM):")
-    for gear, rpm in shift_points['upshift_points_by_gear'].items():
-        print(f"  Gear {gear}: {rpm:.0f} RPM")
-    
-    # Run an acceleration simulation
-    print("\nRunning acceleration simulation...")
+    print(f" Power/Weight: {metrics.get('power_to_weight_kw_kg', 0):.3f} kW/kg")
+    print(f" Max Speed: {metrics.get('max_speed_kph', 0):.1f} km/h")
+    print(f" Max Lateral G: {metrics.get('max_lateral_g', 0):.2f} g")
+
+    # --- Example Simulation Step ---
+    print("\n--- Simulating 1 Step ---")
+    vehicle.throttle_input = 0.8
+    vehicle.brake_input = 0.0
+    vehicle.change_gear(1)
+    vehicle.update_vehicle_state(dt=0.1, ambient_temp_C=28.0)
+    print(f" Speed after 0.1s: {vehicle.current_speed_mps * MS_TO_KMH:.1f} km/h")
+    print(f" Accel: {vehicle.current_acceleration_mpss:.2f} m/s^2")
+    print(f" Engine Temp: {vehicle.engine_temperature:.1f} C")
+    print(f" Coolant Temp: {vehicle.coolant_temperature:.1f} C")
+
+    # --- Example Acceleration Run ---
+    print("\n--- Simulating Acceleration Run ---")
     accel_results = vehicle.simulate_acceleration_run()
-    
-    # Display acceleration results
-    if accel_results['finish_time'] is not None:
-        print(f"75m Acceleration Time: {accel_results['finish_time']:.2f} seconds")
-        print(f"Top Speed: {accel_results['finish_speed'] * 2.23694:.1f} mph")
-    
-    if accel_results['time_to_60mph'] is not None:
-        print(f"0-60 mph Time: {accel_results['time_to_60mph']:.2f} seconds")
-    
-    # Run a skidpad simulation
-    print("\nRunning skidpad simulation...")
-    skidpad_results = vehicle.simulate_skidpad()
-    
-    # Display skidpad results
-    if skidpad_results['average_lap_time'] is not None:
-        print(f"Skidpad Lap Time: {skidpad_results['average_lap_time']:.2f} seconds")
-        print(f"Maximum Lateral Acceleration: {skidpad_results['max_lateral_acceleration']/9.81:.2f}g")
-    
-    # Perform thermal analysis
-    print("\nPerforming thermal analysis...")
-    thermal_results = vehicle.analyze_thermal_performance(ambient_temp=30.0)
-    
-    # Display thermal results
-    max_coolant_temp = max(thermal_results['coolant_temps'])
-    print(f"Maximum Coolant Temperature: {max_coolant_temp:.1f}°C")
-    print(f"Maximum Heat Rejection: {max(thermal_results['heat_rejections'])/1000:.1f} kW")
-    
-    # Plot results (comment out if not needed)
-    print("\nPlotting results...")
-    vehicle.plot_acceleration_results(accel_results)
-    vehicle.plot_skidpad_results(skidpad_results)
-    vehicle.plot_thermal_analysis(thermal_results)
-    
-    print("\nSimulation complete!")
+    if accel_results.get('finish_time'):
+        print(f" 75m Time: {accel_results['finish_time']:.3f} s")
+        print(f" 0-60 mph: {accel_results.get('time_to_60mph', -1):.3f} s")
+        # Plotting (optional)
+        # plot_dir = os.path.join(project_root, "plots", "vehicle_demo")
+        # os.makedirs(plot_dir, exist_ok=True)
+        # vehicle.plot_acceleration_results(accel_results, save_path=os.path.join(plot_dir, "demo_accel_run.png"))
+
+    print("\nVehicle demo finished.")

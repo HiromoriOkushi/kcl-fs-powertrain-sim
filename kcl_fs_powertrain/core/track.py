@@ -1,2024 +1,979 @@
 """
-Track module for Formula Student powertrain simulation.
+Track representation and analysis module for Formula Student simulations.
 
-This module provides classes for representing, analyzing, and
-visualizing tracks for vehicle performance simulation.
+Defines classes for representing track geometry, segments, and racing lines,
+along with methods for loading, processing, analyzing, and visualizing tracks.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional, Union, Any
-from enum import Enum
+from enum import Enum, auto
 import logging
 import yaml
 import os
 import csv
 from scipy.interpolate import interp1d, CubicSpline
-from scipy.optimize import minimize
-from scipy.spatial import distance
+from scipy.signal import savgol_filter # For smoothing
+from shapely.geometry import Point, LineString, Polygon
+from shapely.ops import transform
 
-from ..track_generator.enums import TrackMode, SimType
+# Import local dependencies (enums, utils)
+try:
+    from ..track_generator.enums import SimType
+    from ..utils.track_utils import preprocess_track_points, ensure_unique_values
+    from ..utils.plotting import save_plot, _apply_common_ax_settings, COLOR_SCHEMES
+    from ..utils.constants import GRAVITY, DEG_TO_RAD
+except ImportError:
+    # Fallbacks for standalone execution
+    class SimType(Enum): FSSIM='yaml'; FSDS='csv'; GPX='gpx'
+    def preprocess_track_points(d): return d
+    def ensure_unique_values(x): return x
+    def save_plot(fig, path, **kwargs): pass
+    def _apply_common_ax_settings(ax, **kwargs): pass
+    COLOR_SCHEMES = {'default': plt.cm.tab10.colors}
+    GRAVITY = 9.81; DEG_TO_RAD = np.pi / 180.0
+    logger = logging.getLogger("Track_Fallback")
+    logger.warning("Could not import all necessary modules. Using fallbacks.")
+
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
 logger = logging.getLogger("Track")
 
+# --- Enums and Helper Classes ---
 
 class TrackSegmentType(Enum):
-    """Type of track segment."""
-    STRAIGHT = 0
-    CORNER_LEFT = 1
-    CORNER_RIGHT = 2
-    CHICANE = 3
-    HAIRPIN = 4
-
+    """Type of track segment based on curvature."""
+    STRAIGHT = auto()
+    CORNER_LEFT = auto() # Positive curvature
+    CORNER_RIGHT = auto() # Negative curvature
+    HAIRPIN_LEFT = auto() # Sharp left
+    HAIRPIN_RIGHT = auto() # Sharp right
+    UNKNOWN = auto()
 
 class TrackSegment:
-    """Represents a segment of track with consistent characteristics."""
-    
-    def __init__(self, segment_type: TrackSegmentType, start_idx: int, end_idx: int, radius: Optional[float] = None):
-        """
-        Initialize segment with indices into track points.
-        
-        Args:
-            segment_type: Type of segment (straight, corner, etc.)
-            start_idx: Starting index in track points array
-            end_idx: Ending index in track points array
-            radius: Radius of curvature for corners (None for straights)
-        """
+    """Represents a logical segment of the track."""
+    def __init__(self, segment_type: TrackSegmentType, start_idx: int, end_idx: int):
         self.segment_type = segment_type
         self.start_idx = start_idx
         self.end_idx = end_idx
-        self.radius = radius
-        
-        # Additional properties to be calculated
-        self.length = 0.0
-        self.entry_speed = 0.0
-        self.exit_speed = 0.0
-        self.min_speed = 0.0
-        self.max_speed = 0.0
-        self.banking = 0.0  # Average banking angle in degrees
-        self.elevation_change = 0.0  # Net elevation change in meters
-        self.surface_friction = 1.0  # Coefficient of friction (1.0 = standard)
-    
-    def calculate_properties(self, track_points: np.ndarray, distances: np.ndarray):
-        """
-        Calculate segment properties based on track points.
-        
-        Args:
-            track_points: Array of track points (x, y, [z])
-            distances: Cumulative distances along track
-        """
-        # Calculate length
-        self.length = distances[self.end_idx] - distances[self.start_idx]
-        
-        # Additional calculations can be added for banking, elevation, etc.
-        # depending on the dimensionality of track_points
-        
-        # For 3D tracks, calculate elevation change
-        if track_points.shape[1] > 2:
-            self.elevation_change = track_points[self.end_idx, 2] - track_points[self.start_idx, 2]
-    
-    def get_curvature(self) -> float:
-        """
-        Get the curvature of this segment (1/radius).
-        
-        Returns:
-            Curvature value (0 for straights)
-        """
-        if self.radius is None or self.radius == 0:
-            return 0.0
-        return 1.0 / abs(self.radius)
-    
-    def get_segment_type_name(self) -> str:
-        """
-        Get the name of the segment type.
-        
-        Returns:
-            String representation of segment type
-        """
-        if self.segment_type == TrackSegmentType.STRAIGHT:
-            return "Straight"
-        elif self.segment_type == TrackSegmentType.CORNER_LEFT:
-            return "Left Corner"
-        elif self.segment_type == TrackSegmentType.CORNER_RIGHT:
-            return "Right Corner"
-        elif self.segment_type == TrackSegmentType.CHICANE:
-            return "Chicane"
-        elif self.segment_type == TrackSegmentType.HAIRPIN:
-            return "Hairpin"
-        return "Unknown"
-    
-    def __str__(self) -> str:
-        """String representation of segment."""
-        segment_str = f"{self.get_segment_type_name()}: {self.length:.1f}m"
-        if self.radius is not None and self.radius > 0:
-            segment_str += f", R={self.radius:.1f}m"
-        return segment_str
+        # Calculated properties
+        self.length_m: Optional[float] = None
+        self.avg_curvature: Optional[float] = None
+        self.min_radius_m: Optional[float] = None # Minimum radius within segment
+        self.entry_speed_mps: Optional[float] = None # Placeholder
+        self.exit_speed_mps: Optional[float] = None # Placeholder
 
+    def calculate_properties(self, distances: np.ndarray, curvature: np.ndarray):
+        """Calculate length and curvature properties."""
+        if self.end_idx >= len(distances) or self.start_idx < 0: return # Index check
+        self.length_m = distances[self.end_idx] - distances[self.start_idx]
+        if self.start_idx <= self.end_idx:
+             segment_curvature = curvature[self.start_idx : self.end_idx + 1]
+             self.avg_curvature = np.mean(segment_curvature) if len(segment_curvature) > 0 else 0.0
+             abs_curve = np.abs(segment_curvature)
+             max_curve = np.max(abs_curve) if len(abs_curve) > 0 else 0.0
+             self.min_radius_m = 1.0 / max_curve if max_curve > 1e-6 else float('inf')
+
+    def get_type_name(self) -> str:
+        """Return human-readable type name."""
+        return self.segment_type.name.replace('_', ' ').title()
+
+    def __str__(self) -> str:
+        details = f"{self.get_type_name()} ({self.start_idx}-{self.end_idx})"
+        if self.length_m is not None: details += f", Len={self.length_m:.1f}m"
+        if self.min_radius_m is not None and self.min_radius_m < 1000: details += f", Min R={self.min_radius_m:.1f}m"
+        return details
+
+class RacingLine:
+    """Represents and calculates an optimized racing line for a Track."""
+    def __init__(self, track: 'Track'): # Forward reference Track
+        self.track = track
+        self.line_points: Optional[np.ndarray] = None # Optimized (x, y) points
+        self.distances_m: Optional[np.ndarray] = None # Distance along racing line
+        self.curvature: Optional[np.ndarray] = None # Curvature along racing line
+        self.speed_profile_mps: Optional[np.ndarray] = None # Speed profile
+        self.lap_time_s: Optional[float] = None
+        logger.debug("RacingLine initialized.")
+
+    def _calculate_geometry(self):
+        """Calculate distance and curvature for the current line_points."""
+        if self.line_points is None or len(self.line_points) < 2: return
+
+        # Calculate distances
+        segment_lengths = np.sqrt(np.sum(np.diff(self.line_points, axis=0)**2, axis=1))
+        self.distances_m = np.concatenate(([0], np.cumsum(segment_lengths)))
+
+        # Calculate curvature
+        if len(self.line_points) >= 3:
+            dx = np.gradient(self.line_points[:, 0])
+            dy = np.gradient(self.line_points[:, 1])
+            d2x = np.gradient(dx)
+            d2y = np.gradient(dy)
+            denominator = np.maximum((dx**2 + dy**2)**1.5, 1e-9) # Avoid zero division
+            self.curvature = (dx * d2y - dy * d2x) / denominator
+            # Optionally smooth curvature
+            # self.curvature = savgol_filter(self.curvature, window_length=11, polyorder=3)
+        else:
+            self.curvature = np.zeros(len(self.line_points))
+
+    def optimize_geometric(self, smoothness: float = 0.1, inside_bias: float = 0.8) -> bool:
+        """Optimize racing line using geometric approach (inside of corners)."""
+        logger.info("Optimizing racing line using geometric method...")
+        if not self.track.has_geometry():
+             logger.error("Cannot optimize geometrically: Track geometry missing.")
+             return False
+
+        track_points = self.track.points
+        track_width = self.track.width
+        track_curvature = self.track.curvature # Use track's centerline curvature
+        n_points = len(track_points)
+
+        # 1. Calculate initial track position offset based on curvature
+        # Move towards inside (-1 for right turn, +1 for left turn), scaled by curvature magnitude
+        # Use tanh to smoothly approach the limit, scaled by inside_bias
+        max_abs_curve = np.max(np.abs(track_curvature)) if np.any(track_curvature) else 1.0
+        normalized_curve = track_curvature / max(max_abs_curve, 1e-6)
+        track_positions = -np.tanh(normalized_curve * 5.0) * inside_bias # Sharpness=5, Bias=0.8
+
+        # 2. Smooth the desired track positions
+        # Savitzky-Golay filter can preserve features better than moving average
+        window_size = max(5, n_points // 15) # Window size relative to track points
+        if window_size % 2 == 0: window_size += 1 # Must be odd
+        if window_size >= 3:
+             track_positions = savgol_filter(track_positions, window_size, polyorder=3, mode='wrap') # Wrap for closed track
+
+        # Clamp to limits
+        track_positions = np.clip(track_positions, -self.track.position_limit, self.track.position_limit)
+
+        # 3. Generate racing line points from smoothed positions
+        self.line_points = self.track.get_points_at_position(track_positions)
+
+        # 4. Recalculate geometry for the new line
+        self._calculate_geometry()
+        logger.info("Geometric racing line optimization complete.")
+        return True
+
+    def optimize_minimum_curvature(self, smoothness: float = 1.0, max_iter: int = 10) -> bool:
+         """Optimize racing line to minimize maximum curvature using iterative smoothing."""
+         logger.info("Optimizing racing line to minimize curvature...")
+         if not self.track.has_geometry(): return False
+
+         # Start with geometric line or centerline
+         if self.line_points is None:
+             self.optimize_geometric()
+             if self.line_points is None: # If geometric also failed
+                  self.line_points = self.track.points.copy() # Use centerline
+                  self._calculate_geometry()
+
+         initial_line = self.line_points.copy()
+         current_line = initial_line
+         normals = self.track.get_normals() # Normals of centerline
+         track_width = self.track.width
+         limit = self.track.position_limit
+
+         for iteration in range(max_iter):
+             last_line = current_line.copy()
+             # Smooth the current line (Laplacian smoothing)
+             smoothed_line = (np.roll(current_line, 1, axis=0) + np.roll(current_line, -1, axis=0)) / 2.0
+
+             # Project smoothed points back towards centerline normal within limits
+             for i in range(len(current_line)):
+                 center_p = self.track.points[i]
+                 normal_vec = normals[i]
+                 width = track_width[i]
+
+                 # Vector from centerline point to smoothed point
+                 vec_to_smoothed = smoothed_line[i] - center_p
+
+                 # Project onto normal vector to find distance from centerline
+                 dist_from_center = np.dot(vec_to_smoothed, normal_vec)
+
+                 # Clamp distance based on track width and limit
+                 max_dist = limit * width / 2.0
+                 clamped_dist = np.clip(dist_from_center, -max_dist, max_dist)
+
+                 # New point is centerline + clamped_dist along normal
+                 current_line[i] = center_p + normal_vec * clamped_dist
+
+             # Check for convergence (optional)
+             change = np.max(np.linalg.norm(current_line - last_line, axis=1))
+             logger.debug(f" Min Curvature Iter {iteration+1}, Max Change: {change:.4f}")
+             if change < 0.01: break # Converged
+
+         self.line_points = current_line
+         self._calculate_geometry()
+         logger.info(f"Minimum curvature optimization complete after {iteration+1} iterations.")
+         return True
+
+    # optimize_lap_time method is too complex for base track class, belongs in optimal_lap_time.py
+
+    def calculate_speed_profile(self, vehicle: 'Vehicle') -> Optional[np.ndarray]: # Forward reference Vehicle
+        """Calculate speed profile (m/s) along this racing line."""
+        if self.line_points is None or self.distances_m is None or self.curvature is None:
+             logger.error("Racing line geometry not calculated.")
+             return None
+        if vehicle is None:
+             logger.error("Vehicle object required for speed profile calculation.")
+             return None
+
+        n_points = len(self.line_points)
+        speeds = np.zeros(n_points)
+        distances = self.distances_m
+        curvature = self.curvature
+
+        # Get vehicle limits
+        cornering_calc = CorneringPerformance(vehicle) # Use helper class
+        max_vehicle_speed = vehicle.calculate_max_speed() if hasattr(vehicle, 'calculate_max_speed') else 50.0 # m/s fallback
+
+        # --- Pass 1: Cornering Speed Limit ---
+        for i in range(n_points):
+            if abs(curvature[i]) > 1e-6:
+                radius = 1.0 / abs(curvature[i])
+                corner_speed_limit = cornering_calc.calculate_max_cornering_speed(radius)
+                speeds[i] = min(corner_speed_limit, max_vehicle_speed)
+            else:
+                speeds[i] = max_vehicle_speed
+
+        # --- Pass 2: Braking Limit (Backward Pass) ---
+        max_braking_accel = vehicle.calculate_max_deceleration() if hasattr(vehicle, 'calculate_max_deceleration') else -1.8*GRAVITY # m/s^2
+
+        for i in range(n_points - 2, -1, -1):
+            ds = distances[i+1] - distances[i]
+            if ds < 1e-6: continue
+            v_next = speeds[i+1]
+            # v_curr^2 <= v_next^2 - 2*a*ds (a is negative for braking)
+            speed_limit_sq = v_next**2 - 2 * max_braking_accel * ds
+            if speed_limit_sq < 0: speed_limit_sq = 0
+            speeds[i] = min(speeds[i], np.sqrt(speed_limit_sq))
+
+        # --- Pass 3: Acceleration Limit (Forward Pass) ---
+        # Max accel depends on speed and gear - simplified here
+        max_accel = 1.2 * GRAVITY # m/s^2 fallback
+
+        for i in range(n_points - 1):
+            ds = distances[i+1] - distances[i]
+            if ds < 1e-6:
+                 speeds[i+1] = min(speeds[i+1], speeds[i])
+                 continue
+
+            v_current = speeds[i]
+            # Estimate max accel at this speed (more accurate would use gear/rpm)
+            if hasattr(vehicle, 'calculate_max_acceleration'):
+                 # Estimate gear based on speed - very approximate!
+                 est_gear = int(np.clip(v_current // 15, 1, vehicle.drivetrain.num_gears)) if vehicle.drivetrain else 1
+                 current_max_accel = vehicle.calculate_max_acceleration(v_current, est_gear)
+            else:
+                 current_max_accel = max_accel * (1 - v_current / max_vehicle_speed) # Simple reduction with speed
+
+            # v_next^2 <= v_curr^2 + 2*a*ds
+            speed_limit_sq = v_current**2 + 2 * current_max_accel * ds
+            speeds[i+1] = min(speeds[i+1], np.sqrt(speed_limit_sq))
+
+        self.speed_profile_mps = speeds
+        self._calculate_lap_time() # Calculate time based on speed profile
+        logger.info(f"Racing line speed profile calculated. Lap Time: {self.lap_time_s:.3f}s")
+        return self.speed_profile_mps
+
+    def _calculate_lap_time(self):
+         """Calculate lap time from distances and speed profile."""
+         if self.speed_profile_mps is None or self.distances_m is None or len(self.speed_profile_mps) < 2:
+             self.lap_time_s = None
+             return
+
+         dt = np.zeros(len(self.distances_m) - 1)
+         ds = np.diff(self.distances_m)
+         avg_speed = (self.speed_profile_mps[:-1] + self.speed_profile_mps[1:]) / 2.0
+
+         # Avoid division by zero for stationary segments
+         valid_mask = avg_speed > 1e-3
+         dt[valid_mask] = ds[valid_mask] / avg_speed[valid_mask]
+         # Assign large time penalty for zero-speed segments if ds > 0
+         dt[~valid_mask & (ds > 1e-6)] = 10.0 # 10s penalty
+
+         self.lap_time_s = np.sum(dt)
+
+    def get_stats(self) -> Dict:
+         """Return statistics about the racing line."""
+         stats = {'length_m': self.distances_m[-1] if self.distances_m is not None else None}
+         if self.curvature is not None:
+             abs_curve = np.abs(self.curvature)
+             stats['max_curvature'] = np.max(abs_curve) if len(abs_curve)>0 else 0
+             min_radius = 1.0 / stats['max_curvature'] if stats['max_curvature'] > 1e-6 else float('inf')
+             stats['min_radius_m'] = min_radius
+         if self.speed_profile_mps is not None:
+             stats['max_speed_mps'] = np.max(self.speed_profile_mps)
+             stats['avg_speed_mps'] = np.mean(self.speed_profile_mps)
+         stats['lap_time_s'] = self.lap_time_s
+         return stats
+
+    def plot(self, plot_track=True, color='r', label='Racing Line', show_speed=True, **kwargs):
+         """Plot the racing line, optionally with the track."""
+         if self.line_points is None:
+             logger.warning("Cannot plot: Racing line not calculated.")
+             return
+
+         if plot_track:
+             # Plot track boundaries for context
+             if self.track.left_boundary is not None and self.track.right_boundary is not None:
+                  plt.plot(self.track.left_boundary[:, 0], self.track.left_boundary[:, 1], 'k--', alpha=0.3, linewidth=0.5)
+                  plt.plot(self.track.right_boundary[:, 0], self.track.right_boundary[:, 1], 'k--', alpha=0.3, linewidth=0.5)
+
+         if show_speed and self.speed_profile_mps is not None:
+             # Color line by speed
+             points = self.line_points.reshape(-1, 1, 2)
+             segments = np.concatenate([points[:-1], points[1:]], axis=1)
+             norm = plt.Normalize(vmin=np.min(self.speed_profile_mps), vmax=np.max(self.speed_profile_mps))
+             lc = plt.matplotlib.collections.LineCollection(segments, cmap=plt.cm.viridis, norm=norm)
+             lc.set_array(self.speed_profile_mps)
+             lc.set_linewidth(kwargs.get('linewidth', 2))
+             plt.gca().add_collection(lc)
+             cbar = plt.colorbar(lc)
+             cbar.set_label('Speed (m/s)')
+             # Add label manually since LineCollection doesn't handle it well
+             plt.plot([], [], color=color, label=label, linewidth=kwargs.get('linewidth', 2)) # Dummy plot for legend
+         else:
+             plt.plot(self.line_points[:, 0], self.line_points[:, 1], color=color, label=label, **kwargs)
+
+         plt.gca().set_aspect('equal', adjustable='box')
+         plt.xlabel("X (m)")
+         plt.ylabel("Y (m)")
+         plt.title("Track Racing Line")
+         plt.legend()
+         plt.grid(True, alpha=0.3)
+
+
+# --- Main Track Class ---
 
 class Track:
     """Represents a complete track for vehicle simulation."""
-    
-    def __init__(self, name: Optional[str] = None):
-        """
-        Initialize an empty track.
-        
-        Args:
-            name: Optional name for the track
-        """
-        self.name = name if name else "Unnamed Track"
-        
-        # Track geometry
-        self.points = np.array([])  # Track centerline points (x, y, [z])
-        self.width = np.array([])  # Track width at each point
-        self.left_boundary = np.array([])  # Left track boundary
-        self.right_boundary = np.array([])  # Right track boundary
-        self.cones_left = np.array([])  # Left cones (for Formula Student)
-        self.cones_right = np.array([])  # Right cones (for Formula Student)
-        
-        # Track analysis
-        self.distances = np.array([])  # Cumulative distances along track
-        self.curvature = np.array([])  # Curvature at each point
-        self.segments = []  # List of track segments
-        self.total_length = 0.0  # Total track length
-        
-        # Additional track properties
-        self.banking = np.array([])  # Banking angle at each point
-        self.elevation = np.array([])  # Elevation at each point
-        self.surface_friction = np.array([])  # Surface friction at each point
-        
-        # Racing line
-        self.racing_line = None  # Current racing line object
-        
-        # Start/finish info
-        self.start_position = np.array([0.0, 0.0])
-        self.start_direction = 0.0  # radians
-        
-        # Metadata
-        self.source_file = None
-        self.is_closed_circuit = True
-        
-        logger.info("Track object initialized")
-    
+    def __init__(self, name: Optional[str] = "Unnamed Track"):
+        self.name = name
+        self.source_file: Optional[str] = None
+        self.is_closed_circuit: bool = True # Assume closed unless specified otherwise
+
+        # Core Geometry (Centerline)
+        self.points: Optional[np.ndarray] = None # Nx2 or Nx3 array (x, y, [z])
+        self.distances: Optional[np.ndarray] = None # Cumulative distance along centerline
+        self.curvature: Optional[np.ndarray] = None # Curvature at each point
+        self.width: Optional[np.ndarray] = None # Track width at each point (can be scalar)
+        self.total_length: float = 0.0
+
+        # Optional Detailed Geometry
+        self.left_boundary: Optional[np.ndarray] = None
+        self.right_boundary: Optional[np.ndarray] = None
+        self.cones_left: Optional[np.ndarray] = None
+        self.cones_right: Optional[np.ndarray] = None
+        self.elevation: Optional[np.ndarray] = None
+        self.banking: Optional[np.ndarray] = None # Banking angle (radians)
+
+        # Analysis Results
+        self.segments: List[TrackSegment] = []
+        self.racing_line: Optional[RacingLine] = None
+
+        # Start/Finish Info
+        self.start_position: np.ndarray = np.array([0.0, 0.0]) # Default start
+        self.start_heading: float = 0.0 # Radians, East
+
+        # Configuration
+        self.position_limit = 0.95 # Max deviation for racing line relative to half-width
+
+        logger.info(f"Track '{self.name}' initialized.")
+
+    def has_geometry(self) -> bool:
+        """Check if essential geometry (points, distances, curvature, width) is loaded."""
+        return (self.points is not None and len(self.points) > 2 and
+                self.distances is not None and len(self.distances) == len(self.points) and
+                self.curvature is not None and len(self.curvature) == len(self.points) and
+                self.width is not None and (np.isscalar(self.width) or len(self.width) == len(self.points)))
+
+
     def load_from_file(self, filepath: str) -> bool:
-        """
-        Load track from file (YAML, CSV, etc.).
-        
-        Args:
-            filepath: Path to track file
-            
-        Returns:
-            True if successful, False otherwise
-        """
+        """Load track data from various file formats."""
+        logger.info(f"Attempting to load track from: {filepath}")
         if not os.path.exists(filepath):
             logger.error(f"Track file not found: {filepath}")
             return False
-        
+
+        self.source_file = filepath
+        _, ext = os.path.splitext(filepath)
+        ext = ext.lower()
+        success = False
+
         try:
-            # Get file extension
-            _, ext = os.path.splitext(filepath)
-            ext = ext.lower()
-            
-            # Load based on file type
-            if ext == '.yaml' or ext == '.yml':
-                success = self._load_yaml_track(filepath)
-            elif ext == '.csv':
-                success = self._load_csv_track(filepath)
-            else:
-                logger.error(f"Unsupported track file format: {ext}")
-                return False
-            
+            if ext in ['.yaml', '.yml']: success = self._load_yaml(filepath)
+            elif ext == '.csv': success = self._load_csv(filepath)
+            elif ext == '.gpx': success = self._load_gpx(filepath)
+            else: logger.error(f"Unsupported track file format: {ext}")
+
             if success:
-                self.source_file = filepath
                 self._post_load_processing()
-                logger.info(f"Successfully loaded track from {filepath}")
-                return True
-            
-            return False
-            
+                logger.info(f"Successfully loaded and processed track '{self.name}' from {filepath}")
+            else:
+                 logger.error(f"Failed to load track data from {filepath}")
+
         except Exception as e:
-            logger.error(f"Error loading track from {filepath}: {str(e)}")
-            return False
-    
-    def _load_yaml_track(self, filepath: str) -> bool:
-        """
-        Load track from YAML file.
-        
-        Args:
-            filepath: Path to YAML file
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            with open(filepath, 'r') as f:
-                track_data = yaml.safe_load(f)
-            
-            # Check if this is a FSSIM track format
-            if 'cones_left' in track_data and 'cones_right' in track_data:
-                # FSSIM format
-                return self._load_fssim_format(track_data)
-            
-            # Generic YAML format
-            if 'track' in track_data:
-                points = []
-                width_values = []
-                
-                for point in track_data['track']:
-                    points.append([point['x'], point['y']])
-                    width_values.append(point.get('width', 3.0))
-                
-                self.points = np.array(points)
-                self.width = np.array(width_values)
-                
-                # Load metadata if available
-                if 'metadata' in track_data:
-                    metadata = track_data['metadata']
-                    self.name = metadata.get('name', self.name)
-                    self.is_closed_circuit = metadata.get('closed_circuit', True)
-                
-                # Load start position if available
-                if 'start' in track_data:
-                    start = track_data['start']
-                    self.start_position = np.array([start.get('x', 0.0), start.get('y', 0.0)])
-                    self.start_direction = start.get('direction', 0.0)
-                
-                return True
-            
-            logger.error(f"Invalid YAML track format in {filepath}")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error parsing YAML track file {filepath}: {str(e)}")
-            return False
-    
-    def _load_csv_track(self, filepath: str) -> bool:
-        """
-        Load track from CSV file.
-        
-        Args:
-            filepath: Path to CSV file
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            # Try to determine CSV format
-            with open(filepath, 'r') as f:
-                first_line = f.readline().strip()
-            
-            # Check if it's an FSDS format (color,x,y,z)
-            if 'color' in first_line or 'blue' in first_line or 'yellow' in first_line:
-                return self._load_fsds_format(filepath)
-            
-            # Assume generic CSV with x,y[,width] columns
-            points = []
-            width_values = []
-            
-            with open(filepath, 'r') as f:
-                reader = csv.reader(f)
-                header = next(reader)  # Skip header
-                
-                has_width = len(header) > 2 and 'width' in header[2].lower()
-                
-                for row in reader:
-                    if len(row) >= 2:
-                        x = float(row[0])
-                        y = float(row[1])
-                        points.append([x, y])
-                        
-                        if has_width and len(row) > 2:
-                            width_values.append(float(row[2]))
-                        else:
-                            width_values.append(3.0)  # Default width
-            
-            if len(points) < 3:
-                logger.error(f"CSV track file {filepath} has too few points")
-                return False
-            
-            self.points = np.array(points)
-            self.width = np.array(width_values)
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error parsing CSV track file {filepath}: {str(e)}")
-            return False
-    
-    def _load_fsds_format(self, filepath: str) -> bool:
-        """
-        Load track from FSDS CSV format.
-        
-        Args:
-            filepath: Path to FSDS CSV file
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            cones_left = []
-            cones_right = []
-            cones_orange = []
-            
-            with open(filepath, 'r') as f:
-                reader = csv.reader(f)
-                
-                for row in reader:
-                    if len(row) >= 3:  # Need at least color, x, y
-                        cone_type = row[0].strip().lower()
-                        x = float(row[1])
-                        y = float(row[2])
-                        
-                        if cone_type == 'blue':
-                            cones_left.append([x, y])
-                        elif cone_type == 'yellow':
-                            cones_right.append([x, y])
-                        elif 'orange' in cone_type:
-                            cones_orange.append([x, y])
-            
-            if len(cones_left) < 3 or len(cones_right) < 3:
-                logger.error(f"FSDS track file {filepath} has too few cones")
-                return False
-            
-            # Store cone positions
-            self.cones_left = np.array(cones_left)
-            self.cones_right = np.array(cones_right)
-            
-            # Create centerline from cones
-            self._create_centerline_from_cones()
-            
-            # Try to determine start position from orange cones
-            if len(cones_orange) >= 2:
-                # Assume the first two orange cones define the start line
-                start_line = np.array([cones_orange[0], cones_orange[1]])
-                self.start_position = np.mean(start_line, axis=0)
-                
-                # Calculate start direction (perpendicular to start line)
-                dx = start_line[1, 0] - start_line[0, 0]
-                dy = start_line[1, 1] - start_line[0, 1]
-                self.start_direction = np.arctan2(dx, -dy)  # Perpendicular to start line
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error parsing FSDS track file {filepath}: {str(e)}")
-            return False
-    
+            logger.error(f"Error loading track from {filepath}: {e}", exc_info=True)
+            success = False
+
+        return success
+
+    # --- Loading Methods (_load_yaml, _load_csv, _load_fssim, _load_fsds, _load_gpx) ---
+    # These would parse specific file formats and populate self.points, self.width, etc.
+    # Implementations are similar to the generator's export methods but reversed.
+    # Example for _load_yaml (simplified):
+    def _load_yaml(self, filepath: str) -> bool:
+         with open(filepath, 'r') as f: track_data = yaml.safe_load(f)
+         # Check FSSIM format first
+         if 'cones_left' in track_data and 'cones_right' in track_data:
+             return self._load_fssim_format(track_data)
+         # Check generic format
+         elif 'track' in track_data and isinstance(track_data['track'], list):
+             points = []
+             widths = []
+             elevations = []
+             for p in track_data['track']:
+                 points.append([p.get('x', 0.0), p.get('y', 0.0)])
+                 widths.append(p.get('width', 3.0))
+                 elevations.append(p.get('z', 0.0)) # Add elevation if present
+             self.points = np.array(points)
+             self.width = np.array(widths)
+             self.elevation = np.array(elevations) if np.any(elevations) else None
+             meta = track_data.get('metadata', {})
+             self.name = meta.get('name', os.path.basename(filepath))
+             self.is_closed_circuit = meta.get('closed_circuit', True)
+             start = track_data.get('start', {})
+             self.start_position = np.array([start.get('x', self.points[0,0]), start.get('y', self.points[0,1])])
+             self.start_heading = start.get('direction', 0.0) # Radians
+             return True
+         else:
+             logger.error("Invalid YAML track format.")
+             return False
+
+    # Placeholder for other loading methods
+    def _load_csv(self, filepath: str) -> bool:
+         logger.warning("_load_csv not fully implemented.")
+         # Add logic to detect FSDS or generic CSV and parse accordingly
+         # Example: Read into pandas, check columns, populate self.points etc.
+         # For FSDS, call self._load_fsds_format
+         try:
+             # Sniff to guess dialect/header
+             with open(filepath, 'r') as f:
+                  header = f.readline().lower()
+                  sniffer = csv.Sniffer()
+                  dialect = sniffer.sniff(f.read(1024))
+                  f.seek(0) # Reset read position
+
+             # Check for FSDS format (cone colors)
+             if 'blue' in header or 'yellow' in header or 'color' in header:
+                 return self._load_fsds_format(filepath)
+             else: # Assume generic x,y,[z],[width]
+                 df = pd.read_csv(filepath, dialect=dialect)
+                 if 'x' not in df.columns or 'y' not in df.columns:
+                      logger.error("Generic CSV must contain 'x' and 'y' columns.")
+                      return False
+                 self.points = df[['x', 'y']].values
+                 self.width = df['width'].values if 'width' in df.columns else np.full(len(self.points), 3.0)
+                 self.elevation = df['z'].values if 'z' in df.columns else None
+                 self.name = os.path.basename(filepath)
+                 return True
+         except Exception as e:
+              logger.error(f"Error reading CSV {filepath}: {e}")
+              return False
+
     def _load_fssim_format(self, track_data: Dict) -> bool:
-        """
-        Load track from FSSIM YAML dictionary.
-        
-        Args:
-            track_data: Track data dictionary in FSSIM format
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            if 'cones_left' in track_data and 'cones_right' in track_data:
-                cones_left = np.array(track_data['cones_left'])
-                cones_right = np.array(track_data['cones_right'])
-                
-                if len(cones_left) < 3 or len(cones_right) < 3:
-                    logger.error("FSSIM track has too few cones")
-                    return False
-                
-                # Store cone positions
-                self.cones_left = cones_left
-                self.cones_right = cones_right
-                
-                # Create centerline from cones
-                self._create_centerline_from_cones()
-                
-                # Get start position if available
-                if 'starting_pose_cg' in track_data:
-                    start_pose = track_data['starting_pose_cg']
-                    if len(start_pose) >= 3:
-                        self.start_position = np.array([start_pose[0], start_pose[1]])
-                        self.start_direction = start_pose[2]
-                
-                return True
-            
-            logger.error("Invalid FSSIM track format")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error parsing FSSIM track data: {str(e)}")
-            return False
-    
+        logger.info("Loading track from FSSIM (cone-based) format...")
+        cones_left = np.array(track_data.get('cones_left', []))
+        cones_right = np.array(track_data.get('cones_right', []))
+        if len(cones_left) < 3 or len(cones_right) < 3: return False
+        self.cones_left = cones_left
+        self.cones_right = cones_right
+        self._create_centerline_from_cones() # Generates self.points and self.width
+        meta = track_data.get('metadata', {})
+        self.name = meta.get('name', self.name)
+        start = track_data.get('starting_pose_cg', [0,0,0])
+        self.start_position = np.array(start[:2])
+        self.start_heading = start[2] if len(start)>2 else 0.0
+        return True # Assumes _create_centerline worked
+
+    def _load_fsds_format(self, filepath: str) -> bool:
+         logger.info("Loading track from FSDS (cone-based) format...")
+         # Implementation similar to generator's _export_fsds_csv reversed
+         cones_left = []
+         cones_right = []
+         with open(filepath, 'r') as f:
+             reader = csv.reader(f)
+             for row in reader:
+                 if len(row) >= 3:
+                     color = row[0].lower()
+                     try:
+                          x, y = float(row[1]), float(row[2])
+                          if 'blue' in color: cones_left.append([x, y])
+                          elif 'yellow' in color: cones_right.append([x, y])
+                          # Could also parse orange cones for start/finish
+                     except ValueError: continue # Skip invalid rows
+         if len(cones_left) < 3 or len(cones_right) < 3: return False
+         self.cones_left = np.array(cones_left)
+         self.cones_right = np.array(cones_right)
+         self._create_centerline_from_cones()
+         self.name = os.path.basename(filepath)
+         # Need logic to find start pos from orange cones if present
+         return True
+
+    def _load_gpx(self, filepath: str) -> bool:
+        logger.warning("_load_gpx not fully implemented.")
+        # Use gpxpy to parse file, convert lat/lon to local x/y
+        # Needs a reference point for conversion
+        return False
+
+
     def _create_centerline_from_cones(self):
-        """Create centerline points from left and right cones."""
-        try:
-            # Simple approach: for each left cone, find closest right cone and vice versa
-            centerline_points = []
-            
-            # Process left cones
-            for left_cone in self.cones_left:
-                distances = np.sum((self.cones_right - left_cone)**2, axis=1)
-                closest_idx = np.argmin(distances)
-                closest_right = self.cones_right[closest_idx]
-                
-                # Midpoint between cones
-                midpoint = (left_cone + closest_right) / 2
-                centerline_points.append(midpoint)
-            
-            # Process right cones
-            for right_cone in self.cones_right:
-                distances = np.sum((self.cones_left - right_cone)**2, axis=1)
-                closest_idx = np.argmin(distances)
-                closest_left = self.cones_left[closest_idx]
-                
-                # Midpoint between cones
-                midpoint = (right_cone + closest_left) / 2
-                centerline_points.append(midpoint)
-            
-            # Remove duplicates (approximately)
-            unique_points = []
-            for point in centerline_points:
-                is_duplicate = False
-                for existing_point in unique_points:
-                    if np.linalg.norm(point - existing_point) < 0.5:  # Within 0.5m
-                        is_duplicate = True
-                        break
-                
-                if not is_duplicate:
-                    unique_points.append(point)
-            
-            # Sort points to form a continuous path
-            sorted_points = self._sort_centerline_points(unique_points)
-            
-            # Store results
-            self.points = np.array(sorted_points)
-            
-            # Create width array based on distance between cone pairs
-            self.width = np.zeros(len(self.points))
-            for i, point in enumerate(self.points):
-                # Find closest left and right cones
-                left_dists = np.sum((self.cones_left - point)**2, axis=1)
-                right_dists = np.sum((self.cones_right - point)**2, axis=1)
-                
-                closest_left_idx = np.argmin(left_dists)
-                closest_right_idx = np.argmin(right_dists)
-                
-                closest_left = self.cones_left[closest_left_idx]
-                closest_right = self.cones_right[closest_right_idx]
-                
-                # Calculate width as distance between cones
-                self.width[i] = np.linalg.norm(closest_left - closest_right)
-            
-            logger.info(f"Created centerline with {len(self.points)} points from cones")
-            
-        except Exception as e:
-            logger.error(f"Error creating centerline from cones: {str(e)}")
-            # Fallback to simple approach
-            if len(self.cones_left) > 0 and len(self.cones_right) > 0:
-                # Just use average of all cones to create a crude centerline
-                avg_left = np.mean(self.cones_left, axis=0)
-                avg_right = np.mean(self.cones_right, axis=0)
-                self.points = np.array([avg_left, avg_right])
-                self.width = np.array([3.0, 3.0])
-    
-    def _sort_centerline_points(self, points: List[np.ndarray]) -> List[np.ndarray]:
-        """
-        Sort a list of points to form a continuous path.
-        
-        Args:
-            points: List of points to sort
-            
-        Returns:
-            Sorted list of points
-        """
-        if len(points) <= 2:
-            return points
-        
-        # Convert to numpy array for easier manipulation
-        points_array = np.array(points)
-        
-        # Start with the leftmost point (minimum x-coordinate)
-        start_idx = np.argmin(points_array[:, 0])
+        """Generate centerline and width estimates from cone data."""
+        if self.cones_left is None or self.cones_right is None or \
+           len(self.cones_left) < 2 or len(self.cones_right) < 2:
+            logger.error("Insufficient cone data to create centerline.")
+            return
+
+        logger.debug("Creating centerline from cones...")
+        # More robust centerline generation: Find pairs and average
+        # This is complex. Simplified approach: Average nearest points
+        # Use a KDTree for efficient nearest neighbor search
+        tree_left = spatial.KDTree(self.cones_left)
+        tree_right = spatial.KDTree(self.cones_right)
+
+        centerline = []
+        widths = []
+
+        # Iterate through left cones, find nearest right, calculate midpoint & width
+        for i, p_left in enumerate(self.cones_left):
+             dist, idx_right = tree_right.query(p_left)
+             p_right = self.cones_right[idx_right]
+             centerline.append((p_left + p_right) / 2.0)
+             widths.append(dist)
+
+        # Iterate through right cones, find nearest left, calculate midpoint & width
+        for i, p_right in enumerate(self.cones_right):
+             dist, idx_left = tree_left.query(p_right)
+             p_left = self.cones_left[idx_left]
+             centerline.append((p_left + p_right) / 2.0)
+             widths.append(dist) # Distance is the width at this pairing
+
+        centerline = np.array(centerline)
+        widths = np.array(widths)
+
+        # Sort the centerline points (essential step)
+        # Start near the point with min x+y coordinate as heuristic
+        start_idx = np.argmin(np.sum(centerline, axis=1))
         sorted_indices = [start_idx]
-        remaining_indices = set(range(len(points_array)))
+        remaining_indices = set(range(len(centerline)))
         remaining_indices.remove(start_idx)
-        
-        # Iteratively find the closest point
+        tree_center = spatial.KDTree(centerline)
+
         while remaining_indices:
             last_idx = sorted_indices[-1]
-            last_point = points_array[last_idx]
-            
-            min_dist = float('inf')
-            min_idx = -1
-            
-            for idx in remaining_indices:
-                dist = np.linalg.norm(points_array[idx] - last_point)
-                if dist < min_dist:
-                    min_dist = dist
-                    min_idx = idx
-            
-            if min_idx >= 0:
-                sorted_indices.append(min_idx)
-                remaining_indices.remove(min_idx)
-            else:
-                # Should never happen, but just in case
-                break
-        
-        # Return sorted points
-        return [points_array[idx] for idx in sorted_indices]
-    
-    def load_from_generator(self, generator_output: Dict) -> bool:
-        """
-        Load track from track generator output.
-        
-        Args:
-            generator_output: Output dictionary from FSTrackGenerator
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            if 'cones_left' in generator_output and 'cones_right' in generator_output:
-                self.cones_left = np.array(generator_output['cones_left'])
-                self.cones_right = np.array(generator_output['cones_right'])
-                
-                # Create centerline from cones
-                self._create_centerline_from_cones()
-                
-                # Get track metadata
-                if 'metadata' in generator_output:
-                    metadata = generator_output['metadata']
-                    self.name = metadata.get('name', self.name)
-                    self.total_length = metadata.get('track_length', 0.0)
-                
-                # Get start position
-                if 'start_position' in generator_output:
-                    self.start_position = np.array(generator_output['start_position'])
-                
-                if 'start_heading' in generator_output:
-                    self.start_direction = generator_output['start_heading']
-                
-                self._post_load_processing()
-                logger.info("Successfully loaded track from generator output")
-                return True
-            
-            logger.error("Invalid generator output format")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error loading track from generator output: {str(e)}")
-            return False
-    
+            # Find nearest neighbors among remaining points
+            k_to_check = min(10, len(remaining_indices))
+            distances, indices = tree_center.query(centerline[last_idx], k=k_to_check + 1) # Query more than needed
+            # Find the closest point *that is still remaining*
+            found_next = False
+            for idx in indices[1:]: # Skip self (dist=0)
+                if idx in remaining_indices:
+                    sorted_indices.append(idx)
+                    remaining_indices.remove(idx)
+                    found_next = True
+                    break
+            if not found_next:
+                 # If no close neighbor found among remaining, might be fragmented. Take closest overall remaining.
+                 if not remaining_indices: break
+                 closest_remaining_idx = min(remaining_indices, key=lambda idx: np.linalg.norm(centerline[idx] - centerline[last_idx]))
+                 sorted_indices.append(closest_remaining_idx)
+                 remaining_indices.remove(closest_remaining_idx)
+
+
+        # Reorder points and widths
+        self.points = centerline[sorted_indices]
+        self.width = widths[sorted_indices] # Width corresponding to the centerline point
+
+        # Optional: Smooth centerline and width
+        if len(self.points) > 10:
+            window = max(5, len(self.points)//20) | 1 # Odd window size
+            self.points[:, 0] = savgol_filter(self.points[:, 0], window, 3, mode='wrap')
+            self.points[:, 1] = savgol_filter(self.points[:, 1], window, 3, mode='wrap')
+            self.width = savgol_filter(self.width, window, 3, mode='wrap')
+            self.width = np.clip(self.width, 1.5, 10.0) # Clip to reasonable FS widths
+
+        logger.info(f"Centerline created from cones: {len(self.points)} points.")
+
+
     def _post_load_processing(self):
-        """Perform post-load processing such as calculating distances and curvature."""
-        # Calculate cumulative distances
+        """Calculate distances, curvature, segments, boundaries after loading points."""
+        if self.points is None or len(self.points) < 3:
+             logger.error("Cannot process track: Insufficient points.")
+             return
+
+        # 0. Preprocess (remove duplicates)
+        track_dict = {'points': self.points, 'width': self.width}
+        if self.elevation is not None: track_dict['elevation'] = self.elevation
+        processed_data = preprocess_track_points(track_dict)
+        self.points = processed_data['points']
+        self.width = processed_data['width']
+        self.elevation = processed_data.get('elevation')
+        # Distances are recalculated below
+
+        # 1. Calculate Distances
         self._calculate_distances()
-        
-        # Calculate curvature
-        self.calculate_curvature()
-        
-        # Segment the track
-        self.segment_track()
-        
-        # Create track boundaries
-        self._create_track_boundaries()
-    
-    def _calculate_distances(self):
-        """Calculate cumulative distances along the track centerline."""
-        if len(self.points) < 2:
-            logger.warning("Not enough points to calculate distances")
-            self.distances = np.array([0.0])
-            self.total_length = 0.0
-            return
-        
-        # Calculate segment lengths
-        segments = np.diff(self.points, axis=0)
-        segment_lengths = np.sqrt(np.sum(segments**2, axis=1))
-        
-        # Cumulative distances
-        self.distances = np.zeros(len(self.points))
-        self.distances[1:] = np.cumsum(segment_lengths)
-        
-        # Total length
-        self.total_length = self.distances[-1]
-        
-        logger.info(f"Track length: {self.total_length:.1f}m")
-    
-    def _create_track_boundaries(self):
-        """Create left and right track boundaries based on centerline and width."""
-        if len(self.points) < 2 or len(self.width) != len(self.points):
-            logger.warning("Cannot create track boundaries with current data")
-            return
-        
-        # Initialize boundary arrays
-        self.left_boundary = np.zeros_like(self.points)
-        self.right_boundary = np.zeros_like(self.points)
-        
-        # Calculate normal vectors at each point
-        normals = self._calculate_normals()
-        
-        # Create boundaries
-        for i in range(len(self.points)):
-            half_width = self.width[i] / 2.0
-            self.left_boundary[i] = self.points[i] + normals[i] * half_width
-            self.right_boundary[i] = self.points[i] - normals[i] * half_width
-    
-    def _calculate_normals(self) -> np.ndarray:
-        """
-        Calculate normal vectors at each point.
-        
-        Returns:
-            Array of normal vectors
-        """
-        n_points = len(self.points)
-        normals = np.zeros_like(self.points)
-        
-        for i in range(n_points):
-            # Get adjacent points (with wraparound for closed circuits)
-            prev_idx = (i - 1) % n_points
-            next_idx = (i + 1) % n_points
-            
-            # Calculate tangent vector
-            tangent = self.points[next_idx] - self.points[prev_idx]
-            
-            # Normalize
-            if np.linalg.norm(tangent) > 1e-6:
-                tangent = tangent / np.linalg.norm(tangent)
-            
-            # Calculate normal (90 degree rotation)
-            normals[i] = np.array([-tangent[1], tangent[0]])
-        
-        return normals
-    
-    def calculate_curvature(self):
-        """Calculate track curvature at each point."""
-        if len(self.points) < 3:
-            logger.warning("Not enough points to calculate curvature")
-            self.curvature = np.zeros(len(self.points))
-            return
-        
-        n_points = len(self.points)
-        self.curvature = np.zeros(n_points)
-        
-        for i in range(n_points):
-            # Get adjacent points (with wraparound for closed circuits)
-            prev_idx = (i - 1) % n_points
-            next_idx = (i + 1) % n_points
-            
-            # Get positions
-            p_prev = self.points[prev_idx]
-            p_curr = self.points[i]
-            p_next = self.points[next_idx]
-            
-            # Calculate vectors
-            v1 = p_prev - p_curr
-            v2 = p_next - p_curr
-            
-            # Normalize vectors
-            if np.linalg.norm(v1) > 1e-6 and np.linalg.norm(v2) > 1e-6:
-                v1 = v1 / np.linalg.norm(v1)
-                v2 = v2 / np.linalg.norm(v2)
-                
-                # Calculate angle between vectors
-                dot_product = np.clip(np.dot(v1, v2), -1.0, 1.0)
-                angle = np.arccos(dot_product)
-                
-                # Calculate direction of curve
-                cross_product = np.cross(v1, v2)
-                sign = 1.0 if cross_product > 0 else -1.0
-                
-                # Calculate curvature (inverse radius)
-                if self.distances is not None and len(self.distances) > 0:
-                    # Use distance along track for better estimation
-                    l1 = self.distances[i] - self.distances[prev_idx] if i > prev_idx else self.total_length - self.distances[prev_idx] + self.distances[i]
-                    l2 = self.distances[next_idx] - self.distances[i] if next_idx > i else self.total_length - self.distances[i] + self.distances[next_idx]
-                    
-                    # Curvature estimate
-                    self.curvature[i] = sign * angle / ((l1 + l2) / 2.0)
-                else:
-                    # Simplified calculation
-                    d1 = np.linalg.norm(p_prev - p_curr)
-                    d2 = np.linalg.norm(p_next - p_curr)
-                    self.curvature[i] = sign * angle / ((d1 + d2) / 2.0)
-            else:
-                self.curvature[i] = 0.0
-        
-        # Apply smoothing to curvature
-        self.curvature = self._smooth_array(self.curvature, window_size=5)
-        
-        logger.info("Curvature calculated for track")
-    
-    def _smooth_array(self, array: np.ndarray, window_size: int = 3) -> np.ndarray:
-        """
-        Apply smoothing to an array.
-        
-        Args:
-            array: Array to smooth
-            window_size: Size of smoothing window
-            
-        Returns:
-            Smoothed array
-        """
-        if window_size < 2:
-            return array
-        
-        result = np.copy(array)
-        n = len(array)
-        half_window = window_size // 2
-        
-        for i in range(n):
-            # Get window indices with wraparound
-            window_indices = [(i + j - half_window) % n for j in range(window_size)]
-            
-            # Calculate mean for window
-            result[i] = np.mean(array[window_indices])
-        
-        return result
-    
-    def segment_track(self):
-        """Divide track into logical segments (straights, corners)."""
-        if len(self.points) < 3 or len(self.curvature) != len(self.points):
-            logger.warning("Not enough data to segment track")
-            return
-        
-        # Thresholds for segmentation
-        straight_threshold = 0.01  # Max curvature for straights
-        corner_threshold = 0.05    # Min curvature for corners
-        
-        # Initialize segments
-        self.segments = []
-        
-        # Identify segments
-        current_type = None
-        start_idx = 0
-        
-        for i in range(len(self.curvature)):
-            curve = self.curvature[i]
-            
-            # Determine segment type
-            if abs(curve) < straight_threshold:
-                segment_type = TrackSegmentType.STRAIGHT
-            elif curve > corner_threshold:
-                segment_type = TrackSegmentType.CORNER_LEFT
-            elif curve < -corner_threshold:
-                segment_type = TrackSegmentType.CORNER_RIGHT
-            else:
-                # Transition zone, continue current segment
-                continue
-            
-            # Check if segment type has changed
-            if current_type is not None and segment_type != current_type:
-                # End current segment
-                radius = None
-                if current_type != TrackSegmentType.STRAIGHT:
-                    # Calculate average radius for corner
-                    avg_curvature = np.mean(np.abs(self.curvature[start_idx:i]))
-                    if avg_curvature > 1e-6:
-                        radius = 1.0 / avg_curvature
-                
-                # Create segment
-                segment = TrackSegment(current_type, start_idx, i, radius)
-                segment.calculate_properties(self.points, self.distances)
-                self.segments.append(segment)
-                
-                # Start new segment
-                start_idx = i
-            
-            current_type = segment_type
-        
-        # Add final segment
-        if current_type is not None:
-            radius = None
-            if current_type != TrackSegmentType.STRAIGHT:
-                # Calculate average radius for corner
-                avg_curvature = np.mean(np.abs(self.curvature[start_idx:]))
-                if avg_curvature > 1e-6:
-                    radius = 1.0 / avg_curvature
-            
-            # Create segment
-            segment = TrackSegment(current_type, start_idx, len(self.curvature) - 1, radius)
-            segment.calculate_properties(self.points, self.distances)
-            self.segments.append(segment)
-        
-        # Merge very short segments with adjacent ones
-        minimum_length = 5.0  # Minimum segment length in meters
-        self._merge_short_segments(minimum_length)
-        
-        # Log segment info
-        segment_counts = {
-            'straight': sum(1 for s in self.segments if s.segment_type == TrackSegmentType.STRAIGHT),
-            'left_corner': sum(1 for s in self.segments if s.segment_type == TrackSegmentType.CORNER_LEFT),
-            'right_corner': sum(1 for s in self.segments if s.segment_type == TrackSegmentType.CORNER_RIGHT)
-        }
-        
-        logger.info(f"Track segmented into {len(self.segments)} segments: " +
-                   f"{segment_counts['straight']} straights, " +
-                   f"{segment_counts['left_corner']} left corners, " +
-                   f"{segment_counts['right_corner']} right corners")
-    
-    def _merge_short_segments(self, min_length: float):
-        """
-        Merge very short segments with adjacent ones.
-        
-        Args:
-            min_length: Minimum segment length in meters
-        """
-        if len(self.segments) <= 1:
-            return
-        
-        i = 0
-        while i < len(self.segments) - 1:
-            segment = self.segments[i]
-            
-            if segment.length < min_length:
-                # Merge with the next segment
-                next_segment = self.segments[i + 1]
-                
-                # Choose segment type based on length
-                if segment.length > next_segment.length:
-                    merged_type = segment.segment_type
-                else:
-                    merged_type = next_segment.segment_type
-                
-                # Calculate radius for corners
-                radius = None
-                if merged_type != TrackSegmentType.STRAIGHT:
-                    # Use weighted average of radii
-                    if segment.radius is not None and next_segment.radius is not None:
-                        radius = (segment.radius * segment.length + next_segment.radius * next_segment.length) / (segment.length + next_segment.length)
-                    elif segment.radius is not None:
-                        radius = segment.radius
-                    else:
-                        radius = next_segment.radius
-                
-                # Create merged segment
-                merged = TrackSegment(merged_type, segment.start_idx, next_segment.end_idx, radius)
-                merged.calculate_properties(self.points, self.distances)
-                
-                # Replace segments
-                self.segments[i] = merged
-                del self.segments[i + 1]
-            else:
-                i += 1
-    
-    def calculate_racing_line(self, vehicle=None):
-        """
-        Calculate an optimized racing line.
-        
-        Args:
-            vehicle: Optional vehicle model for constraints
-            
-        Returns:
-            RacingLine object
-        """
-        # Create racing line object
-        self.racing_line = RacingLine(self)
-        
-        # Optimize racing line
-        self.racing_line.optimize(vehicle)
-        
-        return self.racing_line
-    
-    def calculate_elevation_profile(self):
-        """
-        Calculate elevation changes along the track.
-        
-        Returns:
-            Array of elevation values
-        """
-        # For tracks with 3D points
-        if self.points.shape[1] > 2 and len(self.points) > 0:
-            self.elevation = self.points[:, 2]
-            logger.info("Elevation profile calculated from 3D track data")
-            return self.elevation
-        
-        # For 2D tracks, create a synthetic elevation profile
-        if len(self.distances) > 0:
-            # Generate a random but smooth elevation profile
-            n_points = len(self.points)
-            
-            # Create a few random control points
-            n_control = max(3, n_points // 10)
-            control_distances = np.linspace(0, self.total_length, n_control)
-            control_elevations = np.random.uniform(-10, 10, n_control)
-            control_elevations[0] = 0.0  # Start at zero elevation
-            control_elevations[-1] = 0.0  # End at zero elevation
-            
-            # Create a smooth interpolation
-            elevation_interpolator = interp1d(control_distances, control_elevations, kind='cubic')
-            
-            # Interpolate for all track points
-            self.elevation = elevation_interpolator(self.distances)
-            
-            logger.info("Synthetic elevation profile created for 2D track")
-            return self.elevation
-        
-        logger.warning("Cannot calculate elevation profile without track distances")
-        return np.zeros(len(self.points))
-    
-    def calculate_theoretical_speed_profile(self, vehicle: Any) -> np.ndarray:
-        """
-        Calculate theoretical speed profile based on vehicle limits.
-        
-        Args:
-            vehicle: Vehicle model object
-            
-        Returns:
-            Array of speeds for each track point
-        """
-        if len(self.points) < 2 or vehicle is None:
-            return np.zeros(len(self.points))
-        
-        try:
-            # Initialize speed profile
-            speed_profile = np.zeros(len(self.points))
-            
-            # First pass: calculate maximum speed based on curvature
-            for i, curve in enumerate(self.curvature):
-                if abs(curve) > 1e-6:
-                    # Calculate corner radius
-                    radius = 1.0 / abs(curve)
-                    
-                    # Calculate maximum cornering speed
-                    max_lateral_accel = 20.0  # Default if vehicle doesn't provide calculation
-                    
-                    if hasattr(vehicle, 'cornering'):
-                        max_lateral_accel = vehicle.cornering.calculate_max_lateral_acceleration()
-                    
-                    # v^2 = a * r for constant radius cornering
-                    max_corner_speed = np.sqrt(max_lateral_accel * radius)
-                else:
-                    # Straight section - use maximum vehicle speed
-                    max_speed = 100.0  # Default if vehicle doesn't provide calculation
-                    
-                    if hasattr(vehicle, 'calculate_max_speed'):
-                        max_speed = vehicle.calculate_max_speed()
-                    
-                    max_corner_speed = max_speed
-                
-                speed_profile[i] = max_corner_speed
-            
-            # Second pass: backward pass to ensure speed doesn't exceed braking limits
-            max_decel = -20.0  # Default deceleration limit
-            
-            if hasattr(vehicle, 'calculate_max_deceleration'):
-                max_decel = vehicle.calculate_max_deceleration(20.0)  # Typical speed argument
-            
-            for i in range(len(speed_profile) - 2, -1, -1):
-                next_speed = speed_profile[i + 1]
-                
-                # Calculate distance to next point
-                next_idx = (i + 1) % len(self.points)
-                segment_length = self.distances[next_idx] - self.distances[i] if next_idx > i else self.total_length - self.distances[i] + self.distances[next_idx]
-                
-                # Calculate maximum entry speed based on braking distance
-                # v^2 = u^2 + 2ad
-                max_entry_speed = np.sqrt(next_speed**2 + 2.0 * abs(max_decel) * segment_length)
-                
-                # Take the minimum of cornering limit and braking limit
-                speed_profile[i] = min(speed_profile[i], max_entry_speed)
-            
-            # Third pass: forward pass to ensure speed doesn't exceed acceleration limits
-            max_accel = 10.0  # Default acceleration limit
-            
-            if hasattr(vehicle, 'calculate_max_acceleration'):
-                max_accel = vehicle.calculate_max_acceleration(20.0, 3)  # Typical speed and gear arguments
-            
-            for i in range(1, len(speed_profile)):
-                prev_speed = speed_profile[i - 1]
-                
-                # Calculate distance from previous point
-                prev_idx = (i - 1) % len(self.points)
-                segment_length = self.distances[i] - self.distances[prev_idx] if i > prev_idx else self.total_length - self.distances[prev_idx] + self.distances[i]
-                
-                # Calculate maximum exit speed based on acceleration
-                # v^2 = u^2 + 2ad
-                max_exit_speed = np.sqrt(prev_speed**2 + 2.0 * max_accel * segment_length)
-                
-                # Take the minimum of cornering limit and acceleration limit
-                speed_profile[i] = min(speed_profile[i], max_exit_speed)
-            
-            logger.info("Theoretical speed profile calculated based on vehicle limits")
-            return speed_profile
-            
-        except Exception as e:
-            logger.error(f"Error calculating theoretical speed profile: {str(e)}")
-            return np.zeros(len(self.points))
-    
-    def visualize(self, show_segments: bool = True, show_racing_line: bool = False):
-        """
-        Visualize the track.
-        
-        Args:
-            show_segments: Whether to show track segments
-            show_racing_line: Whether to show racing line
-        """
-        if len(self.points) < 2:
-            logger.warning("Not enough points to visualize track")
-            return
-        
-        plt.figure(figsize=(10, 8))
-        
-        # Plot track centerline
-        plt.plot(self.points[:, 0], self.points[:, 1], 'k-', alpha=0.7, label='Track Centerline')
-        
-        # Plot track boundaries if available
-        if len(self.left_boundary) > 0 and len(self.right_boundary) > 0:
-            plt.plot(self.left_boundary[:, 0], self.left_boundary[:, 1], 'b-', alpha=0.5)
-            plt.plot(self.right_boundary[:, 0], self.right_boundary[:, 1], 'b-', alpha=0.5)
-        
-        # Plot cones if available
-        if len(self.cones_left) > 0:
-            plt.scatter(self.cones_left[:, 0], self.cones_left[:, 1], color='blue', marker='^', s=20, label='Left Cones')
-        
-        if len(self.cones_right) > 0:
-            plt.scatter(self.cones_right[:, 0], self.cones_right[:, 1], color='yellow', marker='^', s=20, label='Right Cones')
-        
-        # Plot start position
-        if np.all(self.start_position != np.array([0.0, 0.0])):
-            plt.scatter(self.start_position[0], self.start_position[1], color='green', marker='o', s=100, label='Start')
-            
-            # Plot start direction
-            direction_vector = np.array([np.cos(self.start_direction), np.sin(self.start_direction)])
-            arrow_end = self.start_position + direction_vector * 5.0
-            plt.arrow(self.start_position[0], self.start_position[1], 
-                     arrow_end[0] - self.start_position[0], arrow_end[1] - self.start_position[1], 
-                     head_width=1.0, head_length=1.5, fc='g', ec='g')
-        
-        # Plot segments if requested
-        if show_segments and self.segments:
-            segment_colors = {
-                TrackSegmentType.STRAIGHT: 'green',
-                TrackSegmentType.CORNER_LEFT: 'red',
-                TrackSegmentType.CORNER_RIGHT: 'blue',
-                TrackSegmentType.CHICANE: 'purple',
-                TrackSegmentType.HAIRPIN: 'orange'
-            }
-            
-            for segment in self.segments:
-                points = self.points[segment.start_idx:segment.end_idx + 1]
-                plt.plot(points[:, 0], points[:, 1], color=segment_colors.get(segment.segment_type, 'gray'), 
-                        linewidth=3, alpha=0.5)
-        
-        # Plot racing line if requested
-        if show_racing_line and self.racing_line is not None and self.racing_line.line is not None:
-            plt.plot(self.racing_line.line[:, 0], self.racing_line.line[:, 1], 'r-', linewidth=2, label='Racing Line')
-        
-        # Set equal aspect ratio and grid
-        plt.axis('equal')
-        plt.grid(True)
-        plt.title(f'Track: {self.name} (Length: {self.total_length:.1f}m)')
-        plt.xlabel('X (m)')
-        plt.ylabel('Y (m)')
-        plt.legend()
-        
-        plt.tight_layout()
-        plt.show()
-    
-    def export_to_format(self, output_format: SimType, output_path: str) -> bool:
-        """
-        Export track to specific format.
-        
-        Args:
-            output_format: Simulator format to export to
-            output_path: Output file path
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            if output_format == SimType.FSSIM:
-                return self._export_to_fssim(output_path)
-            elif output_format == SimType.FSDS:
-                return self._export_to_fsds(output_path)
-            elif output_format == SimType.GPX:
-                return self._export_to_gpx(output_path)
-            else:
-                logger.error(f"Unsupported export format: {output_format}")
-                return False
-        except Exception as e:
-            logger.error(f"Error exporting track to {output_format}: {str(e)}")
-            return False
-    
-    def _export_to_fssim(self, output_path: str) -> bool:
-        """
-        Export track to FSSIM YAML format.
-        
-        Args:
-            output_path: Output file path
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        # Determine cones
-        if len(self.cones_left) == 0 or len(self.cones_right) == 0:
-            # Generate cones from boundaries if available
-            if len(self.left_boundary) > 0 and len(self.right_boundary) > 0:
-                # Subsample boundaries to create cones
-                n_cones = max(20, int(self.total_length / 3.0))
-                indices = np.linspace(0, len(self.left_boundary) - 1, n_cones, dtype=int)
-                
-                cones_left = self.left_boundary[indices].tolist()
-                cones_right = self.right_boundary[indices].tolist()
-            else:
-                logger.error("Cannot export to FSSIM without cones or track boundaries")
-                return False
+
+        # 2. Calculate Curvature
+        self._calculate_curvature()
+
+        # 3. Calculate Boundaries (if width available)
+        if self.width is not None:
+             self._calculate_boundaries()
         else:
-            cones_left = self.cones_left.tolist()
-            cones_right = self.cones_right.tolist()
-        
-        # Create FSSIM data structure
-        fssim_data = {
-            'cones_left': cones_left,
-            'cones_right': cones_right,
-            'cones_orange': [],
-            'cones_orange_big': []
-        }
-        
-        # Add start position if available
-        if np.all(self.start_position != np.array([0.0, 0.0])):
-            fssim_data['starting_pose_cg'] = [
-                float(self.start_position[0]),
-                float(self.start_position[1]),
-                float(self.start_direction)
-            ]
-            
-            # Add orange cones for start/finish
-            # Create start line perpendicular to start direction
-            perp_direction = np.array([-np.sin(self.start_direction), np.cos(self.start_direction)])
-            start_left = self.start_position + perp_direction * 2.0
-            start_right = self.start_position - perp_direction * 2.0
-            
-            fssim_data['cones_orange_big'] = [
-                start_left.tolist(),
-                start_right.tolist()
-            ]
-        
-        # Write to file
-        try:
-            with open(output_path, 'w') as f:
-                yaml.dump(fssim_data, f, default_flow_style=None)
-            
-            logger.info(f"Track exported to FSSIM format: {output_path}")
-            return True
-        except Exception as e:
-            logger.error(f"Error writing FSSIM file: {str(e)}")
-            return False
-    
-    def _export_to_fsds(self, output_path: str) -> bool:
-        """
-        Export track to FSDS CSV format.
-        
-        Args:
-            output_path: Output file path
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            with open(output_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                
-                # Determine cones
-                if len(self.cones_left) == 0 or len(self.cones_right) == 0:
-                    # Generate cones from boundaries if available
-                    if len(self.left_boundary) > 0 and len(self.right_boundary) > 0:
-                        # Subsample boundaries to create cones
-                        n_cones = max(20, int(self.total_length / 3.0))
-                        indices = np.linspace(0, len(self.left_boundary) - 1, n_cones, dtype=int)
-                        
-                        # Write left cones
-                        for idx in indices:
-                            x, y = self.left_boundary[idx]
-                            writer.writerow(['blue', x, y, 0, 0.01, 0.01, 0])
-                        
-                        # Write right cones
-                        for idx in indices:
-                            x, y = self.right_boundary[idx]
-                            writer.writerow(['yellow', x, y, 0, 0.01, 0.01, 0])
-                    else:
-                        logger.error("Cannot export to FSDS without cones or track boundaries")
-                        return False
-                else:
-                    # Write left cones
-                    for cone in self.cones_left:
-                        writer.writerow(['blue', cone[0], cone[1], 0, 0.01, 0.01, 0])
-                    
-                    # Write right cones
-                    for cone in self.cones_right:
-                        writer.writerow(['yellow', cone[0], cone[1], 0, 0.01, 0.01, 0])
-                
-                # Add start/finish cones if start position is available
-                if np.all(self.start_position != np.array([0.0, 0.0])):
-                    # Create start line perpendicular to start direction
-                    perp_direction = np.array([-np.sin(self.start_direction), np.cos(self.start_direction)])
-                    start_left = self.start_position + perp_direction * 2.0
-                    start_right = self.start_position - perp_direction * 2.0
-                    
-                    writer.writerow(['big_orange', start_left[0], start_left[1], 0, 0.01, 0.01, 0])
-                    writer.writerow(['big_orange', start_right[0], start_right[1], 0, 0.01, 0.01, 0])
-            
-            logger.info(f"Track exported to FSDS format: {output_path}")
-            return True
-        except Exception as e:
-            logger.error(f"Error writing FSDS file: {str(e)}")
-            return False
-    
-    def _export_to_gpx(self, output_path: str) -> bool:
-        """
-        Export track to GPX format.
-        
-        Args:
-            output_path: Output file path
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            # Check if gpxpy is available
-            import gpxpy
-            import gpxpy.gpx
-        except ImportError:
-            logger.error("gpxpy package not available. Install with: pip install gpxpy")
-            return False
-        
-        try:
-            # Create GPX object
-            gpx = gpxpy.gpx.GPX()
-            
-            # Create track
-            gpx_track = gpxpy.gpx.GPXTrack(name=self.name)
-            gpx.tracks.append(gpx_track)
-            
-            # Create segment
-            gpx_segment = gpxpy.gpx.GPXTrackSegment()
-            gpx_track.segments.append(gpx_segment)
-            
-            # Add track points
-            # Use a reference location for GPS coords (approx. center of track)
-            if len(self.points) > 0:
-                center = np.mean(self.points, axis=0)
-                lat_ref = 51.5  # Default latitude (London)
-                lon_ref = -0.1  # Default longitude (London)
-                
-                earth_radius = 6378137.0  # Earth radius in meters
-                
-                for point in self.points:
-                    # Convert local coordinates to GPS
-                    # This is a simplified conversion that works for small areas
-                    lat = lat_ref + (point[1] - center[1]) / earth_radius * (180.0 / np.pi)
-                    lon = lon_ref + (point[0] - center[0]) / (earth_radius * np.cos(lat_ref * np.pi / 180.0)) * (180.0 / np.pi)
-                    
-                    # Add elevation if available
-                    ele = None
-                    if self.elevation is not None and len(self.elevation) == len(self.points):
-                        idx = np.where((self.points == point).all(axis=1))[0][0]
-                        ele = self.elevation[idx]
-                    
-                    gpx_segment.points.append(gpxpy.gpx.GPXTrackPoint(lat, lon, elevation=ele))
-            
-            # Write GPX file
-            with open(output_path, 'w') as f:
-                f.write(gpx.to_xml())
-            
-            logger.info(f"Track exported to GPX format: {output_path}")
-            return True
-        except Exception as e:
-            logger.error(f"Error writing GPX file: {str(e)}")
-            return False
-    
+             logger.warning("Track width not available, cannot calculate boundaries.")
+
+        # 4. Segment Track
+        self._segment_track()
+
+        # 5. Refine start/finish if not set from data
+        if np.allclose(self.start_position, [0,0]):
+            if not self._find_start_position(self.points[:,0], self.points[:,1], self.curvature):
+                 logger.warning("Could not automatically determine start/finish line. Using first point.")
+                 self.start_position = self.points[0]
+                 self.start_heading = np.arctan2(self.points[1,1]-self.points[0,1], self.points[1,0]-self.points[0,0])
+
+
+    def _calculate_distances(self):
+        """Calculate cumulative distances along the centerline."""
+        segment_lengths = np.sqrt(np.sum(np.diff(self.points, axis=0)**2, axis=1))
+        self.distances = np.concatenate(([0], np.cumsum(segment_lengths)))
+        self.total_length = self.distances[-1]
+        logger.debug(f"Distances calculated. Total length: {self.total_length:.2f} m")
+
+    def _calculate_curvature(self):
+        """Calculate curvature and radius along the centerline."""
+        if len(self.points) < 3:
+            self.curvature = np.zeros(len(self.points))
+            logger.warning("Cannot calculate curvature, less than 3 points.")
+            return
+
+        dx = np.gradient(self.points[:, 0])
+        dy = np.gradient(self.points[:, 1])
+        d2x = np.gradient(dx)
+        d2y = np.gradient(dy)
+        denominator = np.maximum((dx**2 + dy**2)**1.5, 1e-9)
+        self.curvature = (dx * d2y - dy * d2x) / denominator
+
+        # Smooth curvature
+        window = max(5, len(self.points)//25) | 1 # Odd window
+        if len(self.curvature) > window:
+             self.curvature = savgol_filter(self.curvature, window, 3, mode='wrap')
+
+        logger.debug("Curvature calculated.")
+
+    def _calculate_boundaries(self):
+        """Calculate left and right track boundaries."""
+        n_points = len(self.points)
+        width = self.width if not np.isscalar(self.width) else np.full(n_points, self.width)
+        normals = self.get_normals()
+
+        self.left_boundary = self.points + normals * (width / 2.0)[:, np.newaxis]
+        self.right_boundary = self.points - normals * (width / 2.0)[:, np.newaxis]
+        logger.debug("Track boundaries calculated.")
+
+    def get_normals(self) -> np.ndarray:
+        """Calculate normal vectors at each centerline point."""
+        tangents = np.gradient(self.points, axis=0)
+        norms = np.linalg.norm(tangents, axis=1)
+        valid = norms > 1e-6
+        tangents[valid] /= norms[valid, np.newaxis]
+        # Handle potential issues at start/end for closed loop
+        if self.is_closed_circuit and np.linalg.norm(self.points[0] - self.points[-1]) < 1e-3:
+            tangents[0] = tangents[-1] = (tangents[1] + tangents[-2]) / 2.0 # Average neighbors
+            norm0 = np.linalg.norm(tangents[0])
+            if norm0 > 1e-6: tangents[0] /= norm0
+            tangents[-1] = tangents[0]
+
+        normals = np.zeros_like(tangents)
+        normals[:, 0] = -tangents[:, 1]
+        normals[:, 1] = tangents[:, 0]
+        return normals
+
+    def _segment_track(self, straight_thresh: float = 0.02, hairpin_thresh: float = 0.2):
+        """Segment track into straights, corners, hairpins."""
+        if self.curvature is None: return
+        self.segments = []
+        n_points = len(self.points)
+        current_type = TrackSegmentType.UNKNOWN
+        start_idx = 0
+
+        for i in range(n_points):
+            curve_abs = abs(self.curvature[i])
+            segment_type = TrackSegmentType.UNKNOWN
+
+            if curve_abs < straight_thresh: segment_type = TrackSegmentType.STRAIGHT
+            elif curve_abs >= hairpin_thresh: # Hairpin
+                 segment_type = TrackSegmentType.HAIRPIN_LEFT if self.curvature[i] > 0 else TrackSegmentType.HAIRPIN_RIGHT
+            elif curve_abs >= straight_thresh: # Normal Corner
+                 segment_type = TrackSegmentType.CORNER_LEFT if self.curvature[i] > 0 else TrackSegmentType.CORNER_RIGHT
+
+            if i == 0: # First point
+                current_type = segment_type
+                start_idx = 0
+            elif segment_type != current_type: # Type changed
+                # Finalize previous segment
+                segment = TrackSegment(current_type, start_idx, i - 1)
+                segment.calculate_properties(self.distances, self.curvature)
+                self.segments.append(segment)
+                # Start new segment
+                current_type = segment_type
+                start_idx = i
+
+            # Handle last point
+            if i == n_points - 1:
+                segment = TrackSegment(current_type, start_idx, i)
+                segment.calculate_properties(self.distances, self.curvature)
+                self.segments.append(segment)
+
+        # Optional: Merge short segments (e.g., < 5m)
+        self._merge_short_segments()
+        logger.info(f"Track segmented into {len(self.segments)} segments.")
+
+    def _merge_short_segments(self, min_length: float = 5.0):
+         """Merge segments shorter than min_length with neighbors."""
+         if len(self.segments) <= 1: return
+         merged_segments = []
+         i = 0
+         while i < len(self.segments):
+             current_seg = self.segments[i]
+             # Check if current segment is short
+             if current_seg.length_m is not None and current_seg.length_m < min_length and len(merged_segments) > 0:
+                 # Try merging with the *previous* merged segment
+                 prev_merged_seg = merged_segments[-1]
+                 # Logic to decide the new type (e.g., keep type of longer segment)
+                 new_type = prev_merged_seg.segment_type if prev_merged_seg.length_m >= current_seg.length_m else current_seg.segment_type
+                 # Create a new segment spanning both
+                 merged = TrackSegment(new_type, prev_merged_seg.start_idx, current_seg.end_idx)
+                 merged.calculate_properties(self.distances, self.curvature)
+                 merged_segments[-1] = merged # Replace previous with merged
+                 logger.debug(f"Merged short segment {i} (type {current_seg.segment_type.name}) into previous.")
+             else:
+                 # Keep the current segment as is
+                 merged_segments.append(current_seg)
+             i += 1
+         self.segments = merged_segments
+
+
+    def get_point_at_distance(self, distance: float) -> Optional[np.ndarray]:
+        """Interpolate (x, y, [z]) coordinates at a specific distance along the track."""
+        if self.points is None or self.distances is None or not self.has_geometry(): return None
+        # Wrap distance for closed track
+        distance = distance % self.total_length if self.is_closed_circuit else distance
+        # Clamp distance to track length
+        distance = np.clip(distance, 0, self.total_length)
+
+        interp_x = interp1d(self.distances, self.points[:, 0], bounds_error=False, fill_value='extrapolate')
+        interp_y = interp1d(self.distances, self.points[:, 1], bounds_error=False, fill_value='extrapolate')
+        point = np.array([interp_x(distance), interp_y(distance)])
+
+        if self.elevation is not None and len(self.elevation) == len(self.points):
+             interp_z = interp1d(self.distances, self.elevation, bounds_error=False, fill_value='extrapolate')
+             point = np.append(point, interp_z(distance))
+
+        return point
+
+    def get_properties_at_distance(self, distance: float) -> Dict:
+        """Get interpolated track properties (curvature, width, etc.) at a distance."""
+        props = {}
+        if not self.has_geometry(): return props
+
+        distance = distance % self.total_length if self.is_closed_circuit else distance
+        distance = np.clip(distance, 0, self.total_length)
+
+        props['distance'] = distance
+        props['curvature'] = float(np.interp(distance, self.distances, self.curvature))
+        if np.isscalar(self.width):
+            props['width'] = float(self.width)
+        else:
+            props['width'] = float(np.interp(distance, self.distances, self.width))
+        if self.elevation is not None:
+             props['elevation'] = float(np.interp(distance, self.distances, self.elevation))
+        if self.banking is not None:
+             props['banking'] = float(np.interp(distance, self.distances, self.banking))
+
+        return props
+
+    def get_points_at_position(self, track_positions: np.ndarray) -> Optional[np.ndarray]:
+        """Calculate world coordinates for points offset from centerline."""
+        if not self.has_geometry() or len(track_positions) != len(self.points):
+             logger.error("Cannot calculate offset points: Geometry missing or length mismatch.")
+             return None
+
+        width = self.width if not np.isscalar(self.width) else np.full(len(self.points), self.width)
+        normals = self.get_normals()
+        offsets = track_positions * width / 2.0
+        offset_points = self.points + normals * offsets[:, np.newaxis]
+        return offset_points
+
+
+    def calculate_racing_line(self, method: str = 'geometric', vehicle=None) -> Optional[RacingLine]:
+        """Calculate and return a RacingLine object."""
+        self.racing_line = RacingLine(self)
+        success = False
+        if method == 'geometric':
+            success = self.racing_line.optimize_geometric()
+        elif method == 'minimum_curvature':
+            success = self.racing_line.optimize_minimum_curvature()
+        # Add more methods like 'lap_time' which would call a more complex optimizer
+        else:
+            logger.warning(f"Unsupported racing line method: {method}. Using geometric.")
+            success = self.racing_line.optimize_geometric()
+
+        if success:
+            # Optionally calculate speed profile immediately
+            if vehicle:
+                self.racing_line.calculate_speed_profile(vehicle)
+            return self.racing_line
+        else:
+            self.racing_line = None # Clear if optimization failed
+            return None
+
+
     def get_track_stats(self) -> Dict:
-        """
-        Get track statistics (length, corners, etc.).
-        
-        Returns:
-            Dictionary with track statistics
-        """
+        """Return dictionary of track statistics."""
         stats = {
             'name': self.name,
-            'length': self.total_length,
-            'num_points': len(self.points)
+            'source_file': self.source_file,
+            'is_closed': self.is_closed_circuit,
+            'length_m': self.total_length,
+            'num_points': len(self.points) if self.points is not None else 0,
         }
-        
-        # Count segment types
+        if self.width is not None:
+             stats['avg_width_m'] = np.mean(self.width) if not np.isscalar(self.width) else self.width
+        if self.curvature is not None:
+             abs_curve = np.abs(self.curvature)
+             stats['max_abs_curvature'] = np.max(abs_curve) if len(abs_curve)>0 else 0
+             min_radius = 1.0 / stats['max_abs_curvature'] if stats['max_abs_curvature'] > 1e-6 else float('inf')
+             stats['min_radius_m'] = min_radius
         if self.segments:
-            segment_counts = {
-                'straight': sum(1 for s in self.segments if s.segment_type == TrackSegmentType.STRAIGHT),
-                'left_corner': sum(1 for s in self.segments if s.segment_type == TrackSegmentType.CORNER_LEFT),
-                'right_corner': sum(1 for s in self.segments if s.segment_type == TrackSegmentType.CORNER_RIGHT),
-                'chicane': sum(1 for s in self.segments if s.segment_type == TrackSegmentType.CHICANE),
-                'hairpin': sum(1 for s in self.segments if s.segment_type == TrackSegmentType.HAIRPIN)
-            }
-            
-            stats['segments'] = segment_counts
-            stats['num_segments'] = len(self.segments)
-            
-            # Calculate total length for each segment type
-            segment_lengths = {
-                'straight': sum(s.length for s in self.segments if s.segment_type == TrackSegmentType.STRAIGHT),
-                'left_corner': sum(s.length for s in self.segments if s.segment_type == TrackSegmentType.CORNER_LEFT),
-                'right_corner': sum(s.length for s in self.segments if s.segment_type == TrackSegmentType.CORNER_RIGHT),
-                'chicane': sum(s.length for s in self.segments if s.segment_type == TrackSegmentType.CHICANE),
-                'hairpin': sum(s.length for s in self.segments if s.segment_type == TrackSegmentType.HAIRPIN)
-            }
-            
-            stats['segment_lengths'] = segment_lengths
-            
-            # Calculate percentage of track type
-            if self.total_length > 0:
-                stats['straight_percent'] = segment_lengths['straight'] / self.total_length * 100.0
-                stats['corner_percent'] = (segment_lengths['left_corner'] + segment_lengths['right_corner'] +
-                                          segment_lengths['chicane'] + segment_lengths['hairpin']) / self.total_length * 100.0
-        
-        # Add cone counts if available
-        if len(self.cones_left) > 0:
-            stats['num_left_cones'] = len(self.cones_left)
-        
-        if len(self.cones_right) > 0:
-            stats['num_right_cones'] = len(self.cones_right)
-        
-        # Add curvature statistics if available
-        if len(self.curvature) > 0:
-            stats['max_curvature'] = np.max(np.abs(self.curvature))
-            if stats['max_curvature'] > 0:
-                stats['min_radius'] = 1.0 / stats['max_curvature']
-        
-        return stats
-    
-    def __str__(self) -> str:
-        """String representation of track."""
-        stats = self.get_track_stats()
-        
-        track_str = f"Track: {stats['name']}\n"
-        track_str += f"Length: {stats['length']:.1f}m\n"
-        
-        if 'num_segments' in stats:
-            track_str += f"Segments: {stats['num_segments']} total\n"
-            if 'segments' in stats:
-                segments = stats['segments']
-                track_str += f"  - {segments.get('straight', 0)} straights\n"
-                track_str += f"  - {segments.get('left_corner', 0)} left corners\n"
-                track_str += f"  - {segments.get('right_corner', 0)} right corners\n"
-        
-        if 'straight_percent' in stats:
-            track_str += f"Composition: {stats['straight_percent']:.1f}% straight, {stats['corner_percent']:.1f}% corners\n"
-        
-        if 'min_radius' in stats:
-            track_str += f"Minimum radius: {stats['min_radius']:.1f}m\n"
-        
-        return track_str.strip()
-
-
-class RacingLine:
-    """Represents an optimized racing line for a specific track."""
-    
-    def __init__(self, track: Track):
-        """
-        Initialize racing line for track.
-        
-        Args:
-            track: Track to optimize racing line for
-        """
-        self.track = track
-        self.line = None  # Array of points representing racing line
-        self.track_positions = None  # Array of track positions (-1 to 1)
-        self.distances = None  # Cumulative distances along racing line
-        self.curvature = None  # Curvature at each point of racing line
-        self.speed_profile = None  # Speed profile along racing line
-        self.time_profile = None  # Time profile along racing line
-        self.total_time = None  # Total lap time
-        
-        logger.info("Racing line object initialized")
-    
-    def optimize(self, vehicle=None, method: str = 'geometric') -> bool:
-        """
-        Optimize racing line using different methods.
-        
-        Args:
-            vehicle: Optional vehicle model for constraints
-            method: Optimization method ('geometric', 'minimum_curvature', 'lap_time')
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            if method == 'geometric':
-                return self._optimize_geometric()
-            elif method == 'minimum_curvature':
-                return self._optimize_minimum_curvature()
-            elif method == 'lap_time':
-                if vehicle is None:
-                    logger.warning("Vehicle model required for lap time optimization")
-                    return self._optimize_geometric()
-                return self._optimize_lap_time(vehicle)
-            else:
-                logger.warning(f"Unknown optimization method: {method}. Using geometric method.")
-                return self._optimize_geometric()
-        except Exception as e:
-            logger.error(f"Error optimizing racing line: {str(e)}")
-            return False
-    
-    def _optimize_geometric(self) -> bool:
-        """
-        Optimize racing line using simple geometric method.
-        
-        Returns:
-            True if successful, False otherwise
-        """
-        if len(self.track.points) < 3:
-            logger.error("Not enough track points to optimize racing line")
-            return False
-        
-        # Initialize track positions (0 = centerline)
-        n_points = len(self.track.points)
-        self.track_positions = np.zeros(n_points)
-        
-        # First pass: move to inside of corners
-        for i in range(n_points):
-            curve = self.track.curvature[i]
-            
-            # Move toward inside of corners
-            if abs(curve) > 0.01:  # Significant corner
-                # Positive curvature = left turn, negative curvature = right turn
-                # Position of -1 = right edge, +1 = left edge
-                position = -np.sign(curve) * 0.7  # Move 70% toward inside edge
-                self.track_positions[i] = position
-        
-        # Apply smoothing to track positions
-        self.track_positions = self._smooth_array(self.track_positions, window_size=max(3, n_points // 20))
-        
-        # Create racing line points
-        self.line = np.zeros_like(self.track.points)
-        
-        # Calculate normal vectors
-        normals = self._calculate_normals()
-        
-        # Generate racing line
-        for i in range(n_points):
-            # Calculate offset from centerline
-            offset = self.track_positions[i] * self.track.width[i] / 2.0
-            
-            # Apply offset to centerline
-            self.line[i] = self.track.points[i] + normals[i] * offset
-        
-        # Calculate distances along racing line
-        self._calculate_distances()
-        
-        # Calculate curvature of racing line
-        self._calculate_curvature()
-        
-        logger.info("Racing line optimized using geometric method")
-        return True
-    
-    def _optimize_minimum_curvature(self) -> bool:
-        """
-        Optimize racing line to minimize maximum curvature.
-        
-        Returns:
-            True if successful, False otherwise
-        """
-        if len(self.track.points) < 3:
-            logger.error("Not enough track points to optimize racing line")
-            return False
-        
-        # Initialize with geometric optimization
-        if not self._optimize_geometric():
-            return False
-        
-        try:
-            # Set up optimization parameters
-            n_points = len(self.track.points)
-            n_control = max(10, n_points // 10)  # Number of control points
-            
-            # Indices of control points
-            control_indices = np.linspace(0, n_points - 1, n_control, dtype=int)
-            
-            # Initial positions from geometric optimization
-            initial_positions = self.track_positions[control_indices]
-            
-            # Define objective function to minimize maximum curvature
-            def objective(positions):
-                # Interpolate positions for all points
-                interpolator = interp1d(control_indices, positions, kind='cubic', fill_value='extrapolate')
-                all_positions = interpolator(np.arange(n_points))
-                
-                # Constrain to valid range
-                all_positions = np.clip(all_positions, -0.9, 0.9)
-                
-                # Calculate racing line points
-                line_points = np.zeros_like(self.track.points)
-                normals = self._calculate_normals()
-                
-                for i in range(n_points):
-                    offset = all_positions[i] * self.track.width[i] / 2.0
-                    line_points[i] = self.track.points[i] + normals[i] * offset
-                
-                # Calculate curvature
-                curvature = np.zeros(n_points)
-                
-                for i in range(n_points):
-                    # Get adjacent points (with wraparound for closed circuits)
-                    prev_idx = (i - 1) % n_points
-                    next_idx = (i + 1) % n_points
-                    
-                    # Get positions
-                    p_prev = line_points[prev_idx]
-                    p_curr = line_points[i]
-                    p_next = line_points[next_idx]
-                    
-                    # Calculate vectors
-                    v1 = p_prev - p_curr
-                    v2 = p_next - p_curr
-                    
-                    # Normalize vectors
-                    if np.linalg.norm(v1) > 1e-6 and np.linalg.norm(v2) > 1e-6:
-                        v1 = v1 / np.linalg.norm(v1)
-                        v2 = v2 / np.linalg.norm(v2)
-                        
-                        # Calculate angle between vectors
-                        dot_product = np.clip(np.dot(v1, v2), -1.0, 1.0)
-                        angle = np.arccos(dot_product)
-                        
-                        # Calculate direction of curve
-                        cross_product = np.cross(v1, v2)
-                        sign = 1.0 if cross_product > 0 else -1.0
-                        
-                        # Calculate distances between points
-                        d1 = np.linalg.norm(p_prev - p_curr)
-                        d2 = np.linalg.norm(p_next - p_curr)
-                        
-                        # Curvature estimate
-                        curvature[i] = sign * angle / ((d1 + d2) / 2.0)
-                    else:
-                        curvature[i] = 0.0
-                
-                # Return maximum absolute curvature
-                return np.max(np.abs(curvature))
-            
-            # Set up bounds for control positions
-            bounds = [(-0.9, 0.9) for _ in range(n_control)]
-            
-            # Run optimization
-            result = minimize(
-                objective,
-                initial_positions,
-                method='L-BFGS-B',
-                bounds=bounds,
-                options={'maxiter': 50}
-            )
-            
-            if result.success:
-                # Apply optimized control positions
-                optimized_positions = result.x
-                
-                # Interpolate for all points
-                interpolator = interp1d(control_indices, optimized_positions, kind='cubic', fill_value='extrapolate')
-                self.track_positions = interpolator(np.arange(n_points))
-                
-                # Constrain to valid range
-                self.track_positions = np.clip(self.track_positions, -0.9, 0.9)
-                
-                # Regenerate racing line points
-                normals = self._calculate_normals()
-                
-                for i in range(n_points):
-                    offset = self.track_positions[i] * self.track.width[i] / 2.0
-                    self.line[i] = self.track.points[i] + normals[i] * offset
-                
-                # Recalculate distances and curvature
-                self._calculate_distances()
-                self._calculate_curvature()
-                
-                logger.info(f"Racing line optimized to minimize curvature: max curvature = {result.fun:.6f}")
-                return True
-            else:
-                logger.warning(f"Curvature optimization did not converge: {result.message}")
-                return True  # Still return True as we have the initial geometric line
-            
-        except Exception as e:
-            logger.error(f"Error in minimum curvature optimization: {str(e)}")
-            return True  # Still return True as we have the initial geometric line
-    
-    def _optimize_lap_time(self, vehicle) -> bool:
-        """
-        Optimize racing line for minimum lap time.
-        
-        Args:
-            vehicle: Vehicle model for performance calculations
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        # Start with minimum curvature optimization
-        if not self._optimize_minimum_curvature():
-            return False
-        
-        # Calculate speed profile with current racing line
-        self.calculate_speed_profile(vehicle)
-        
-        # Further optimization could be implemented here
-        # This would require more sophisticated vehicle dynamics
-        
-        logger.info("Racing line optimized for lap time")
-        return True
-    
-    def _calculate_normals(self) -> np.ndarray:
-        """
-        Calculate normal vectors for track points.
-        
-        Returns:
-            Array of normal vectors
-        """
-        n_points = len(self.track.points)
-        normals = np.zeros_like(self.track.points)
-        
-        for i in range(n_points):
-            # Get adjacent points (with wraparound for closed circuits)
-            prev_idx = (i - 1) % n_points
-            next_idx = (i + 1) % n_points
-            
-            # Calculate tangent vector
-            tangent = self.track.points[next_idx] - self.track.points[prev_idx]
-            
-            # Normalize
-            if np.linalg.norm(tangent) > 1e-6:
-                tangent = tangent / np.linalg.norm(tangent)
-            
-            # Calculate normal (90 degree rotation)
-            normals[i] = np.array([-tangent[1], tangent[0]])
-        
-        return normals
-    
-    def _calculate_distances(self):
-        """Calculate cumulative distances along the racing line."""
-        if self.line is None or len(self.line) < 2:
-            logger.warning("Not enough points to calculate distances")
-            self.distances = np.array([0.0])
-            return
-        
-        # Calculate segment lengths
-        segments = np.diff(self.line, axis=0)
-        segment_lengths = np.sqrt(np.sum(segments**2, axis=1))
-        
-        # Cumulative distances
-        self.distances = np.zeros(len(self.line))
-        self.distances[1:] = np.cumsum(segment_lengths)
-    
-    def _calculate_curvature(self):
-        """Calculate curvature along the racing line."""
-        if self.line is None or len(self.line) < 3:
-            logger.warning("Not enough points to calculate curvature")
-            self.curvature = np.zeros(len(self.line)) if self.line is not None else np.array([])
-            return
-        
-        n_points = len(self.line)
-        self.curvature = np.zeros(n_points)
-        
-        for i in range(n_points):
-            # Get adjacent points (with wraparound for closed circuits)
-            prev_idx = (i - 1) % n_points
-            next_idx = (i + 1) % n_points
-            
-            # Get positions
-            p_prev = self.line[prev_idx]
-            p_curr = self.line[i]
-            p_next = self.line[next_idx]
-            
-            # Calculate vectors
-            v1 = p_prev - p_curr
-            v2 = p_next - p_curr
-            
-            # Normalize vectors
-            if np.linalg.norm(v1) > 1e-6 and np.linalg.norm(v2) > 1e-6:
-                v1 = v1 / np.linalg.norm(v1)
-                v2 = v2 / np.linalg.norm(v2)
-                
-                # Calculate angle between vectors
-                dot_product = np.clip(np.dot(v1, v2), -1.0, 1.0)
-                angle = np.arccos(dot_product)
-                
-                # Calculate direction of curve
-                cross_product = np.cross(v1, v2)
-                sign = 1.0 if cross_product > 0 else -1.0
-                
-                # Calculate distances between points
-                d1 = np.linalg.norm(p_prev - p_curr)
-                d2 = np.linalg.norm(p_next - p_curr)
-                
-                # Curvature estimate
-                self.curvature[i] = sign * angle / ((d1 + d2) / 2.0)
-            else:
-                self.curvature[i] = 0.0
-        
-        # Apply smoothing to curvature
-        self.curvature = self._smooth_array(self.curvature, window_size=5)
-    
-    def _smooth_array(self, array: np.ndarray, window_size: int = 3) -> np.ndarray:
-        """
-        Apply smoothing to an array.
-        
-        Args:
-            array: Array to smooth
-            window_size: Size of smoothing window
-            
-        Returns:
-            Smoothed array
-        """
-        if window_size < 2:
-            return array
-        
-        result = np.copy(array)
-        n = len(array)
-        half_window = window_size // 2
-        
-        for i in range(n):
-            # Get window indices with wraparound
-            window_indices = [(i + j - half_window) % n for j in range(window_size)]
-            
-            # Calculate mean for window
-            result[i] = np.mean(array[window_indices])
-        
-        return result
-    
-    def calculate_speed_profile(self, vehicle) -> np.ndarray:
-        """
-        Calculate achievable speed profile along the line.
-        
-        Args:
-            vehicle: Vehicle model for performance constraints
-            
-        Returns:
-            Array of speeds at each point
-        """
-        if self.line is None or len(self.line) < 2:
-            logger.warning("No racing line to calculate speed profile")
-            return np.array([])
-        
-        try:
-            # Initialize speed profile
-            n_points = len(self.line)
-            self.speed_profile = np.zeros(n_points)
-            
-            # First pass: calculate maximum speed based on curvature
-            for i, curve in enumerate(self.curvature):
-                if abs(curve) > 1e-6:
-                    # Calculate corner radius
-                    radius = 1.0 / abs(curve)
-                    
-                    # Calculate maximum cornering speed
-                    max_lateral_accel = 20.0  # Default if vehicle doesn't provide calculation
-                    
-                    if hasattr(vehicle, 'cornering'):
-                        max_lateral_accel = vehicle.cornering.calculate_max_lateral_acceleration()
-                    
-                    # v^2 = a * r for constant radius cornering
-                    max_corner_speed = np.sqrt(max_lateral_accel * radius)
-                else:
-                    # Straight section - use maximum vehicle speed
-                    max_speed = 100.0  # Default if vehicle doesn't provide calculation
-                    
-                    if hasattr(vehicle, 'calculate_max_speed'):
-                        max_speed = vehicle.calculate_max_speed()
-                    
-                    max_corner_speed = max_speed
-                
-                self.speed_profile[i] = max_corner_speed
-            
-            # Second pass: backward pass to ensure speed doesn't exceed braking limits
-            max_decel = -20.0  # Default deceleration limit
-            
-            if hasattr(vehicle, 'calculate_max_deceleration'):
-                max_decel = vehicle.calculate_max_deceleration(20.0)  # Typical speed argument
-            
-            for i in range(n_points - 2, -1, -1):
-                next_speed = self.speed_profile[(i + 1) % n_points]
-                
-                # Calculate distance to next point
-                next_idx = (i + 1) % n_points
-                segment_length = self.distances[next_idx] - self.distances[i] if next_idx > i else self.distances[-1] - self.distances[i] + self.distances[0]
-                
-                # Calculate maximum entry speed based on braking distance
-                # v^2 = u^2 + 2ad
-                max_entry_speed = np.sqrt(next_speed**2 + 2.0 * abs(max_decel) * segment_length)
-                
-                # Take the minimum of cornering limit and braking limit
-                self.speed_profile[i] = min(self.speed_profile[i], max_entry_speed)
-            
-            # Third pass: forward pass to ensure speed doesn't exceed acceleration limits
-            max_accel = 10.0  # Default acceleration limit
-            
-            if hasattr(vehicle, 'calculate_max_acceleration'):
-                max_accel = vehicle.calculate_max_acceleration(20.0, 3)  # Typical speed and gear arguments
-            
-            for i in range(1, n_points):
-                prev_speed = self.speed_profile[i - 1]
-                
-                # Calculate distance from previous point
-                prev_idx = (i - 1) % n_points
-                segment_length = self.distances[i] - self.distances[prev_idx] if i > prev_idx else self.distances[i] + self.distances[-1] - self.distances[prev_idx]
-                
-                # Calculate maximum exit speed based on acceleration
-                # v^2 = u^2 + 2ad
-                max_exit_speed = np.sqrt(prev_speed**2 + 2.0 * max_accel * segment_length)
-                
-                # Take the minimum of cornering limit and acceleration limit
-                self.speed_profile[i] = min(self.speed_profile[i], max_exit_speed)
-            
-            # Calculate time profile
-            self._calculate_time_profile()
-            
-            logger.info(f"Speed profile calculated: Max speed = {np.max(self.speed_profile):.1f} m/s, " +
-                       f"Lap time = {self.total_time:.2f} s")
-            
-            return self.speed_profile
-            
-        except Exception as e:
-            logger.error(f"Error calculating speed profile: {str(e)}")
-            return np.zeros(len(self.line)) if self.line is not None else np.array([])
-    
-    def _calculate_time_profile(self):
-        """Calculate time profile based on speed profile."""
-        if self.speed_profile is None or len(self.speed_profile) < 2 or self.distances is None:
-            logger.warning("Cannot calculate time profile without speed profile and distances")
-            return
-        
-        n_points = len(self.speed_profile)
-        self.time_profile = np.zeros(n_points)
-        
-        # Calculate time to travel each segment
-        for i in range(1, n_points):
-            # Distance of segment
-            prev_idx = i - 1
-            segment_length = self.distances[i] - self.distances[prev_idx]
-            
-            # Average speed for segment
-            avg_speed = (self.speed_profile[prev_idx] + self.speed_profile[i]) / 2.0
-            
-            # Skip if speed is too low to avoid division by zero
-            if avg_speed < 0.1:
-                avg_speed = 0.1
-            
-            # Time to travel segment
-            segment_time = segment_length / avg_speed
-            
-            # Accumulate time
-            self.time_profile[i] = self.time_profile[prev_idx] + segment_time
-        
-        # Total lap time
-        self.total_time = self.time_profile[-1]
-    
-    def visualize(self, with_speed: bool = False):
-        """
-        Visualize the racing line.
-        
-        Args:
-            with_speed: Whether to color code by speed
-        """
-        if self.line is None or len(self.line) < 2:
-            logger.warning("No racing line to visualize")
-            return
-        
-        plt.figure(figsize=(10, 8))
-        
-        # Plot track centerline
-        plt.plot(self.track.points[:, 0], self.track.points[:, 1], 'k-', alpha=0.3, label='Track Centerline')
-        
-        # Plot track boundaries if available
-        if len(self.track.left_boundary) > 0 and len(self.track.right_boundary) > 0:
-            plt.plot(self.track.left_boundary[:, 0], self.track.left_boundary[:, 1], 'k-', alpha=0.2)
-            plt.plot(self.track.right_boundary[:, 0], self.track.right_boundary[:, 1], 'k-', alpha=0.2)
-        
-        # Plot racing line
-        if with_speed and self.speed_profile is not None:
-            # Color code by speed
-            speed_norm = plt.Normalize(vmin=np.min(self.speed_profile), vmax=np.max(self.speed_profile))
-            cmap = plt.cm.jet
-            
-            for i in range(len(self.line) - 1):
-                plt.plot(self.line[i:i+2, 0], self.line[i:i+2, 1], '-', 
-                        color=cmap(speed_norm(self.speed_profile[i])), linewidth=2)
-            
-            # Add colorbar
-            sm = plt.cm.ScalarMappable(cmap=cmap, norm=speed_norm)
-            sm.set_array([])
-            cbar = plt.colorbar(sm)
-            cbar.set_label('Speed (m/s)')
-        else:
-            plt.plot(self.line[:, 0], self.line[:, 1], 'r-', linewidth=2, label='Racing Line')
-        
-        # Plot direction arrows on racing line
-        arrow_indices = np.linspace(0, len(self.line) - 1, 20, dtype=int)
-        for i in arrow_indices:
-            next_idx = (i + 1) % len(self.line)
-            dx = self.line[next_idx, 0] - self.line[i, 0]
-            dy = self.line[next_idx, 1] - self.line[i, 1]
-            
-            norm = np.sqrt(dx**2 + dy**2)
-            if norm > 1e-6:
-                dx /= norm
-                dy /= norm
-            
-            arrow_length = 2.0
-            plt.arrow(self.line[i, 0], self.line[i, 1], dx * arrow_length, dy * arrow_length, 
-                     head_width=0.8, head_length=1.2, fc='r', ec='r', alpha=0.7)
-        
-        # Set equal aspect ratio and grid
-        plt.axis('equal')
-        plt.grid(True)
-        title = f'Racing Line: {self.track.name}'
-        if self.total_time is not None:
-            title += f' (Lap time: {self.total_time:.2f}s)'
-        plt.title(title)
-        plt.xlabel('X (m)')
-        plt.ylabel('Y (m)')
-        plt.legend()
-        
-        plt.tight_layout()
-        plt.show()
-    
-    def get_stats(self) -> Dict:
-        """
-        Get racing line statistics.
-        
-        Returns:
-            Dictionary with racing line statistics
-        """
-        stats = {}
-        
-        if self.line is not None:
-            stats['num_points'] = len(self.line)
-        
-        if self.distances is not None and len(self.distances) > 0:
-            stats['length'] = self.distances[-1]
-        
-        if self.curvature is not None and len(self.curvature) > 0:
-            stats['max_curvature'] = np.max(np.abs(self.curvature))
-            if stats['max_curvature'] > 0:
-                stats['min_radius'] = 1.0 / stats['max_curvature']
-        
-        if self.speed_profile is not None and len(self.speed_profile) > 0:
-            stats['max_speed'] = np.max(self.speed_profile)
-            stats['min_speed'] = np.min(self.speed_profile)
-            stats['avg_speed'] = np.mean(self.speed_profile)
-        
-        if self.total_time is not None:
-            stats['lap_time'] = self.total_time
-        
+             stats['num_segments'] = len(self.segments)
+             stats['segment_types'] = {t.name: sum(1 for s in self.segments if s.segment_type == t) for t in TrackSegmentType}
+             stats['total_straight_length_m'] = sum(s.length_m for s in self.segments if s.segment_type == TrackSegmentType.STRAIGHT and s.length_m)
+             stats['total_corner_length_m'] = self.total_length - stats['total_straight_length_m']
+             stats['straight_percentage'] = (stats['total_straight_length_m'] / self.total_length * 100) if self.total_length > 0 else 0
+        if self.cones_left is not None: stats['num_cones_left'] = len(self.cones_left)
+        if self.cones_right is not None: stats['num_cones_right'] = len(self.cones_right)
         return stats
 
+    def visualize(self, show_racing_line: bool = True, show_segments: bool = True,
+                show_elevation: bool = False, save_path: Optional[str] = None):
+        """Visualize the track using the centralized plotting function."""
+        from ..utils.plotting import plot_track_layout # Local import
 
-def create_example_track() -> Track:
-    """
-    Create an example track for testing.
-    
-    Returns:
-        Track object
-    """
-    track = Track("Example Track")
-    
-    # Create oval track
-    t = np.linspace(0, 2*np.pi, 100)
-    a = 50.0  # semi-major axis
-    b = 30.0  # semi-minor axis
-    
-    # Generate points
-    x = a * np.cos(t)
-    y = b * np.sin(t)
-    
-    # Store track points
-    track.points = np.column_stack((x, y))
-    
-    # Set constant width
-    track.width = np.full(len(track.points), 10.0)
-    
-    # Set start position
-    track.start_position = np.array([0.0, -b])
-    track.start_direction = 0.0
-    
-    # Perform post-load processing
+        if not self.has_geometry():
+             logger.error("Cannot visualize track: Geometry not loaded/calculated.")
+             return
+
+        plot_data = {
+            'points': self.points,
+            'width': self.width,
+            'segments': [{'type': s.segment_type.name, 'start_idx': s.start_idx, 'end_idx': s.end_idx} for s in self.segments],
+            'elevation': self.elevation,
+            'distance': self.distances, # Pass distances for elevation plot
+            'name': self.name,
+            'length': self.total_length,
+            'start_position': self.start_position,
+            'start_direction': self.start_heading
+        }
+        if self.racing_line and self.racing_line.line_points is not None:
+            plot_data['racing_line'] = self.racing_line.line_points
+
+        fig = plot_track_layout(plot_data, show_racing_line, show_segments, show_elevation,
+                                title=f"Track: {self.name}", save_path=save_path)
+        if fig: plt.show() # Show the plot generated by the utility
+
+
+# --- Factory/Helper Functions ---
+
+def create_example_track(difficulty: str = 'medium') -> Track:
+    """Creates a simple procedural example track."""
+    track = Track(f"Example Procedural Track ({difficulty})")
+    logger.info(f"Creating example procedural track (difficulty: {difficulty})...")
+
+    # Parameters based on difficulty
+    num_segments = {'easy': 8, 'medium': 12, 'hard': 16}.get(difficulty, 12)
+    min_straight = {'easy': 50, 'medium': 40, 'hard': 30}.get(difficulty, 40)
+    max_straight = {'easy': 150, 'medium': 120, 'hard': 100}.get(difficulty, 120)
+    min_radius = {'easy': 15, 'medium': 10, 'hard': 6}.get(difficulty, 10)
+    max_radius = {'easy': 50, 'medium': 40, 'hard': 30}.get(difficulty, 40)
+    max_angle = {'easy': 100, 'medium': 135, 'hard': 160}.get(difficulty, 135) # Max turn angle in degrees
+
+    points = [[0, 0]]
+    current_heading = 0.0 # Radians, starting East
+
+    for i in range(num_segments):
+        last_point = points[-1]
+        # Alternate straight and corner
+        if i % 2 == 0: # Straight
+            length = np.random.uniform(min_straight, max_straight)
+            end_point = last_point + length * np.array([np.cos(current_heading), np.sin(current_heading)])
+            # Add intermediate points for straights too
+            num_inter = max(2, int(length / 10)) # Point every ~10m
+            straight_pts = np.linspace(last_point, end_point, num_inter)[1:] # Exclude start point
+            points.extend(straight_pts.tolist())
+        else: # Corner
+            radius = np.random.uniform(min_radius, max_radius)
+            angle_deg = np.random.uniform(30, max_angle) # Turn angle
+            direction = np.random.choice([-1, 1]) # Left or Right turn
+            angle_rad = direction * np.radians(angle_deg)
+            arc_length = radius * abs(angle_rad)
+            num_arc_points = max(3, int(arc_length / 3)) # Point every ~3m
+
+            # Calculate corner center
+            normal_dir = current_heading + direction * np.pi / 2.0
+            center = last_point + radius * np.array([np.cos(normal_dir), np.sin(normal_dir)])
+
+            # Generate points along the arc
+            start_angle = normal_dir + direction * np.pi # Angle from center to start point
+            angles = np.linspace(0, angle_rad, num_arc_points) + start_angle
+
+            arc_points = center + radius * np.column_stack((np.cos(angles), np.sin(angles)))
+            points.extend(arc_points[1:].tolist()) # Exclude start point of arc
+
+            # Update heading
+            current_heading += angle_rad
+
+    track.points = np.array(points)
+    track.width = 3.0 # Constant width
+    track.is_closed_circuit = False # Procedural track is likely open
+
+    # Perform post-processing
     track._post_load_processing()
-    
-    logger.info("Example track created")
+    logger.info(f"Example track created. Length: {track.total_length:.1f}m")
     return track
 
+def load_track_from_file(filepath: str) -> Optional[Track]:
+    """Utility function to load a track."""
+    track = Track()
+    if track.load_from_file(filepath):
+        return track
+    return None
 
-def load_track_from_config(config_path: str) -> Optional[Track]:
-    """
-    Load track from configuration file.
-    
-    Args:
-        config_path: Path to configuration file
-        
-    Returns:
-        Track object, or None if loading failed
-    """
-    try:
-        track = Track()
-        if track.load_from_file(config_path):
-            return track
-        return None
-    except Exception as e:
-        logger.error(f"Error loading track from config {config_path}: {str(e)}")
-        return None
+# Example usage:
+if __name__ == "__main__":
+    # Create an example track
+    example_track = create_example_track(difficulty='medium')
+    print("\nExample Track Stats:")
+    print(yaml.dump(example_track.get_track_stats(), default_flow_style=False))
+
+    # Visualize the example track
+    example_track.visualize(show_racing_line=False)
+
+    # Example of loading a track (assuming a file exists)
+    # loaded_track = load_track_from_file("path/to/your/track.yaml")
+    # if loaded_track:
+    #     loaded_track.visualize()

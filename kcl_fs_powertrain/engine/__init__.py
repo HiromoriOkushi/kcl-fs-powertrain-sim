@@ -21,22 +21,24 @@ from .fuel_systems import (
 
 # Import thermal model components
 from .engine_thermal import (
-    ThermalConfig, CoolingSystem, EngineHeatModel,
-    ThermalSimulation, CoolingPerformance
+    ThermalConfig, EngineHeatModel, ThermalSimulation, CoolingPerformance,
+    # CoolingSystem is often imported from thermal package, alias if needed
+    # Or ensure the one here is specifically EngineCoolingSystem if different
+    CoolingSystem as EngineCoolingSystemComponent
 )
 
 __all__ = [
     # Engine model
     'MotorcycleEngine',
-    
+
     # Torque curve
     'TorqueCurve',
-    
+
     # Fuel systems
     'FuelType', 'FuelProperties', 'FuelInjector',
     'FuelPump', 'FuelConsumption', 'FuelSystem',
-    
+
     # Engine thermal
-    'ThermalConfig', 'CoolingSystem', 'EngineHeatModel',
-    'ThermalSimulation', 'CoolingPerformance'
+    'ThermalConfig', 'EngineHeatModel', 'ThermalSimulation',
+    'CoolingPerformance', 'EngineCoolingSystemComponent'
 ]

@@ -1,19 +1,9 @@
 """
-Thermal module for Formula Student powertrain simulation.
+Thermal management module for Formula Student powertrain simulation.
 
-This module provides comprehensive thermal modeling capabilities for Formula Student
-vehicles, including cooling systems, radiators, side pods, and electric cooling assistance.
-It enables simulation of heat generation, transfer, and dissipation throughout the powertrain,
-which is critical for optimizing vehicle performance in racing conditions.
-
-The module includes:
-- Cooling system components (radiators, water pumps, fans, thermostats)
-- Rear-mounted radiator systems with specialized airflow modeling
-- Side pod thermal and aerodynamic models with radiator integration
-- Electric compressor systems for supplementary cooling at low speeds
-
-Components can be used individually or integrated into a complete vehicle
-thermal management system for comprehensive simulation.
+Provides detailed models for cooling system components like radiators, pumps, fans,
+and specialized configurations like side pods and rear radiators, along with
+cooling assist systems (electric compressors).
 """
 
 # Import cooling system components
@@ -52,18 +42,18 @@ __all__ = [
     'RadiatorType', 'PumpType', 'FanType',
     'Radiator', 'WaterPump', 'CoolingFan', 'Thermostat', 'CoolingSystem',
     'create_cbr600f4i_cooling_system', 'create_formula_student_cooling_system',
-    
+
     # Rear radiator types and classes
     'MountingPosition', 'DuctType', 'RearRadiator', 'RearRadiatorDuct', 'RearRadiatorSystem',
     'create_default_rear_radiator_system', 'create_optimized_rear_radiator_system',
     'create_minimal_weight_rear_radiator_system',
-    
+
     # Side pod types and classes
     'SidePodType', 'RadiatorOrientation', 'SidePod', 'SidePodRadiator',
     'SidePodSystem', 'DualSidePodSystem',
     'create_standard_side_pod_system', 'create_aero_optimized_side_pod_system',
     'create_cooling_optimized_side_pod_system', 'create_minimum_weight_side_pod_system',
-    
+
     # Electric compressor types and classes
     'CompressorType', 'CompressorControl', 'ElectricCompressor',
     'CompressorControlModule', 'CoolingAssistSystem',

@@ -1,15 +1,29 @@
-﻿"""Enumerations for track generation."""
+﻿"""Enumerations for track generation modes and output formats."""
 
-from enum import Enum
+from enum import Enum, auto
 
 class TrackMode(Enum):
-    """Possible modes for how Voronoi regions are selected"""
-    EXPAND = 1  # Results in roundish track shapes
-    EXTEND = 2   # Results in elongated track shapes
-    RANDOM = 3  # Select regions randomly
+    """
+    Defines how Voronoi regions are selected to shape the track.
+
+    Attributes:
+        EXPAND: Selects adjacent regions, resulting in roundish track shapes.
+        EXTEND: Selects regions along a line, resulting in elongated shapes.
+        RANDOM: Selects regions randomly.
+    """
+    EXPAND = auto()
+    EXTEND = auto()
+    RANDOM = auto()
 
 class SimType(Enum):
-    """Selection between output format for different simulators"""
-    FSSIM = 1    # FSSIM compatible .yaml file
-    FSDS = 2       # FSDS compatible .csv file
-    GPX = 3         # GPX track format
+    """
+    Defines the output format for the generated track data.
+
+    Attributes:
+        FSSIM: Formula Student Simulator (FSSIM) YAML format (.yaml).
+        FSDS: Formula Student Driverless Simulator (FSDS) CSV format (.csv).
+        GPX: GPS Exchange Format (.gpx).
+    """
+    FSSIM = 'yaml' # Use extension as value for clarity
+    FSDS = 'csv'
+    GPX = 'gpx'

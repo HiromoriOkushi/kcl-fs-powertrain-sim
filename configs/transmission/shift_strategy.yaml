@@ -1,45 +1,66 @@
 ﻿# Shift Strategy Configuration for Formula Student
 
-# Engine parameters for shift strategy
+# Engine parameters relevant to shift strategy logic
 engine:
-  max_rpm: 14000
-  peak_power_rpm: 12500
-  peak_torque_rpm: 10500
-  idle_rpm: 1300
+  max_rpm: 14000                 # Engine redline RPM
+  peak_power_rpm: 12500          # RPM at peak power
+  peak_torque_rpm: 10500         # RPM at peak torque
+  idle_rpm: 1300                 # Engine idle RPM
 
-# Default strategy settings
-default_strategy: "MAX_ACCELERATION"  # MAX_ACCELERATION, MAX_EFFICIENCY, ENDURANCE, ACCELERATION
+# Default strategy to use if none is explicitly selected
+default_strategy: "ENDURANCE"     # Options: MAX_ACCELERATION, MAX_EFFICIENCY, ENDURANCE, ACCELERATION, SKIDPAD, AUTOCROSS
 
 # Strategy-specific settings
 strategies:
-  max_acceleration:
-    upshift_rpm_threshold: 500         # RPM below redline
-    downshift_rpm_threshold: 1500      # RPM above idle
+  # Optimized for quickest acceleration runs (e.g., 75m event)
+  MAX_ACCELERATION:
+    upshift_rpm_threshold: -200      # RPM below redline to initiate upshift
+    downshift_rpm_threshold: 8000    # RPM threshold to downshift (high to stay in power band)
+    use_power_curve: true            # Prioritize shifting based on power curve
 
-  max_efficiency:
-    upshift_rpm_factor: 1.1            # Factor of peak torque RPM
-    min_rpm: 2000                      # Minimum RPM to prevent lugging
+  # Optimized for fuel saving
+  MAX_EFFICIENCY:
+    upshift_rpm_factor: 1.15         # Factor of peak torque RPM (shift slightly after peak torque)
+    downshift_rpm_threshold: 4000    # Keep RPM relatively low for efficiency
+    min_rpm: 2500                    # Minimum RPM target after downshift
 
-  endurance:
-    target_rpm_factor: 0.5             # Factor between peak power and peak torque
-    min_rpm: 2500                      # Slightly higher than efficiency to maintain responsiveness
-    load_upshift_threshold: 0.4        # Upshift at 40% load
-    load_downshift_threshold: 0.8      # Downshift at 80% load
+  # Balanced strategy for long races, considering wear and fuel
+  ENDURANCE:
+    upshift_rpm_factor: 0.90         # Factor of peak power RPM (shift below peak power)
+    downshift_rpm_threshold: 5000    # Moderate downshift threshold
+    min_rpm: 3500
+    load_upshift_threshold: 0.5      # Consider upshifting at lower load (50%)
+    load_downshift_threshold: 0.8    # Consider downshifting at higher load (80%)
 
-  acceleration:
-    upshift_rpm_factor: 0.98           # Factor of max RPM
-    launch_rpm_factor: 0.8             # Factor of peak power RPM for launch
-    launch_slip_target: 0.2            # Target wheel slip ratio
+  # Specific strategy for the acceleration event
+  ACCELERATION:
+    upshift_rpm_offset: -150         # RPM below redline for upshifts
+    downshift_rpm_threshold: 9000    # Keep RPM high
+    # Launch control parameters (can be overridden by specific event config)
+    launch_rpm: 9500
+    launch_slip_target: 0.18
 
-# CAS (Clutch-less Automatic Shifter) parameters
+  # Strategy for Skidpad (typically holding one gear)
+  SKIDPAD:
+    target_gear: 2                   # Hold this gear for the event
+    upshift_rpm_threshold: 12000     # Very high threshold to prevent upshifts
+    downshift_rpm_threshold: 3000    # Low threshold to prevent downshifts
+
+  # Strategy for Autocross (more dynamic than endurance)
+  AUTOCROSS:
+    upshift_rpm_factor: 0.92         # Factor of peak power RPM
+    downshift_rpm_threshold: 5500
+    min_rpm: 4000
+    anticipate_corners: true         # Use predictive logic for corner downshifts (requires track data)
+
+# CAS (Clutch-less Automatic Shifter) parameters used by strategies
 cas:
-  ignition_cut_time: 20                # ms
-  shift_actuation_time: 15             # ms
-  throttle_blip_time: 25               # ms
-  recovery_time: 10                    # ms
-  minimum_shift_interval: 200          # ms
-  throttle_cut_percentage: 80          # %
-  throttle_blip_percentage: 40         # %
-  max_shifts_per_minute: 30
-  neutral_safety_enabled: true
-  overrev_protection_enabled: true
+  ignition_cut_time: 25            # ms - Duration of ignition cut during upshift
+  shift_actuation_time: 18         # ms - Time for mechanical gear change
+  throttle_blip_time: 30           # ms - Duration of throttle blip for downshift
+  recovery_time: 15                # ms - Time to stabilize after shift completion
+  minimum_shift_interval: 180      # ms - Cooldown period between shifts
+  throttle_cut_percentage: 75      # % throttle reduction during upshift
+  throttle_blip_percentage: 35     # % throttle increase during downshift
+  max_shifts_per_minute: 40        # Limit to prevent actuator overheating
+  overrev_protection_margin: 200   # RPM margin below redline for downshift protection

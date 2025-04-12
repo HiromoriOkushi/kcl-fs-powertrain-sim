@@ -1,17 +1,8 @@
 """
 Shift strategy module for Formula Student powertrain simulation.
 
-This module provides classes and functions for implementing optimal gear shifting
-strategies for a Formula Student car, working in conjunction with the CAS system
-and gearing system. It determines when to shift gears based on engine performance,
-vehicle conditions, and race event requirements.
-
-The module includes different shifting strategies optimized for:
-- Maximum acceleration
-- Maximum efficiency
-- Endurance events
-- Acceleration events
-- Combined strategies
+Defines different strategies for automatic gear shifting based on performance
+goals like maximum acceleration, efficiency, or endurance.
 """
 
 import time
@@ -20,1066 +11,513 @@ import matplotlib.pyplot as plt
 from enum import Enum, auto
 from typing import Dict, List, Tuple, Optional, Union, Callable
 import logging
+import os
+import yaml
+
+# Assuming TorqueCurve might be used for advanced strategies
+try:
+    from ..engine.torque_curve import TorqueCurve
+except ImportError:
+    class TorqueCurve: pass # Placeholder
+    TorqueCurve = None
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
-logger = logging.getLogger("Shift_Strategy")
-
+logger = logging.getLogger("ShiftStrategy")
 
 class StrategyType(Enum):
-    """Enumeration of different shift strategy types."""
-    MAX_ACCELERATION = auto()  # Strategy optimized for maximum acceleration
-    MAX_EFFICIENCY = auto()    # Strategy optimized for fuel efficiency
-    ENDURANCE = auto()         # Strategy balanced for endurance events
-    SKIDPAD = auto()           # Strategy for skidpad event
-    AUTOCROSS = auto()         # Strategy for autocross event
-    ACCELERATION = auto()      # Strategy for acceleration run
-    CUSTOM = auto()            # Custom user-defined strategy
-
+    """Types of shift strategies."""
+    MAX_ACCELERATION = auto()
+    MAX_EFFICIENCY = auto()
+    ENDURANCE = auto()
+    ACCELERATION = auto() # Specific for accel event
+    SKIDPAD = auto()
+    AUTOCROSS = auto()
+    MANUAL = auto() # Represents manual control
+    CUSTOM = auto()
 
 class ShiftCondition(Enum):
-    """Enumeration of conditions that can trigger a shift."""
-    RPM_THRESHOLD = auto()     # Shift based on engine RPM
-    SPEED_THRESHOLD = auto()   # Shift based on vehicle speed
-    LOAD_THRESHOLD = auto()    # Shift based on engine load
-    TORQUE_CURVE = auto()      # Shift based on torque curve
-    POWER_CURVE = auto()       # Shift based on power curve
-    TIME_BASED = auto()        # Shift after a specific time
-    DISTANCE_BASED = auto()    # Shift after a specific distance
-    CUSTOM_CONDITION = auto()  # Custom user-defined condition
-
+    """Conditions triggering a shift."""
+    RPM_THRESHOLD = auto()
+    SPEED_THRESHOLD = auto()
+    LOAD_THRESHOLD = auto()
+    # Advanced conditions (require more data/models)
+    TORQUE_CROSSOVER = auto() # Torque in next gear > torque in current gear
+    POWER_CROSSOVER = auto() # Power in next gear > power in current gear
+    OPTIMAL_ACCELERATION = auto() # Based on calculated acceleration in gears
+    TIME_SINCE_START = auto() # For timed events like launch
+    CUSTOM = auto()
 
 class ShiftPoint:
-    """
-    Class representing a gear shift point with associated conditions.
-    """
-    
-    def __init__(self, gear: int, target_gear: int, 
-                 condition_type: ShiftCondition, threshold_value: float,
-                 priority: int = 1, description: str = ""):
+    """Defines a specific condition for initiating a gear shift."""
+    def __init__(self, from_gear: int, to_gear: int,
+                 condition: ShiftCondition, threshold: float,
+                 priority: int = 1, description: Optional[str] = None):
         """
-        Initialize shift point with conditions.
-        
         Args:
-            gear: Current gear
-            target_gear: Target gear to shift to
-            condition_type: Type of condition that triggers shift
-            threshold_value: Value at which shift is triggered
-            priority: Priority level (higher number = higher priority)
-            description: Human-readable description of shift point
+            from_gear: The gear shifting from.
+            to_gear: The gear shifting to.
+            condition: The ShiftCondition enum type.
+            threshold: The value associated with the condition (e.g., RPM, speed).
+            priority: Higher value means higher priority (checked first).
+            description: Optional description.
         """
-        self.gear = gear
-        self.target_gear = target_gear
-        self.condition_type = condition_type
-        self.threshold_value = threshold_value
+        self.from_gear = from_gear
+        self.to_gear = to_gear
+        self.condition = condition
+        self.threshold = threshold
         self.priority = priority
-        self.description = description
-    
+        self.description = description if description else \
+                           f"{condition.name} {'<' if to_gear < from_gear else '>'} {threshold:.1f}"
+
     def __str__(self) -> str:
-        """String representation of shift point."""
-        return (f"Shift from {self.gear} to {self.target_gear} when "
-                f"{self.condition_type.name} reaches {self.threshold_value} "
-                f"(Priority: {self.priority})")
+        direction = "Upshift" if self.to_gear > self.from_gear else "Downshift"
+        return f"{direction} {self.from_gear}->{self.to_gear} when {self.description} (Prio: {self.priority})"
+
+    def __lt__(self, other: 'ShiftPoint') -> bool:
+        # For sorting by priority (higher priority first)
+        return self.priority > other.priority
 
 
 class ShiftStrategy:
-    """
-    Base class for shift strategies.
-    
-    This class provides the framework for implementing different shift strategies
-    and evaluating when to shift gears based on vehicle and engine conditions.
-    """
-    
+    """Base class for all shift strategies."""
     def __init__(self, strategy_type: StrategyType, name: str = ""):
-        """
-        Initialize the shift strategy.
-        
-        Args:
-            strategy_type: Type of shift strategy
-            name: Optional name for the strategy
-        """
         self.strategy_type = strategy_type
-        self.name = name or strategy_type.name.lower().replace("_", " ").title()
-        
-        # Initialize shift points storage
-        self.upshift_points = {}  # Maps gear to list of ShiftPoint objects
-        self.downshift_points = {}  # Maps gear to list of ShiftPoint objects
-        
-        # Performance metrics
-        self.shift_history = []  # List of executed shifts
-        self.strategy_performance = {}  # Performance metrics
-        
-        logger.info(f"Shift strategy initialized: {self.name}")
-    
-    def add_upshift_point(self, shift_point: ShiftPoint):
-        """
-        Add an upshift point to the strategy.
-        
-        Args:
-            shift_point: ShiftPoint object defining upshift condition
-        """
-        gear = shift_point.gear
-        if gear not in self.upshift_points:
-            self.upshift_points[gear] = []
-        
-        self.upshift_points[gear].append(shift_point)
-        # Sort by priority (descending)
-        self.upshift_points[gear].sort(key=lambda sp: sp.priority, reverse=True)
-        
-        logger.debug(f"Added upshift point: {shift_point}")
-    
-    def add_downshift_point(self, shift_point: ShiftPoint):
-        """
-        Add a downshift point to the strategy.
-        
-        Args:
-            shift_point: ShiftPoint object defining downshift condition
-        """
-        gear = shift_point.gear
-        if gear not in self.downshift_points:
-            self.downshift_points[gear] = []
-        
-        self.downshift_points[gear].append(shift_point)
-        # Sort by priority (descending)
-        self.downshift_points[gear].sort(key=lambda sp: sp.priority, reverse=True)
-        
-        logger.debug(f"Added downshift point: {shift_point}")
-    
-    def evaluate_shift(self, current_gear: int, engine_rpm: float, vehicle_speed: float,
-                      engine_load: float, throttle_position: float, 
-                      vehicle_state: Dict = None) -> Optional[int]:
-        """
-        Evaluate whether a shift is needed based on current conditions.
-        
-        Args:
-            current_gear: Current gear
-            engine_rpm: Current engine RPM
-            vehicle_speed: Current vehicle speed in m/s
-            engine_load: Current engine load (0-1)
-            throttle_position: Current throttle position (0-1)
-            vehicle_state: Optional dictionary with additional vehicle state data
-            
-        Returns:
-            Target gear to shift to, or None if no shift is needed
-        """
-        # Don't shift if throttle is very low (likely preparing to stop)
-        if throttle_position < 0.1 and engine_rpm < 3000:
-            return None
-        
-        # Check upshift conditions
-        if current_gear in self.upshift_points and current_gear > 0:
-            for shift_point in self.upshift_points[current_gear]:
-                if self._check_shift_condition(shift_point, engine_rpm, vehicle_speed, 
-                                             engine_load, throttle_position, vehicle_state):
-                    return shift_point.target_gear
-        
-        # Check downshift conditions
-        if current_gear in self.downshift_points and current_gear > 0:
-            for shift_point in self.downshift_points[current_gear]:
-                if self._check_shift_condition(shift_point, engine_rpm, vehicle_speed, 
-                                             engine_load, throttle_position, vehicle_state):
-                    return shift_point.target_gear
-        
-        # No shift needed
-        return None
-    
-    def _check_shift_condition(self, shift_point: ShiftPoint, engine_rpm: float, 
-                              vehicle_speed: float, engine_load: float,
-                              throttle_position: float, vehicle_state: Dict = None) -> bool:
-        """
-        Check if a specific shift condition is met.
-        
-        Args:
-            shift_point: ShiftPoint object to evaluate
-            engine_rpm: Current engine RPM
-            vehicle_speed: Current vehicle speed in m/s
-            engine_load: Current engine load (0-1)
-            throttle_position: Current throttle position (0-1)
-            vehicle_state: Optional dictionary with additional vehicle state data
-            
-        Returns:
-            True if condition is met, False otherwise
-        """
-        condition = shift_point.condition_type
-        threshold = shift_point.threshold_value
-        
-        # Evaluate based on condition type
+        self.name = name or strategy_type.name.replace('_', ' ').title()
+        # Store shift points: {from_gear: [ShiftPoint1, ShiftPoint2, ...]} sorted by priority
+        self.shift_points: Dict[int, List[ShiftPoint]] = {}
+        self.shift_log: List[Dict] = []
+        logger.info(f"Initialized Shift Strategy: {self.name}")
+
+    def add_shift_point(self, shift_point: ShiftPoint):
+        """Add a shift point rule to the strategy."""
+        from_gear = shift_point.from_gear
+        if from_gear not in self.shift_points:
+            self.shift_points[from_gear] = []
+        self.shift_points[from_gear].append(shift_point)
+        self.shift_points[from_gear].sort() # Sort by priority (desc)
+        logger.debug(f"Added shift point to {self.name}: {shift_point}")
+
+    def _check_condition(self, point: ShiftPoint, state: Dict) -> bool:
+        """Check if a specific shift point condition is met."""
+        condition = point.condition
+        threshold = point.threshold
+        direction = 'up' if point.to_gear > point.from_gear else 'down'
+
+        # Required state keys (add more as needed by conditions)
+        current_rpm = state.get('engine_rpm')
+        current_speed = state.get('vehicle_speed')
+        current_load = state.get('engine_load') # Assume 0-1 load factor
+
         if condition == ShiftCondition.RPM_THRESHOLD:
-            # For upshift, RPM should be above threshold
-            # For downshift, RPM should be below threshold
-            if shift_point.target_gear > shift_point.gear:  # Upshift
-                return engine_rpm >= threshold
-            else:  # Downshift
-                return engine_rpm <= threshold
-                
+            if current_rpm is None: return False
+            return current_rpm >= threshold if direction == 'up' else current_rpm <= threshold
         elif condition == ShiftCondition.SPEED_THRESHOLD:
-            # Similar logic for vehicle speed
-            if shift_point.target_gear > shift_point.gear:  # Upshift
-                return vehicle_speed >= threshold
-            else:  # Downshift
-                return vehicle_speed <= threshold
-                
+            if current_speed is None: return False
+            return current_speed >= threshold if direction == 'up' else current_speed <= threshold
         elif condition == ShiftCondition.LOAD_THRESHOLD:
-            # Engine load threshold
-            if shift_point.target_gear > shift_point.gear:  # Upshift
-                return engine_load >= threshold
-            else:  # Downshift
-                return engine_load <= threshold
-        
-        elif condition == ShiftCondition.TORQUE_CURVE:
-            # This would require a more complex evaluation using the engine's torque curve
-            # We would need that provided in the vehicle_state
-            if vehicle_state and 'torque_curve' in vehicle_state:
-                torque_curve = vehicle_state['torque_curve']
-                current_torque = np.interp(engine_rpm, torque_curve['rpm'], torque_curve['torque'])
-                predicted_torque_next_gear = self._predict_torque_in_gear(
-                    engine_rpm, shift_point.target_gear, torque_curve, vehicle_state)
-                
-                # Compare torque multiplication through gears
-                if shift_point.target_gear > shift_point.gear:  # Upshift
-                    return predicted_torque_next_gear >= current_torque * threshold
-                else:  # Downshift
-                    return predicted_torque_next_gear >= current_torque * threshold
-            
-            return False
-            
-        elif condition == ShiftCondition.POWER_CURVE:
-            # Similar to torque curve but with power
-            if vehicle_state and 'power_curve' in vehicle_state:
-                power_curve = vehicle_state['power_curve']
-                current_power = np.interp(engine_rpm, power_curve['rpm'], power_curve['power'])
-                predicted_power_next_gear = self._predict_power_in_gear(
-                    engine_rpm, shift_point.target_gear, power_curve, vehicle_state)
-                
-                if shift_point.target_gear > shift_point.gear:  # Upshift
-                    return predicted_power_next_gear >= current_power * threshold
-                else:  # Downshift
-                    return predicted_power_next_gear >= current_power * threshold
-            
-            return False
-            
-        elif condition == ShiftCondition.TIME_BASED:
-            # Time-based shifts (e.g., for launch control)
-            if vehicle_state and 'elapsed_time' in vehicle_state:
-                return vehicle_state['elapsed_time'] >= threshold
-            
-            return False
-            
-        elif condition == ShiftCondition.DISTANCE_BASED:
-            # Distance-based shifts
-            if vehicle_state and 'distance_traveled' in vehicle_state:
-                return vehicle_state['distance_traveled'] >= threshold
-            
-            return False
-            
-        elif condition == ShiftCondition.CUSTOM_CONDITION:
-            # Evaluate custom condition if provided
-            if vehicle_state and 'custom_condition_func' in vehicle_state:
-                custom_func = vehicle_state['custom_condition_func']
-                return custom_func(shift_point, engine_rpm, vehicle_speed, 
-                                 engine_load, throttle_position, vehicle_state)
-            
-            return False
-        
-        return False
-    
-    def _predict_torque_in_gear(self, current_rpm: float, target_gear: int, 
-                              torque_curve: Dict, vehicle_state: Dict) -> float:
+            if current_load is None: return False
+            # Example: Upshift if load is low, downshift if load is high (can be customized)
+            return current_load <= threshold if direction == 'up' else current_load >= threshold
+        # --- Add checks for TORQUE/POWER/ACCELERATION crossover ---
+        # These require predicting performance in the target gear, needing engine/drivetrain info in 'state'
+        elif condition in [ShiftCondition.TORQUE_CROSSOVER, ShiftCondition.POWER_CROSSOVER, ShiftCondition.OPTIMAL_ACCELERATION]:
+             logger.warning(f"Condition {condition.name} requires advanced prediction - not fully implemented in base check.")
+             # Placeholder logic: Shift near redline for these for now
+             if direction == 'up' and current_rpm is not None:
+                 engine_redline = state.get('engine_redline_rpm', 14000)
+                 return current_rpm >= engine_redline * 0.95
+             return False # Don't trigger downshifts based on this placeholder
+        elif condition == ShiftCondition.TIME_SINCE_START:
+             if 'elapsed_time_s' not in state: return False
+             return state['elapsed_time_s'] >= threshold
+        elif condition == ShiftCondition.CUSTOM:
+             if 'custom_eval_func' not in state or not callable(state['custom_eval_func']): return False
+             return state['custom_eval_func'](point, state) # Call custom function
+
+        return False # Default false for unimplemented conditions
+
+    def evaluate_shift(self, current_gear: int, state: Dict) -> Optional[int]:
         """
-        Predict engine torque after shifting to target gear.
-        
+        Determine the target gear based on the current state and strategy rules.
+
         Args:
-            current_rpm: Current engine RPM
-            target_gear: Target gear
-            torque_curve: Engine torque curve data
-            vehicle_state: Vehicle state data
-            
+            current_gear: The current gear (0=N).
+            state: Dictionary containing current vehicle state (rpm, speed, load, etc.).
+
         Returns:
-            Predicted torque in target gear
+            Target gear number (int) or None if no shift is recommended.
         """
-        # This requires gear ratios and vehicle speed to calculate
-        if 'gear_ratios' not in vehicle_state or 'current_gear' not in vehicle_state:
-            return 0.0
-        
-        gear_ratios = vehicle_state['gear_ratios']
-        current_gear = vehicle_state['current_gear']
-        
-        # Ensure we have valid gear data
-        if current_gear <= 0 or current_gear > len(gear_ratios) or target_gear <= 0 or target_gear > len(gear_ratios):
-            return 0.0
-        
-        # Calculate RPM in target gear
-        current_ratio = gear_ratios[current_gear - 1]
-        target_ratio = gear_ratios[target_gear - 1]
-        target_rpm = current_rpm * (current_ratio / target_ratio)
-        
-        # Interpolate torque at target RPM
-        rpm_points = torque_curve['rpm']
-        torque_points = torque_curve['torque']
-        
-        # Ensure target RPM is within range
-        if target_rpm < min(rpm_points) or target_rpm > max(rpm_points):
-            return 0.0
-        
-        # Interpolate torque
-        predicted_torque = np.interp(target_rpm, rpm_points, torque_points)
-        
-        return predicted_torque
-    
-    def _predict_power_in_gear(self, current_rpm: float, target_gear: int, 
-                              power_curve: Dict, vehicle_state: Dict) -> float:
-        """
-        Predict engine power after shifting to target gear.
-        
-        Args:
-            current_rpm: Current engine RPM
-            target_gear: Target gear
-            power_curve: Engine power curve data
-            vehicle_state: Vehicle state data
-            
-        Returns:
-            Predicted power in target gear
-        """
-        # Similar to torque prediction but for power
-        if 'gear_ratios' not in vehicle_state or 'current_gear' not in vehicle_state:
-            return 0.0
-        
-        gear_ratios = vehicle_state['gear_ratios']
-        current_gear = vehicle_state['current_gear']
-        
-        # Ensure we have valid gear data
-        if current_gear <= 0 or current_gear > len(gear_ratios) or target_gear <= 0 or target_gear > len(gear_ratios):
-            return 0.0
-        
-        # Calculate RPM in target gear
-        current_ratio = gear_ratios[current_gear - 1]
-        target_ratio = gear_ratios[target_gear - 1]
-        target_rpm = current_rpm * (current_ratio / target_ratio)
-        
-        # Interpolate power at target RPM
-        rpm_points = power_curve['rpm']
-        power_points = power_curve['power']
-        
-        # Ensure target RPM is within range
-        if target_rpm < min(rpm_points) or target_rpm > max(rpm_points):
-            return 0.0
-        
-        # Interpolate power
-        predicted_power = np.interp(target_rpm, rpm_points, power_points)
-        
-        return predicted_power
-    
-    def record_shift(self, from_gear: int, to_gear: int, engine_rpm: float, 
-                   vehicle_speed: float, timestamp: float):
-        """
-        Record a shift for performance analysis.
-        
-        Args:
-            from_gear: Starting gear
-            to_gear: Target gear
-            engine_rpm: Engine RPM at shift
-            vehicle_speed: Vehicle speed at shift
-            timestamp: Time of shift
-        """
-        shift_record = {
+        if current_gear not in self.shift_points:
+            return None # No rules defined for shifting *from* this gear
+
+        # Check rules for the current gear, ordered by priority
+        for point in self.shift_points[current_gear]:
+            if self._check_condition(point, state):
+                # Check if target gear is valid
+                num_gears = state.get('num_gears', 6) # Get from state or assume 6
+                if 0 <= point.target_gear <= num_gears:
+                    logger.debug(f"{self.name}: Recommending shift {current_gear}->{point.target_gear} due to {point.description}")
+                    return point.target_gear
+                else:
+                    logger.warning(f"Invalid target gear {point.target_gear} defined in strategy {self.name}")
+
+        return None # No shift condition met
+
+    def record_shift(self, from_gear: int, to_gear: int, state: Dict, timestamp: float):
+        """Log a shift event."""
+        log_entry = {
+            'timestamp': timestamp,
             'from_gear': from_gear,
             'to_gear': to_gear,
-            'engine_rpm': engine_rpm,
-            'vehicle_speed': vehicle_speed,
-            'timestamp': timestamp,
-            'shift_type': 'upshift' if to_gear > from_gear else 'downshift'
+            'engine_rpm': state.get('engine_rpm'),
+            'vehicle_speed': state.get('vehicle_speed'),
+            'engine_load': state.get('engine_load'),
+            'throttle': state.get('throttle_position')
         }
-        
-        self.shift_history.append(shift_record)
-        logger.debug(f"Recorded shift: {from_gear} -> {to_gear} at {engine_rpm} RPM")
-    
-    def analyze_performance(self) -> Dict:
-        """
-        Analyze shift strategy performance based on recorded shifts.
-        
-        Returns:
-            Dictionary with performance metrics
-        """
-        if not self.shift_history:
-            return {'shifts_analyzed': 0}
-        
-        # Count shifts by type
-        upshifts = [s for s in self.shift_history if s['shift_type'] == 'upshift']
-        downshifts = [s for s in self.shift_history if s['shift_type'] == 'downshift']
-        
-        # Calculate average RPM at shift
-        avg_upshift_rpm = sum(s['engine_rpm'] for s in upshifts) / len(upshifts) if upshifts else 0
-        avg_downshift_rpm = sum(s['engine_rpm'] for s in downshifts) / len(downshifts) if downshifts else 0
-        
-        # Calculate shift frequency
-        if len(self.shift_history) >= 2:
-            total_time = self.shift_history[-1]['timestamp'] - self.shift_history[0]['timestamp']
-            shift_frequency = len(self.shift_history) / total_time if total_time > 0 else 0
-        else:
-            shift_frequency = 0
-        
-        # Store performance metrics
-        self.strategy_performance = {
-            'shifts_analyzed': len(self.shift_history),
-            'upshifts': len(upshifts),
-            'downshifts': len(downshifts),
-            'avg_upshift_rpm': avg_upshift_rpm,
-            'avg_downshift_rpm': avg_downshift_rpm,
-            'shift_frequency': shift_frequency
-        }
-        
-        return self.strategy_performance
-    
-    def plot_shift_points(self, engine_rpm_range: List[float], 
-                        vehicle_state: Dict = None, save_path: Optional[str] = None):
-        """
-        Plot the shift points of the strategy.
-        
-        Args:
-            engine_rpm_range: Range of engine RPM to plot
-            vehicle_state: Optional vehicle state data for additional context
-            save_path: Optional path to save the plot
-        """
-        plt.figure(figsize=(10, 6))
-        
-        # If we have gear ratios, we can calculate vehicle speeds
-        has_gear_data = (vehicle_state is not None and 
-                       'gear_ratios' in vehicle_state and 
-                       'wheel_radius' in vehicle_state)
-        
-        if has_gear_data:
-            gear_ratios = vehicle_state['gear_ratios']
-            wheel_radius = vehicle_state['wheel_radius']
-            final_drive = vehicle_state.get('final_drive_ratio', 1.0)
-            
-            # Plot speed profile for each gear
-            for gear in range(1, len(gear_ratios) + 1):
-                speeds = []
-                for rpm in engine_rpm_range:
-                    # Simple speed calculation: v = ω * r
-                    # ω (rad/s) = engine_rpm * 2π / 60 / (gear_ratio * final_drive)
-                    wheel_rpm = rpm / (gear_ratios[gear-1] * final_drive)
-                    wheel_rads = wheel_rpm * 2 * np.pi / 60
-                    speed = wheel_rads * wheel_radius
-                    speeds.append(speed * 3.6)  # Convert to km/h
-                
-                plt.plot(engine_rpm_range, speeds, label=f"Gear {gear}")
-        
-        # Plot upshift points
-        for gear, shift_points in self.upshift_points.items():
-            for sp in shift_points:
-                if sp.condition_type == ShiftCondition.RPM_THRESHOLD:
-                    if has_gear_data and gear <= len(gear_ratios):
-                        # Calculate vehicle speed at this RPM
-                        wheel_rpm = sp.threshold_value / (gear_ratios[gear-1] * final_drive)
-                        wheel_rads = wheel_rpm * 2 * np.pi / 60
-                        speed = wheel_rads * wheel_radius * 3.6  # km/h
-                        
-                        plt.axvline(x=sp.threshold_value, color='g', linestyle='--', alpha=0.7)
-                        plt.text(sp.threshold_value + 100, speed, 
-                               f"Up {gear}→{sp.target_gear}", 
-                               rotation=90, verticalalignment='bottom')
-                    else:
-                        plt.axvline(x=sp.threshold_value, color='g', linestyle='--', alpha=0.7)
-                        plt.text(sp.threshold_value + 100, 0, 
-                               f"Up {gear}→{sp.target_gear}", 
-                               rotation=90, verticalalignment='bottom')
-        
-        # Plot downshift points
-        for gear, shift_points in self.downshift_points.items():
-            for sp in shift_points:
-                if sp.condition_type == ShiftCondition.RPM_THRESHOLD:
-                    if has_gear_data and gear <= len(gear_ratios):
-                        # Calculate vehicle speed at this RPM
-                        wheel_rpm = sp.threshold_value / (gear_ratios[gear-1] * final_drive)
-                        wheel_rads = wheel_rpm * 2 * np.pi / 60
-                        speed = wheel_rads * wheel_radius * 3.6  # km/h
-                        
-                        plt.axvline(x=sp.threshold_value, color='r', linestyle='--', alpha=0.7)
-                        plt.text(sp.threshold_value - 200, speed, 
-                               f"Down {gear}→{sp.target_gear}", 
-                               rotation=90, verticalalignment='top')
-                    else:
-                        plt.axvline(x=sp.threshold_value, color='r', linestyle='--', alpha=0.7)
-                        plt.text(sp.threshold_value - 200, 0, 
-                               f"Down {gear}→{sp.target_gear}", 
-                               rotation=90, verticalalignment='top')
-        
-        plt.xlabel("Engine Speed (RPM)")
-        plt.ylabel("Vehicle Speed (km/h)" if has_gear_data else "Value")
-        plt.title(f"Shift Strategy: {self.name}")
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.legend()
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-        plt.show()
+        self.shift_log.append(log_entry)
 
+    def analyze_performance(self) -> Dict:
+        """Analyze logged shift data."""
+        if not self.shift_log: return {'total_shifts': 0}
+        df = pd.DataFrame(self.shift_log)
+        upshifts = df[df['to_gear'] > df['from_gear']]
+        downshifts = df[df['to_gear'] < df['from_gear']]
+        return {
+            'total_shifts': len(df),
+            'num_upshifts': len(upshifts),
+            'num_downshifts': len(downshifts),
+            'avg_upshift_rpm': upshifts['engine_rpm'].mean() if not upshifts.empty else None,
+            'avg_downshift_rpm': downshifts['engine_rpm'].mean() if not downshifts.empty else None,
+            'shift_frequency_hz': len(df) / (df['timestamp'].iloc[-1] - df['timestamp'].iloc[0]) if len(df) > 1 else 0
+        }
+
+    def plot_shift_points(self, state_data: pd.DataFrame, save_path: Optional[str] = None):
+         """Plot shift points over a time series of state data."""
+         from ..utils.plotting import save_plot # Local import
+
+         if not self.shift_log:
+             logger.warning("No shift history to plot for strategy.")
+             return
+
+         fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+
+         time = state_data['time']
+
+         # Plot RPM and Shifts
+         axes[0].plot(time, state_data['engine_rpm'], label='Engine RPM', color='blue')
+         axes[0].set_ylabel('Engine RPM')
+         axes[0].grid(True, alpha=0.5)
+         shift_times = [s['timestamp'] for s in self.shift_log]
+         shift_rpms = [s['engine_rpm'] for s in self.shift_log]
+         shift_labels = [f"{s['from_gear']}->{s['to_gear']}" for s in self.shift_log]
+         for t, rpm, lbl in zip(shift_times, shift_rpms, shift_labels):
+              axes[0].scatter([t], [rpm], color='red', marker='o', s=50, zorder=5)
+              axes[0].text(t, rpm + 200, lbl, color='red', ha='center', fontsize=8)
+         axes[0].legend()
+
+         # Plot Speed and Gear
+         ax_speed = axes[1]
+         ax_gear = ax_speed.twinx()
+         ln1 = ax_speed.plot(time, state_data['vehicle_speed'] * 3.6, label='Speed (km/h)', color='green') # kph
+         ax_speed.set_ylabel('Speed (km/h)', color='green')
+         ax_speed.tick_params(axis='y', labelcolor='green')
+         ax_speed.grid(True, alpha=0.5)
+
+         ln2 = ax_gear.step(time, state_data['gear'], label='Gear', color='orange', where='post')
+         ax_gear.set_ylabel('Gear', color='orange')
+         ax_gear.tick_params(axis='y', labelcolor='orange')
+         ax_gear.yaxis.set_major_locator(MaxNLocator(integer=True))
+         ax_gear.set_ylim(0.5, max(state_data['gear']) + 0.5)
+
+         lns = ln1 + [ln2] # Combine lines for legend
+         labs = [l.get_label() for l in lns]
+         ax_speed.legend(lns, labs, loc='center left')
+
+
+         # Plot Throttle and Load
+         axes[2].plot(time, state_data['throttle_position'], label='Throttle', color='purple')
+         axes[2].plot(time, state_data['engine_load'], label='Load', color='brown', linestyle='--')
+         axes[2].set_xlabel('Time (s)')
+         axes[2].set_ylabel('Input (0-1)')
+         axes[2].set_ylim(-0.05, 1.05)
+         axes[2].grid(True, alpha=0.5)
+         axes[2].legend()
+
+         fig.suptitle(f'Shift Strategy Analysis: {self.name}')
+         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+         if save_path: save_plot(fig, save_path)
+         plt.show()
+         plt.close(fig)
+
+
+# --- Specific Strategy Implementations ---
 
 class MaxAccelerationStrategy(ShiftStrategy):
-    """
-    Shift strategy optimized for maximum acceleration.
-    
-    This strategy is designed to keep the engine operating at or near the peak
-    of its power band to maximize acceleration. It typically involves higher
-    RPM shift points and more aggressive shifting behavior.
-    """
-    
-    def __init__(self, engine_max_rpm: float, engine_peak_power_rpm: float, 
-                gear_ratios: List[float], name: str = "Maximum Acceleration"):
-        """
-        Initialize max acceleration strategy.
-        
-        Args:
-            engine_max_rpm: Maximum engine RPM
-            engine_peak_power_rpm: RPM at peak engine power
-            gear_ratios: List of gear ratios
-            name: Strategy name
-        """
-        super().__init__(StrategyType.MAX_ACCELERATION, name)
-        
-        self.engine_max_rpm = engine_max_rpm
-        self.engine_peak_power_rpm = engine_peak_power_rpm
-        self.gear_ratios = gear_ratios
-        
-        # Configure upshift points - typically just below redline
-        upshift_rpm = engine_max_rpm * 0.95
-        
-        # Configure downshift points - typically to keep engine near peak power
-        for i in range(1, len(gear_ratios)):
-            current_gear = i
-            next_gear = i + 1
-            
-            # Set upshift point for this gear (if not the last gear)
-            if current_gear < len(gear_ratios):
-                self.add_upshift_point(ShiftPoint(
-                    current_gear, next_gear, 
-                    ShiftCondition.RPM_THRESHOLD, upshift_rpm,
-                    description=f"Upshift from {current_gear} to {next_gear} at {upshift_rpm} RPM"
-                ))
-            
-            # Set downshift point for next gear
-            if next_gear <= len(gear_ratios):
-                # Calculate RPM after downshift that would put us at peak power
-                current_ratio = gear_ratios[current_gear - 1]
-                next_ratio = gear_ratios[next_gear - 1]
-                downshift_rpm = engine_peak_power_rpm * (next_ratio / current_ratio) * 0.9
-                
-                self.add_downshift_point(ShiftPoint(
-                    next_gear, current_gear,
-                    ShiftCondition.RPM_THRESHOLD, downshift_rpm,
-                    description=f"Downshift from {next_gear} to {current_gear} at {downshift_rpm} RPM"
-                ))
-        
-        logger.info(f"Max acceleration strategy configured with upshift at {upshift_rpm} RPM")
+    """Shifts near redline to maximize power output."""
+    def __init__(self, engine_redline_rpm: float, num_gears: int):
+        super().__init__(StrategyType.MAX_ACCELERATION)
+        upshift_rpm = engine_redline_rpm * 0.97 # Shift very close to redline
+        downshift_rpm = engine_redline_rpm * 0.60 # Downshift earlier to get back into power band
+
+        for i in range(1, num_gears):
+            self.add_shift_point(ShiftPoint(i, i + 1, ShiftCondition.RPM_THRESHOLD, upshift_rpm))
+            self.add_shift_point(ShiftPoint(i + 1, i, ShiftCondition.RPM_THRESHOLD, downshift_rpm))
 
 
 class MaxEfficiencyStrategy(ShiftStrategy):
-    """
-    Shift strategy optimized for maximum efficiency.
-    
-    This strategy is designed to keep the engine operating in its most efficient
-    range to maximize fuel economy. It typically involves lower RPM shift points
-    and gentler shifting behavior.
-    """
-    
-    def __init__(self, engine_max_rpm: float, engine_peak_torque_rpm: float, 
-                gear_ratios: List[float], name: str = "Maximum Efficiency"):
-        """
-        Initialize max efficiency strategy.
-        
-        Args:
-            engine_max_rpm: Maximum engine RPM
-            engine_peak_torque_rpm: RPM at peak engine torque
-            gear_ratios: List of gear ratios
-            name: Strategy name
-        """
-        super().__init__(StrategyType.MAX_EFFICIENCY, name)
-        
-        self.engine_max_rpm = engine_max_rpm
-        self.engine_peak_torque_rpm = engine_peak_torque_rpm
-        self.gear_ratios = gear_ratios
-        
-        # Configure upshift points - typically at or just above peak torque
-        upshift_rpm = engine_peak_torque_rpm * 1.1
-        
-        # Configure downshift points - typically to prevent lugging the engine
-        min_rpm = 2000  # Prevent engine lugging
-        
-        for i in range(1, len(gear_ratios)):
-            current_gear = i
-            next_gear = i + 1
-            
-            # Set upshift point for this gear (if not the last gear)
-            if current_gear < len(gear_ratios):
-                self.add_upshift_point(ShiftPoint(
-                    current_gear, next_gear, 
-                    ShiftCondition.RPM_THRESHOLD, upshift_rpm,
-                    description=f"Upshift from {current_gear} to {next_gear} at {upshift_rpm} RPM"
-                ))
-            
-            # Set downshift point for next gear
-            if next_gear <= len(gear_ratios):
-                # Calculate RPM after downshift that would prevent lugging
-                current_ratio = gear_ratios[current_gear - 1]
-                next_ratio = gear_ratios[next_gear - 1]
-                downshift_rpm = min_rpm * (next_ratio / current_ratio)
-                
-                self.add_downshift_point(ShiftPoint(
-                    next_gear, current_gear,
-                    ShiftCondition.RPM_THRESHOLD, downshift_rpm,
-                    description=f"Downshift from {next_gear} to {current_gear} at {downshift_rpm} RPM"
-                ))
-        
-        logger.info(f"Max efficiency strategy configured with upshift at {upshift_rpm} RPM")
+    """Shifts at lower RPMs, typically just after peak torque, to save fuel."""
+    def __init__(self, engine_peak_torque_rpm: float, num_gears: int, min_rpm: float = 2500):
+        super().__init__(StrategyType.MAX_EFFICIENCY)
+        upshift_rpm = engine_peak_torque_rpm * 1.10 # Shift slightly after peak torque
+        downshift_rpm = min_rpm # Downshift to avoid lugging
+
+        for i in range(1, num_gears):
+            self.add_shift_point(ShiftPoint(i, i + 1, ShiftCondition.RPM_THRESHOLD, upshift_rpm))
+            # Need gear ratios to calculate accurate downshift RPM to land near min_rpm
+            # Simplified: use a fixed low RPM threshold to trigger downshift
+            self.add_shift_point(ShiftPoint(i + 1, i, ShiftCondition.RPM_THRESHOLD, downshift_rpm * 1.1)) # Downshift if RPM drops low
 
 
 class EnduranceStrategy(ShiftStrategy):
-    """
-    Shift strategy optimized for endurance events.
-    
-    This strategy balances performance and efficiency to maximize the car's
-    endurance capabilities. It typically involves moderate RPM shift points
-    and smooth shifting behavior to reduce mechanical wear.
-    """
-    
-    def __init__(self, engine_max_rpm: float, engine_peak_power_rpm: float, 
-                engine_peak_torque_rpm: float, gear_ratios: List[float],
-                name: str = "Endurance"):
-        """
-        Initialize endurance strategy.
-        
-        Args:
-            engine_max_rpm: Maximum engine RPM
-            engine_peak_power_rpm: RPM at peak engine power
-            engine_peak_torque_rpm: RPM at peak engine torque
-            gear_ratios: List of gear ratios
-            name: Strategy name
-        """
-        super().__init__(StrategyType.ENDURANCE, name)
-        
-        self.engine_max_rpm = engine_max_rpm
-        self.engine_peak_power_rpm = engine_peak_power_rpm
-        self.engine_peak_torque_rpm = engine_peak_torque_rpm
-        self.gear_ratios = gear_ratios
-        
-        # For endurance, we want to balance performance and efficiency
-        # Upshift earlier than max acceleration but not as early as max efficiency
-        upshift_rpm = (engine_peak_power_rpm + engine_peak_torque_rpm) / 2
-        
-        # Downshift to maintain reasonable torque
-        min_rpm = 2500  # Slightly higher than efficiency to maintain responsiveness
-        
-        for i in range(1, len(gear_ratios)):
-            current_gear = i
-            next_gear = i + 1
-            
-            # Set upshift point for this gear (if not the last gear)
-            if current_gear < len(gear_ratios):
-                self.add_upshift_point(ShiftPoint(
-                    current_gear, next_gear, 
-                    ShiftCondition.RPM_THRESHOLD, upshift_rpm,
-                    description=f"Upshift from {current_gear} to {next_gear} at {upshift_rpm} RPM"
-                ))
-                
-                # Add load-based upshift for better efficiency
-                self.add_upshift_point(ShiftPoint(
-                    current_gear, next_gear,
-                    ShiftCondition.LOAD_THRESHOLD, 0.4,  # Upshift at 40% load
-                    priority=2,  # Lower priority than RPM-based
-                    description=f"Upshift from {current_gear} to {next_gear} at 40% load"
-                ))
-            
-            # Set downshift point for next gear
-            if next_gear <= len(gear_ratios):
-                # Calculate RPM after downshift
-                current_ratio = gear_ratios[current_gear - 1]
-                next_ratio = gear_ratios[next_gear - 1]
-                downshift_rpm = min_rpm * (next_ratio / current_ratio)
-                
-                self.add_downshift_point(ShiftPoint(
-                    next_gear, current_gear,
-                    ShiftCondition.RPM_THRESHOLD, downshift_rpm,
-                    description=f"Downshift from {next_gear} to {current_gear} at {downshift_rpm} RPM"
-                ))
-                
-                # Add load-based downshift for better response
-                self.add_downshift_point(ShiftPoint(
-                    next_gear, current_gear,
-                    ShiftCondition.LOAD_THRESHOLD, 0.8,  # Downshift at 80% load
-                    priority=2,  # Lower priority than RPM-based
-                    description=f"Downshift from {next_gear} to {current_gear} at 80% load"
-                ))
-        
-        logger.info(f"Endurance strategy configured with balanced shift points")
+    """Balanced strategy for endurance: good performance, efficiency, and less wear."""
+    def __init__(self, engine_peak_power_rpm: float, engine_peak_torque_rpm: float, num_gears: int, min_rpm: float = 3500):
+        super().__init__(StrategyType.ENDURANCE)
+        # Shift somewhere between peak torque and peak power
+        upshift_rpm = (engine_peak_power_rpm * 0.85 + engine_peak_torque_rpm * 1.15) / 2
+        downshift_rpm = min_rpm * 1.2 # Downshift to stay comfortably above min RPM
+
+        for i in range(1, num_gears):
+            self.add_shift_point(ShiftPoint(i, i + 1, ShiftCondition.RPM_THRESHOLD, upshift_rpm))
+            self.add_shift_point(ShiftPoint(i + 1, i, ShiftCondition.RPM_THRESHOLD, downshift_rpm))
+            # Could add load-based criteria with lower priority
 
 
 class AccelerationEventStrategy(ShiftStrategy):
-    """
-    Shift strategy optimized for acceleration events.
-    
-    This strategy is specifically tuned for the Formula Student acceleration
-    event, which requires maximum straight-line acceleration over a short distance.
-    It includes launch control and precisely timed shifts for optimal acceleration.
-    """
-    
-    def __init__(self, engine_max_rpm: float, engine_peak_power_rpm: float, 
-                gear_ratios: List[float], wheel_radius: float, vehicle_mass: float,
-                name: str = "Acceleration Event"):
-        """
-        Initialize acceleration event strategy.
-        
-        Args:
-            engine_max_rpm: Maximum engine RPM
-            engine_peak_power_rpm: RPM at peak engine power
-            gear_ratios: List of gear ratios
-            wheel_radius: Wheel radius in meters
-            vehicle_mass: Vehicle mass in kg
-            name: Strategy name
-        """
-        super().__init__(StrategyType.ACCELERATION, name)
-        
-        self.engine_max_rpm = engine_max_rpm
-        self.engine_peak_power_rpm = engine_peak_power_rpm
-        self.gear_ratios = gear_ratios
-        self.wheel_radius = wheel_radius
-        self.vehicle_mass = vehicle_mass
-        
-        # For acceleration event, we want maximum performance
-        # Upshift very close to redline
-        upshift_rpm = engine_max_rpm * 0.98
-        
-        # Configure shift points based on expected performance
-        # These would typically be tuned based on testing data
-        for i in range(1, len(gear_ratios)):
-            current_gear = i
-            next_gear = i + 1
-            
-            # Set upshift point for this gear (if not the last gear)
-            if current_gear < len(gear_ratios):
-                self.add_upshift_point(ShiftPoint(
-                    current_gear, next_gear, 
-                    ShiftCondition.RPM_THRESHOLD, upshift_rpm,
-                    description=f"Upshift from {current_gear} to {next_gear} at {upshift_rpm} RPM"
-                ))
-        
-        # Add launch control parameters
-        self.launch_rpm = engine_peak_power_rpm * 0.8
-        self.launch_slip_target = 0.2  # Target wheel slip for optimal launch
-        
-        logger.info(f"Acceleration event strategy configured with upshift at {upshift_rpm} RPM")
-    
+    """Strategy specifically for the 75m acceleration event."""
+    def __init__(self, engine_redline_rpm: float, num_gears: int):
+        super().__init__(StrategyType.ACCELERATION)
+        # Max acceleration strategy - shift just before limiter
+        upshift_rpm = engine_redline_rpm * 0.98
+
+        for i in range(1, num_gears):
+             self.add_shift_point(ShiftPoint(i, i + 1, ShiftCondition.RPM_THRESHOLD, upshift_rpm))
+        # No downshifts needed for accel event typically
+
+        # Launch control parameters (can be added/configured separately)
+        self.launch_rpm: Optional[float] = None
+        self.launch_slip_target: Optional[float] = None
+
     def configure_launch_control(self, launch_rpm: float, slip_target: float):
-        """
-        Configure launch control parameters.
-        
-        Args:
-            launch_rpm: Launch control RPM target
-            slip_target: Target wheel slip ratio
-        """
         self.launch_rpm = launch_rpm
         self.launch_slip_target = slip_target
-        logger.info(f"Launch control configured: {launch_rpm} RPM, {slip_target} slip target")
-    
-    def get_launch_params(self) -> Dict:
-        """
-        Get launch control parameters.
-        
-        Returns:
-            Dictionary with launch control parameters
-        """
-        return {
-            'launch_rpm': self.launch_rpm,
-            'slip_target': self.launch_slip_target,
-            'initial_gear': 1
-        }
+
+    def get_launch_params(self) -> Optional[Dict]:
+        if self.launch_rpm and self.launch_slip_target:
+            return {'launch_rpm': self.launch_rpm, 'slip_target': self.launch_slip_target}
+        return None
+
+
+class SkidpadStrategy(ShiftStrategy):
+    """Strategy for Skidpad: Hold a single optimal gear."""
+    def __init__(self, target_gear: int, num_gears: int, high_rpm_thresh: float = 12000, low_rpm_thresh: float = 4000):
+        super().__init__(StrategyType.SKIDPAD)
+        self.target_gear = target_gear
+        # Add rules to shift *into* the target gear and *stay* there
+        # Upshift to target gear
+        for i in range(1, target_gear):
+             self.add_shift_point(ShiftPoint(i, target_gear, ShiftCondition.RPM_THRESHOLD, high_rpm_thresh))
+        # Downshift to target gear
+        for i in range(target_gear + 1, num_gears + 1):
+             self.add_shift_point(ShiftPoint(i, target_gear, ShiftCondition.RPM_THRESHOLD, low_rpm_thresh))
+
+
+class AutocrossStrategy(ShiftStrategy):
+    """Dynamic strategy for autocross, similar to Endurance but potentially more aggressive."""
+    def __init__(self, engine_peak_power_rpm: float, engine_peak_torque_rpm: float, num_gears: int, min_rpm: float = 4000):
+         super().__init__(StrategyType.AUTOCROSS)
+         # Slightly more aggressive than endurance
+         upshift_rpm = engine_peak_power_rpm * 0.92
+         downshift_rpm = min_rpm * 1.15
+
+         for i in range(1, num_gears):
+             self.add_shift_point(ShiftPoint(i, i + 1, ShiftCondition.RPM_THRESHOLD, upshift_rpm))
+             self.add_shift_point(ShiftPoint(i + 1, i, ShiftCondition.RPM_THRESHOLD, downshift_rpm))
 
 
 class StrategyManager:
-    """
-    Manager class for shift strategies.
-    
-    This class manages multiple shift strategies and allows switching between
-    them based on driving conditions or event requirements.
-    """
-    
-    def __init__(self, default_strategy: ShiftStrategy = None):
-        """
-        Initialize strategy manager.
-        
-        Args:
-            default_strategy: Default shift strategy to use
-        """
-        self.strategies = {}
-        self.active_strategy = default_strategy
-        self.vehicle_state = {}
-        
+    """Manages multiple shift strategies and selects the active one."""
+    def __init__(self, default_strategy: Optional[ShiftStrategy] = None):
+        self.strategies: Dict[str, ShiftStrategy] = {}
+        self.active_strategy: Optional[ShiftStrategy] = None
         if default_strategy:
             self.add_strategy(default_strategy)
-        
-        logger.info("Strategy manager initialized")
-    
+            self.set_active_strategy(default_strategy.name)
+        logger.info("Shift Strategy Manager initialized.")
+
     def add_strategy(self, strategy: ShiftStrategy):
-        """
-        Add a strategy to the manager.
-        
-        Args:
-            strategy: ShiftStrategy to add
-        """
+        """Add a strategy."""
+        if not isinstance(strategy, ShiftStrategy): raise TypeError("Input must be ShiftStrategy.")
         self.strategies[strategy.name] = strategy
-        logger.info(f"Added strategy: {strategy.name}")
-    
-    def set_active_strategy(self, strategy_name: str) -> bool:
-        """
-        Set the active shift strategy.
-        
-        Args:
-            strategy_name: Name of strategy to activate
-            
-        Returns:
-            True if strategy was successfully activated, False otherwise
-        """
-        if strategy_name in self.strategies:
-            self.active_strategy = self.strategies[strategy_name]
-            logger.info(f"Activated strategy: {strategy_name}")
+        logger.info(f"Strategy '{strategy.name}' added.")
+        if self.active_strategy is None: # Set first added as active if none is set
+             self.set_active_strategy(strategy.name)
+
+    def set_active_strategy(self, name: str) -> bool:
+        """Set the active strategy by name."""
+        if name in self.strategies:
+            self.active_strategy = self.strategies[name]
+            logger.info(f"Active strategy set to: {name}")
             return True
         else:
-            logger.warning(f"Strategy not found: {strategy_name}")
+            logger.error(f"Strategy '{name}' not found.")
             return False
-    
-    def update_vehicle_state(self, state_updates: Dict):
-        """
-        Update vehicle state data.
-        
-        Args:
-            state_updates: Dictionary with vehicle state updates
-        """
-        self.vehicle_state.update(state_updates)
-    
-    def evaluate_shift(self, current_gear: int, engine_rpm: float, vehicle_speed: float,
-                      engine_load: float, throttle_position: float) -> Optional[int]:
-        """
-        Evaluate whether a shift is needed using the active strategy.
-        
-        Args:
-            current_gear: Current gear
-            engine_rpm: Current engine RPM
-            vehicle_speed: Current vehicle speed in m/s
-            engine_load: Current engine load (0-1)
-            throttle_position: Current throttle position (0-1)
-            
-        Returns:
-            Target gear to shift to, or None if no shift is needed
-        """
+
+    def evaluate_shift(self, current_gear: int, state: Dict) -> Optional[int]:
+        """Evaluate shift using the active strategy."""
         if self.active_strategy:
-            return self.active_strategy.evaluate_shift(
-                current_gear, engine_rpm, vehicle_speed, 
-                engine_load, throttle_position, self.vehicle_state
-            )
-        
-        return None
-    
-    def record_shift(self, from_gear: int, to_gear: int, engine_rpm: float, 
-                   vehicle_speed: float):
-        """
-        Record a shift in the active strategy.
-        
-        Args:
-            from_gear: Starting gear
-            to_gear: Target gear
-            engine_rpm: Engine RPM at shift
-            vehicle_speed: Vehicle speed at shift
-        """
-        if self.active_strategy:
-            self.active_strategy.record_shift(
-                from_gear, to_gear, engine_rpm, 
-                vehicle_speed, time.time()
-            )
-    
-    def get_strategy_performance(self, strategy_name: Optional[str] = None) -> Dict:
-        """
-        Get performance metrics for a specific strategy or all strategies.
-        
-        Args:
-            strategy_name: Name of strategy to analyze, or None for all strategies
-            
-        Returns:
-            Dictionary with performance metrics
-        """
-        if strategy_name:
-            if strategy_name in self.strategies:
-                return self.strategies[strategy_name].analyze_performance()
-            else:
-                logger.warning(f"Strategy not found: {strategy_name}")
-                return {}
+            return self.active_strategy.evaluate_shift(current_gear, state)
         else:
-            # Analyze all strategies
-            performance = {}
-            for name, strategy in self.strategies.items():
-                performance[name] = strategy.analyze_performance()
-            
-            return performance
-    
+            logger.warning("No active strategy set, cannot evaluate shift.")
+            return None
+
+    def record_shift(self, from_gear: int, to_gear: int, state: Dict, timestamp: float):
+         """Record shift in the active strategy."""
+         if self.active_strategy:
+              self.active_strategy.record_shift(from_gear, to_gear, state, timestamp)
+
     def get_active_strategy_name(self) -> Optional[str]:
-        """
-        Get the name of the active strategy.
-        
-        Returns:
-            Name of active strategy, or None if no active strategy
-        """
-        if self.active_strategy:
-            return self.active_strategy.name
-        
-        return None
+        """Get the name of the currently active strategy."""
+        return self.active_strategy.name if self.active_strategy else None
+
+    def load_strategies_from_config(self, config_path: str):
+        """Load multiple strategies defined in a YAML config file."""
+        if not os.path.exists(config_path):
+             logger.error(f"Strategy config file not found: {config_path}")
+             return
+        try:
+            with open(config_path, 'r') as f:
+                 config = yaml.safe_load(f)
+
+            engine_params = config.get('engine', {})
+            max_rpm = engine_params.get('max_rpm', 14000)
+            peak_power_rpm = engine_params.get('peak_power_rpm', 12500)
+            peak_torque_rpm = engine_params.get('peak_torque_rpm', 10500)
+            idle_rpm = engine_params.get('idle_rpm', 1300)
+            num_gears = config.get('num_gears', 6) # Need num_gears or gear_ratios
+
+            strategy_configs = config.get('strategies', {})
+            for name, params in strategy_configs.items():
+                 strategy_type_str = params.get('type', name).upper()
+                 try:
+                     strategy_type = StrategyType[strategy_type_str]
+                     # Create strategy based on type - needs refinement based on constructor args
+                     if strategy_type == StrategyType.MAX_ACCELERATION:
+                          strat = MaxAccelerationStrategy(max_rpm, peak_power_rpm, num_gears) # Needs gear ratios ideally
+                     elif strategy_type == StrategyType.MAX_EFFICIENCY:
+                          strat = MaxEfficiencyStrategy(peak_torque_rpm, num_gears, idle_rpm + 1200)
+                     elif strategy_type == StrategyType.ENDURANCE:
+                          strat = EnduranceStrategy(max_rpm, peak_power_rpm, peak_torque_rpm, num_gears)
+                     elif strategy_type == StrategyType.ACCELERATION:
+                          strat = AccelerationEventStrategy(max_rpm, peak_power_rpm, num_gears) # Needs more args
+                     # Add other types...
+                     else:
+                          strat = ShiftStrategy(strategy_type, name) # Generic base
+
+                     # TODO: Add logic to parse and add custom shift points from config 'params'
+                     # for point_def in params.get('shift_points', []):
+                     #    sp = ShiftPoint(...)
+                     #    strat.add_shift_point(sp)
+
+                     self.add_strategy(strat)
+
+                 except KeyError:
+                      logger.error(f"Invalid strategy type '{strategy_type_str}' in config.")
+                 except Exception as e:
+                      logger.error(f"Error creating strategy '{name}': {e}")
+
+            default_strategy = config.get('default_strategy')
+            if default_strategy:
+                 self.set_active_strategy(default_strategy)
+
+        except Exception as e:
+            logger.error(f"Error loading strategies from config {config_path}: {e}")
 
 
+# Factory function
 def create_formula_student_strategies(
-    engine_max_rpm: float, 
+    engine_max_rpm: float,
     engine_peak_power_rpm: float,
     engine_peak_torque_rpm: float,
     gear_ratios: List[float],
-    wheel_radius: float,
-    vehicle_mass: float
+    num_gears: int, # Added num_gears explicitly
+    idle_rpm: float = 1300,
+    skidpad_gear: int = 2,
+    autocross_min_rpm: float = 4000,
+    efficiency_min_rpm: float = 2500,
+    endurance_min_rpm: float = 3500
 ) -> StrategyManager:
-    """
-    Create a set of strategies optimized for Formula Student competition.
-    
-    Args:
-        engine_max_rpm: Maximum engine RPM
-        engine_peak_power_rpm: RPM at peak engine power
-        engine_peak_torque_rpm: RPM at peak engine torque
-        gear_ratios: List of gear ratios
-        wheel_radius: Wheel radius in meters
-        vehicle_mass: Vehicle mass in kg
-        
-    Returns:
-        StrategyManager with Formula Student strategies
-    """
-    # Create individual strategies
-    max_accel = MaxAccelerationStrategy(
-        engine_max_rpm, engine_peak_power_rpm, gear_ratios
-    )
-    
-    max_efficiency = MaxEfficiencyStrategy(
-        engine_max_rpm, engine_peak_torque_rpm, gear_ratios
-    )
-    
-    endurance = EnduranceStrategy(
-        engine_max_rpm, engine_peak_power_rpm, engine_peak_torque_rpm, gear_ratios
-    )
-    
-    acceleration = AccelerationEventStrategy(
-        engine_max_rpm, engine_peak_power_rpm, gear_ratios, wheel_radius, vehicle_mass
-    )
-    
-    # Create strategy manager
-    manager = StrategyManager(default_strategy=max_accel)
-    
-    # Add strategies
-    manager.add_strategy(max_accel)
-    manager.add_strategy(max_efficiency)
-    manager.add_strategy(endurance)
-    manager.add_strategy(acceleration)
-    
-    # Create a custom skidpad strategy
-    skidpad = ShiftStrategy(StrategyType.SKIDPAD, "Skidpad")
-    
-    # For skidpad, we want to stay in one gear to maintain consistent handling
-    # Typically 2nd or 3rd gear depending on the car
-    optimal_skidpad_gear = 2
-    
-    # Upshift to optimal gear if in lower gear
-    for i in range(1, optimal_skidpad_gear):
-        skidpad.add_upshift_point(ShiftPoint(
-            i, optimal_skidpad_gear,
-            ShiftCondition.RPM_THRESHOLD, engine_peak_torque_rpm,
-            description=f"Upshift to optimal skidpad gear {optimal_skidpad_gear}"
-        ))
-    
-    # Downshift to optimal gear if in higher gear
-    for i in range(optimal_skidpad_gear + 1, len(gear_ratios) + 1):
-        skidpad.add_downshift_point(ShiftPoint(
-            i, optimal_skidpad_gear,
-            ShiftCondition.RPM_THRESHOLD, engine_peak_torque_rpm,
-            description=f"Downshift to optimal skidpad gear {optimal_skidpad_gear}"
-        ))
-    
-    manager.add_strategy(skidpad)
-    
+    """Create standard set of FS strategies."""
+    manager = StrategyManager()
+
+    manager.add_strategy(MaxAccelerationStrategy(engine_redline_rpm=engine_max_rpm, num_gears=num_gears)) # Use redline
+    manager.add_strategy(MaxEfficiencyStrategy(engine_peak_torque_rpm=engine_peak_torque_rpm, num_gears=num_gears, min_rpm=efficiency_min_rpm))
+    manager.add_strategy(EnduranceStrategy(engine_peak_power_rpm=engine_peak_power_rpm, engine_peak_torque_rpm=engine_peak_torque_rpm, num_gears=num_gears, min_rpm=endurance_min_rpm))
+    # AccelerationEventStrategy might need more args like wheel radius, mass if its logic uses them
+    manager.add_strategy(AccelerationEventStrategy(engine_redline_rpm=engine_max_rpm, num_gears=num_gears)) # Use redline
+    manager.add_strategy(SkidpadStrategy(target_gear=skidpad_gear, num_gears=num_gears))
+    manager.add_strategy(AutocrossStrategy(engine_peak_power_rpm=engine_peak_power_rpm, engine_peak_torque_rpm=engine_peak_torque_rpm, num_gears=num_gears, min_rpm=autocross_min_rpm))
+
+    manager.set_active_strategy("Endurance") # Default to endurance
     return manager
 
 
-# Example usage
+# Example Usage
 if __name__ == "__main__":
-    # Honda CBR600F4i parameters
-    engine_max_rpm = 14000
-    engine_peak_power_rpm = 12500
-    engine_peak_torque_rpm = 10500
-    gear_ratios = [2.750, 2.000, 1.667, 1.444, 1.304, 1.208]
-    wheel_radius = 0.2286  # 9-inch wheel radius (typical for 13-inch wheels)
-    vehicle_mass = 230  # kg, typical for FS car
-    
-    # Create strategy manager with FS strategies
-    strategy_manager = create_formula_student_strategies(
-        engine_max_rpm, engine_peak_power_rpm, engine_peak_torque_rpm,
-        gear_ratios, wheel_radius, vehicle_mass
-    )
-    
-    # Print active strategy
-    active_strategy = strategy_manager.get_active_strategy_name()
-    print(f"Active strategy: {active_strategy}")
-    
-    # Test shift evaluation
-    current_gear = 2
-    engine_rpm = 13000
-    vehicle_speed = 15.0  # m/s
-    engine_load = 0.8
-    throttle_position = 0.9
-    
-    target_gear = strategy_manager.evaluate_shift(
-        current_gear, engine_rpm, vehicle_speed, 
-        engine_load, throttle_position
-    )
-    
-    if target_gear:
-        print(f"Shift recommended: {current_gear} -> {target_gear}")
-        strategy_manager.record_shift(current_gear, target_gear, engine_rpm, vehicle_speed)
-    else:
-        print("No shift recommended")
-    
-    # Switch to endurance strategy
-    strategy_manager.set_active_strategy("Endurance")
-    print(f"Switched to strategy: {strategy_manager.get_active_strategy_name()}")
-    
-    # Test shift evaluation with endurance strategy
-    target_gear = strategy_manager.evaluate_shift(
-        current_gear, engine_rpm, vehicle_speed, 
-        engine_load, throttle_position
-    )
-    
-    if target_gear:
-        print(f"Shift recommended: {current_gear} -> {target_gear}")
-        strategy_manager.record_shift(current_gear, target_gear, engine_rpm, vehicle_speed)
-    else:
-        print("No shift recommended")
-    
-    # Plot shift points for active strategy
-    vehicle_state = {
-        'gear_ratios': gear_ratios,
-        'wheel_radius': wheel_radius,
-        'final_drive_ratio': 53/14  # 14:53 sprocket ratio
+    # Example parameters
+    max_rpm=14000
+    peak_power_rpm=12500
+    peak_torque_rpm=10500
+    gears=[2.750, 2.000, 1.667, 1.444, 1.304, 1.208]
+    num_gears = len(gears)
+
+    manager = create_formula_student_strategies(max_rpm, peak_power_rpm, peak_torque_rpm, gears, num_gears)
+
+    print(f"Available strategies: {list(manager.strategies.keys())}")
+    print(f"Active strategy: {manager.get_active_strategy_name()}")
+
+    # Test evaluation
+    state = {
+        'engine_rpm': 13500,
+        'vehicle_speed': 30, # m/s
+        'engine_load': 0.9,
+        'throttle_position': 1.0,
+        'gear_ratios': gears,
+        'num_gears': num_gears,
+        'engine_redline_rpm': max_rpm
     }
-    strategy_manager.update_vehicle_state(vehicle_state)
-    
-    # Get the active strategy and plot its shift points
-    active_strategy_obj = strategy_manager.active_strategy
-    active_strategy_obj.plot_shift_points(
-        list(range(1000, engine_max_rpm + 1000, 500)),
-        vehicle_state
-    )
+    manager.set_active_strategy("Max Acceleration")
+    target_gear = manager.evaluate_shift(current_gear=3, state=state)
+    print(f"\nMax Accel eval at 13500 RPM in 3rd: Target Gear = {target_gear}") # Expect 4
+
+    state['engine_rpm'] = 4000
+    state['throttle_position'] = 0.7
+    manager.set_active_strategy("Endurance")
+    target_gear = manager.evaluate_shift(current_gear=5, state=state)
+    print(f"\nEndurance eval at 4000 RPM in 5th: Target Gear = {target_gear}") # Expect 4
+
+    # Plot points for one strategy
+    endurance_strategy = manager.strategies.get("Endurance")
+    if endurance_strategy:
+        plot_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'plots', 'transmission'))
+        os.makedirs(plot_dir, exist_ok=True)
+        # Need vehicle state for plotting speeds
+        plot_state = {'gear_ratios': gears, 'wheel_radius': 0.2286, 'final_drive_ratio': 53/14.0}
+        endurance_strategy.plot_shift_points(
+            engine_rpm_range=np.linspace(1000, max_rpm, 100),
+            vehicle_state=plot_state,
+            save_path=os.path.join(plot_dir, "endurance_shift_points.png")
+        )

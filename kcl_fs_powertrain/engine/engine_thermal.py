@@ -1,9 +1,8 @@
 """
 Engine thermal management module for Formula Student powertrain simulation.
 
-This module provides classes and functions to model the thermal behavior of a motorcycle 
-engine in a Formula Student vehicle, including cooling system performance, heat generation,
-thermal dynamics, and temperature-dependent performance effects.
+Models thermal behavior, including heat generation, transfer between components
+(engine block, oil, coolant), and interaction with the cooling system.
 """
 
 import os
@@ -11,1724 +10,769 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional, Union, Callable
-from enum import Enum, auto
 import yaml
-from scipy.integrate import solve_ivp
-from scipy.interpolate import interp1d, griddata
+from scipy.interpolate import interp1d
+import logging
 
-# Define module exports
-__all__ = [
-    'CoolingSystem', 'EngineHeatModel', 'ThermalSimulation', 
-    'CoolingPerformance', 'ThermalConfig'
-]
+# Assuming MotorcycleEngine might be needed for properties
+try:
+    from .motorcycle_engine import MotorcycleEngine
+except ImportError:
+    class MotorcycleEngine: pass # Placeholder
+    MotorcycleEngine = None
 
+# Assuming CoolingSystem from thermal package might be needed
+try:
+    from ..thermal.cooling_system import CoolingSystem as ExternalCoolingSystem
+except ImportError:
+    class ExternalCoolingSystem: pass # Placeholder
+    ExternalCoolingSystem = None
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("EngineThermal")
+
+# Constants (should ideally be imported from utils.constants)
+WATER_SPECIFIC_HEAT = 4186.0  # J/(kg·K)
+AIR_DENSITY_SEA_LEVEL = 1.225 # kg/m³
+AIR_SPECIFIC_HEAT_CP = 1005.0 # J/(kg·K)
 
 class ThermalConfig:
     """Configuration parameters for engine thermal model."""
-    
+
     def __init__(self, config_path: Optional[str] = None):
-        """
-        Initialize thermal configuration with default values or from file.
-        
-        Args:
-            config_path: Optional path to YAML configuration file
-        """
-        # Default thermal parameters
-        # Component specific heat capacities (J/kg·K)
-        self.specific_heat_engine_block = 450.0  # Cast aluminum
-        self.specific_heat_engine_oil = 2000.0   # Engine oil
-        self.specific_heat_coolant = 3700.0      # Water-glycol mix
-        
-        # Component masses (kg)
-        self.mass_engine_block = 35.0            # Engine block mass
-        self.mass_engine_oil = 2.5               # Engine oil mass
-        self.mass_coolant = 3.0                  # Coolant mass
-        
-        # Heat transfer coefficients (W/m²·K)
-        self.htc_oil_to_block = 1500.0
-        self.htc_coolant_to_block = 3000.0
-        self.htc_block_to_air = 50.0
-        
-        # Cooling system parameters
-        self.radiator_effectiveness = 0.7        # Radiator effectiveness (0-1)
-        self.radiator_area = 0.15                # Radiator area (m²)
-        self.min_airflow_speed = 2.0             # Minimum airflow speed (m/s)
-        self.fan_max_airflow = 0.3               # Fan max airflow (m³/s)
-        
-        # Thermal management setpoints
-        self.thermostat_open_temp = 82.0         # Thermostat opening temp (°C)
-        self.target_coolant_temp = 90.0          # Target coolant temp (°C)
-        self.max_engine_temp = 120.0             # Maximum engine temp (°C)
-        self.optimal_oil_temp = 100.0            # Optimal oil temp (°C)
-        
-        # Load from file if provided
+        """Initialize with defaults or load from file."""
+        # --- Default Thermal Properties ---
+        # Specific Heats (J/kg·K)
+        self.specific_heat_engine_block: float = 500.0  # Typical for Aluminum/Steel mix
+        self.specific_heat_engine_oil: float = 2100.0   # Typical for engine oil
+        self.specific_heat_coolant: float = 3800.0      # Typical for 50/50 Glycol/Water
+
+        # Component Effective Thermal Masses (kg) - Represents the mass involved in heat storage
+        self.mass_engine_block: float = 25.0 # Effective thermal mass of block/head
+        self.mass_engine_oil: float = 2.8 # Includes oil in sump and passages
+        self.mass_coolant_engine: float = 1.5 # Coolant within engine block/head jackets
+
+        # Heat Transfer Coefficients (W/K) - Lumped coefficients between components
+        # These are highly dependent on geometry, flow rates, etc. - Requires tuning/CFD
+        self.htc_oil_to_block: float = 800.0   # Heat transfer between oil and block
+        self.htc_coolant_to_block: float = 1500.0 # Heat transfer between coolant and block
+        self.htc_block_to_ambient: float = 40.0  # Convection/radiation from block to air
+
+        # Simplified Heat Distribution Factors (fraction of waste heat)
+        self.heat_distribution = {
+            'coolant': 0.55, # Fraction of waste heat going to coolant
+            'oil': 0.20,     # Fraction of waste heat going to oil
+            'exhaust': 0.15, # Fraction lost directly through exhaust gas
+            'ambient': 0.10  # Fraction lost directly to ambient (radiation/convection)
+        }
+
+        # Temperature Limits (from thermal_limits.yaml usually, but defaults here)
+        self.optimal_temp_engine: Tuple[float, float] = (85.0, 100.0)
+        self.warning_temp_engine: float = 105.0
+        self.critical_temp_engine: float = 115.0
+
+        self.warning_temp_coolant: float = 98.0
+        self.critical_temp_coolant: float = 108.0
+
+        self.warning_temp_oil: float = 125.0
+        self.critical_temp_oil: float = 135.0
+
         if config_path:
             self.load_from_file(config_path)
-    
+
     def load_from_file(self, config_path: str):
-        """
-        Load thermal configuration from YAML file.
-        
-        Args:
-            config_path: Path to YAML configuration file
-        """
+        """Load thermal configuration from YAML file."""
         if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Thermal configuration file not found: {config_path}")
-        
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-        
-        # Update attributes from config
-        if 'thermal' in config:
-            thermal_config = config['thermal']
-            
-            # Update specific heats
-            if 'specific_heat' in thermal_config:
-                specific_heat = thermal_config['specific_heat']
-                self.specific_heat_engine_block = specific_heat.get('engine_block', self.specific_heat_engine_block)
-                self.specific_heat_engine_oil = specific_heat.get('engine_oil', self.specific_heat_engine_oil)
-                self.specific_heat_coolant = specific_heat.get('coolant', self.specific_heat_coolant)
-            
-            # Update masses
-            if 'mass' in thermal_config:
-                mass = thermal_config['mass']
-                self.mass_engine_block = mass.get('engine_block', self.mass_engine_block)
-                self.mass_engine_oil = mass.get('engine_oil', self.mass_engine_oil)
-                self.mass_coolant = mass.get('coolant', self.mass_coolant)
-            
-            # Update heat transfer coefficients
-            if 'heat_transfer' in thermal_config:
-                htc = thermal_config['heat_transfer']
-                self.htc_oil_to_block = htc.get('oil_to_block', self.htc_oil_to_block)
-                self.htc_coolant_to_block = htc.get('coolant_to_block', self.htc_coolant_to_block)
-                self.htc_block_to_air = htc.get('block_to_air', self.htc_block_to_air)
-            
-            # Update cooling system parameters
-            if 'cooling_system' in thermal_config:
-                cooling = thermal_config['cooling_system']
-                self.radiator_effectiveness = cooling.get('radiator_effectiveness', self.radiator_effectiveness)
-                self.radiator_area = cooling.get('radiator_area', self.radiator_area)
-                self.min_airflow_speed = cooling.get('min_airflow_speed', self.min_airflow_speed)
-                self.fan_max_airflow = cooling.get('fan_max_airflow', self.fan_max_airflow)
-            
-            # Update thermal management setpoints
-            if 'setpoints' in thermal_config:
-                setpoints = thermal_config['setpoints']
-                self.thermostat_open_temp = setpoints.get('thermostat_open', self.thermostat_open_temp)
-                self.target_coolant_temp = setpoints.get('target_coolant', self.target_coolant_temp)
-                self.max_engine_temp = setpoints.get('max_engine', self.max_engine_temp)
-                self.optimal_oil_temp = setpoints.get('optimal_oil', self.optimal_oil_temp)
-    
-    def save_to_file(self, config_path: str):
-        """
-        Save thermal configuration to YAML file.
-        
-        Args:
-            config_path: Path to save configuration
-        """
-        # Create configuration dictionary
-        config = {
-            'thermal': {
-                'specific_heat': {
-                    'engine_block': self.specific_heat_engine_block,
-                    'engine_oil': self.specific_heat_engine_oil,
-                    'coolant': self.specific_heat_coolant
-                },
-                'mass': {
-                    'engine_block': self.mass_engine_block,
-                    'engine_oil': self.mass_engine_oil,
-                    'coolant': self.mass_coolant
-                },
-                'heat_transfer': {
-                    'oil_to_block': self.htc_oil_to_block,
-                    'coolant_to_block': self.htc_coolant_to_block,
-                    'block_to_air': self.htc_block_to_air
-                },
-                'cooling_system': {
-                    'radiator_effectiveness': self.radiator_effectiveness,
-                    'radiator_area': self.radiator_area,
-                    'min_airflow_speed': self.min_airflow_speed,
-                    'fan_max_airflow': self.fan_max_airflow
-                },
-                'setpoints': {
-                    'thermostat_open': self.thermostat_open_temp,
-                    'target_coolant': self.target_coolant_temp,
-                    'max_engine': self.max_engine_temp,
-                    'optimal_oil': self.optimal_oil_temp
-                }
-            }
-        }
-        
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        
-        # Save to file
-        with open(config_path, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False)
-    
+            logger.warning(f"Thermal configuration file not found: {config_path}. Using defaults.")
+            return
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+
+            # Load specific heats
+            sh = config.get('specific_heat', {})
+            self.specific_heat_engine_block = float(sh.get('engine_block', self.specific_heat_engine_block))
+            self.specific_heat_engine_oil = float(sh.get('engine_oil', self.specific_heat_engine_oil))
+            self.specific_heat_coolant = float(sh.get('coolant', self.specific_heat_coolant))
+
+            # Load masses
+            mass = config.get('mass', {})
+            self.mass_engine_block = float(mass.get('engine_block', self.mass_engine_block))
+            self.mass_engine_oil = float(mass.get('engine_oil', self.mass_engine_oil))
+            self.mass_coolant_engine = float(mass.get('coolant_engine', self.mass_coolant_engine)) # Coolant in engine
+
+            # Load heat transfer coefficients
+            htc = config.get('heat_transfer', {})
+            self.htc_oil_to_block = float(htc.get('oil_to_block', self.htc_oil_to_block))
+            self.htc_coolant_to_block = float(htc.get('coolant_to_block', self.htc_coolant_to_block))
+            self.htc_block_to_ambient = float(htc.get('block_to_ambient', self.htc_block_to_ambient))
+
+            # Load heat distribution factors
+            dist = config.get('heat_distribution', {})
+            self.heat_distribution['coolant'] = float(dist.get('coolant', self.heat_distribution['coolant']))
+            self.heat_distribution['oil'] = float(dist.get('oil', self.heat_distribution['oil']))
+            self.heat_distribution['exhaust'] = float(dist.get('exhaust', self.heat_distribution['exhaust']))
+            self.heat_distribution['ambient'] = float(dist.get('ambient', self.heat_distribution['ambient']))
+            # Normalize distribution factors if they don't sum to 1
+            total_dist = sum(self.heat_distribution.values())
+            if abs(total_dist - 1.0) > 1e-3:
+                logger.warning(f"Heat distribution factors do not sum to 1 ({total_dist:.2f}). Normalizing.")
+                for k in self.heat_distribution:
+                    self.heat_distribution[k] /= total_dist
+
+            # Load temperature limits (can also be loaded from thermal_limits.yaml)
+            limits_eng = config.get('engine_limits', {})
+            self.optimal_temp_engine = tuple(limits_eng.get('optimal_range', self.optimal_temp_engine))
+            self.warning_temp_engine = float(limits_eng.get('warning', self.warning_temp_engine))
+            self.critical_temp_engine = float(limits_eng.get('critical', self.critical_temp_engine))
+            # Add similar loading for coolant and oil limits if defined in this file
+
+            logger.info(f"Thermal configuration loaded from {config_path}")
+
+        except Exception as e:
+            logger.error(f"Error loading thermal config from {config_path}: {e}. Using defaults.")
+
     def get_thermal_capacities(self) -> Dict[str, float]:
-        """
-        Calculate thermal capacities of engine components.
-        
-        Returns:
-            Dictionary with thermal capacities in J/K
-        """
+        """Calculate thermal capacities (Mass * SpecificHeat) in J/K."""
         return {
             'engine_block': self.mass_engine_block * self.specific_heat_engine_block,
             'engine_oil': self.mass_engine_oil * self.specific_heat_engine_oil,
-            'coolant': self.mass_coolant * self.specific_heat_coolant
+            'coolant_engine': self.mass_coolant_engine * self.specific_heat_coolant
         }
-    
+
     def to_dict(self) -> Dict:
-        """
-        Convert configuration to dictionary.
-        
-        Returns:
-            Dictionary with configuration parameters
-        """
-        return {
-            'specific_heat_engine_block': self.specific_heat_engine_block,
-            'specific_heat_engine_oil': self.specific_heat_engine_oil,
-            'specific_heat_coolant': self.specific_heat_coolant,
-            'mass_engine_block': self.mass_engine_block,
-            'mass_engine_oil': self.mass_engine_oil,
-            'mass_coolant': self.mass_coolant,
-            'htc_oil_to_block': self.htc_oil_to_block,
-            'htc_coolant_to_block': self.htc_coolant_to_block,
-            'htc_block_to_air': self.htc_block_to_air,
-            'radiator_effectiveness': self.radiator_effectiveness,
-            'radiator_area': self.radiator_area,
-            'min_airflow_speed': self.min_airflow_speed,
-            'fan_max_airflow': self.fan_max_airflow,
-            'thermostat_open_temp': self.thermostat_open_temp,
-            'target_coolant_temp': self.target_coolant_temp,
-            'max_engine_temp': self.max_engine_temp,
-            'optimal_oil_temp': self.optimal_oil_temp
-        }
-
-
-class CoolingSystem:
-    """Model of a motorcycle engine cooling system for Formula Student."""
-    
-    def __init__(self, config: ThermalConfig = None):
-        """
-        Initialize cooling system model.
-        
-        Args:
-            config: ThermalConfig instance with cooling system parameters
-        """
-        self.config = config or ThermalConfig()
-        
-        # Current state
-        self.fan_state = 0.0  # Fan duty cycle (0-1)
-        self.pump_state = 0.0  # Pump duty cycle (0-1)
-        self.thermostat_position = 0.0  # Thermostat position (0-1)
-        self.radiator_airflow = 0.0  # Current airflow through radiator (m³/s)
-        self.radiator_effectiveness = self.config.radiator_effectiveness
-        
-        # Initialize thermal model
-        self._initialize_model()
-    
-    def _initialize_model(self):
-        """Initialize thermal model parameters."""
-        # Create thermostat opening curve (position vs temperature)
-        # Typically opens gradually over a 10°C range
-        temp_range = np.linspace(
-            self.config.thermostat_open_temp,
-            self.config.thermostat_open_temp + 10,
-            100
-        )
-        position = np.clip(
-            (temp_range - self.config.thermostat_open_temp) / 10.0,
-            0.0, 1.0
-        )
-        self.thermostat_curve = interp1d(
-            temp_range, position,
-            bounds_error=False, fill_value=(0.0, 1.0)
-        )
-        
-        # Create fan control curve (duty cycle vs temperature)
-        # Typically ramps up over a 5°C range above target
-        temp_range = np.linspace(
-            self.config.target_coolant_temp,
-            self.config.target_coolant_temp + 5,
-            100
-        )
-        duty_cycle = np.clip(
-            (temp_range - self.config.target_coolant_temp) / 5.0,
-            0.0, 1.0
-        )
-        self.fan_curve = interp1d(
-            temp_range, duty_cycle,
-            bounds_error=False, fill_value=(0.0, 1.0)
-        )
-        
-        # Create pump control curve (duty cycle vs temperature/engine load)
-        # Base pump speed is dependent on engine RPM (mechanically driven)
-        # Some systems use an electric pump with its own control curve
-        self.pump_curve = lambda coolant_temp, engine_load: min(0.5 + 0.5 * engine_load, 1.0)
-    
-    def update_thermostat(self, coolant_temp: float):
-        """
-        Update thermostat position based on coolant temperature.
-        
-        Args:
-            coolant_temp: Coolant temperature in °C
-        """
-        self.thermostat_position = float(self.thermostat_curve(coolant_temp))
-    
-    def update_fan(self, coolant_temp: float):
-        """
-        Update cooling fan state based on coolant temperature.
-        
-        Args:
-            coolant_temp: Coolant temperature in °C
-        """
-        self.fan_state = float(self.fan_curve(coolant_temp))
-    
-    def update_pump(self, coolant_temp: float, engine_load: float):
-        """
-        Update coolant pump state based on temperature and engine load.
-        
-        Args:
-            coolant_temp: Coolant temperature in °C
-            engine_load: Engine load factor (0-1)
-        """
-        self.pump_state = self.pump_curve(coolant_temp, engine_load)
-    
-    def calculate_radiator_airflow(self, vehicle_speed: float):
-        """
-        Calculate airflow through the radiator based on vehicle speed and fan state.
-        
-        Args:
-            vehicle_speed: Vehicle speed in m/s
-            
-        Returns:
-            Airflow through radiator in m³/s
-        """
-        # Base airflow from vehicle speed
-        # Simplified model assuming radiator cross-sectional area
-        speed_airflow = max(vehicle_speed, self.config.min_airflow_speed) * self.config.radiator_area
-        
-        # Fan contribution
-        fan_airflow = self.fan_state * self.config.fan_max_airflow
-        
-        # Total airflow
-        self.radiator_airflow = speed_airflow + fan_airflow
-        
-        return self.radiator_airflow
-    
-    def calculate_heat_rejection(self, coolant_temp: float, ambient_temp: float, 
-                               vehicle_speed: float) -> float:
-        """
-        Calculate heat rejection rate from the cooling system.
-        
-        Args:
-            coolant_temp: Coolant temperature in °C
-            ambient_temp: Ambient temperature in °C
-            vehicle_speed: Vehicle speed in m/s
-            
-        Returns:
-            Heat rejection rate in watts (W)
-        """
-        # Update system state
-        self.update_thermostat(coolant_temp)
-        self.update_fan(coolant_temp)
-        self.calculate_radiator_airflow(vehicle_speed)
-        
-        # Calculate heat transfer through radiator
-        # Q = ṁ·cp·ε·(Thot - Tcold)
-        # where ṁ is mass flow rate, cp is specific heat of air
-        
-        # Air properties
-        air_density = 1.2  # kg/m³
-        air_specific_heat = 1005.0  # J/kg·K
-        
-        # Air mass flow rate
-        air_mass_flow = air_density * self.radiator_airflow
-        
-        # Temperature difference
-        temp_diff = max(0, coolant_temp - ambient_temp)
-        
-        # Effectiveness is modulated by thermostat position
-        effective_radiator = self.radiator_effectiveness * self.thermostat_position
-        
-        # Heat rejection (W)
-        heat_rejection = air_mass_flow * air_specific_heat * effective_radiator * temp_diff
-        
-        return heat_rejection
-    
-    def calculate_coolant_flow(self, engine_rpm: float, engine_load: float) -> float:
-        """
-        Calculate coolant flow rate through the engine.
-        
-        Args:
-            engine_rpm: Engine speed in RPM
-            engine_load: Engine load factor (0-1)
-            
-        Returns:
-            Coolant flow rate in L/min
-        """
-        # Base flow proportional to engine RPM (mechanical pump)
-        # Typical water pump flow is ~1.5 L/min per 1000 RPM at idle
-        base_flow = engine_rpm / 1000 * 1.5
-        
-        # Update pump state
-        self.update_pump(0, engine_load)  # Coolant temp doesn't matter for this calculation
-        
-        # For electric pumps, flow would be more dependent on pump_state
-        # For mechanical pumps, flow is primarily dependent on engine RPM
-        coolant_flow = base_flow * self.pump_state
-        
-        return coolant_flow
-    
-    def get_system_state(self) -> Dict:
-        """
-        Get current state of the cooling system.
-        
-        Returns:
-            Dictionary with current state
-        """
-        return {
-            'fan_state': self.fan_state,
-            'pump_state': self.pump_state,
-            'thermostat_position': self.thermostat_position,
-            'radiator_airflow': self.radiator_airflow,
-            'radiator_effectiveness': self.radiator_effectiveness
-        }
+        """Convert configuration to dictionary."""
+        return self.__dict__ # Return all attributes
 
 
 class EngineHeatModel:
-    """Heat generation and thermal model for a motorcycle engine."""
-    
-    def __init__(self, config: ThermalConfig = None, engine=None):
+    """Calculates heat generation and transfer within the engine."""
+
+    def __init__(self, config: ThermalConfig, engine: Optional[MotorcycleEngine] = None):
         """
         Initialize engine heat model.
-        
-        Args:
-            config: ThermalConfig instance
-            engine: Optional MotorcycleEngine instance
-        """
-        self.config = config or ThermalConfig()
-        self.engine = engine
-        
-        # Initialize state
-        self.engine_temp = 25.0  # °C
-        self.oil_temp = 25.0     # °C
-        self.coolant_temp = 25.0 # °C
-        
-        # Heat generation parameters
-        self.combustion_efficiency = 0.30  # Typical efficiency for motorcycle engines
-        self.friction_coefficient = 0.15   # Portion of fuel energy converted to friction heat
-        self.mechanical_efficiency = 0.85  # Mechanical efficiency of the engine
-        
-        # Heat distribution parameters (fraction of total waste heat)
-        self.heat_to_coolant = 0.60        # Fraction of waste heat to coolant
-        self.heat_to_oil = 0.25            # Fraction of waste heat to oil
-        self.heat_to_exhaust = 0.10        # Fraction of waste heat to exhaust
-        self.heat_to_ambient = 0.05        # Fraction of waste heat directly to ambient
-    
-    def calculate_total_heat(self, fuel_power: float, engine_power: float) -> float:
-        """
-        Calculate total heat generated by the engine.
-        
-        Args:
-            fuel_power: Fuel chemical power in W
-            engine_power: Engine mechanical power output in W
-            
-        Returns:
-            Total waste heat in W
-        """
-        # Calculate efficiency
-        if fuel_power > 0:
-            current_efficiency = engine_power / fuel_power
-        else:
-            current_efficiency = self.combustion_efficiency
-        
-        # Total waste heat is fuel energy not converted to useful work
-        waste_heat = fuel_power * (1 - current_efficiency)
-        
-        return waste_heat
-    
-    def calculate_heat_sources(self, fuel_power: float, engine_power: float,
-                             engine_rpm: float, engine_load: float) -> Dict[str, float]:
-        """
-        Calculate heat generation for different engine components.
-        
-        Args:
-            fuel_power: Fuel chemical power in W
-            engine_power: Engine mechanical power output in W
-            engine_rpm: Engine speed in RPM
-            engine_load: Engine load factor (0-1)
-            
-        Returns:
-            Dictionary with heat generation rates for each component
-        """
-        # Calculate total waste heat
-        total_heat = self.calculate_total_heat(fuel_power, engine_power)
-        
-        # Calculate fraction going to each component
-        # These fractions can vary with RPM and load
-        coolant_factor = self.heat_to_coolant * (1.0 + 0.1 * engine_load)
-        oil_factor = self.heat_to_oil * (1.0 + 0.2 * engine_load)
-        exhaust_factor = self.heat_to_exhaust * (1.0 + 0.3 * engine_load)
-        
-        # Normalize factors
-        total_factor = coolant_factor + oil_factor + exhaust_factor + self.heat_to_ambient
-        coolant_fraction = coolant_factor / total_factor
-        oil_fraction = oil_factor / total_factor
-        exhaust_fraction = exhaust_factor / total_factor
-        ambient_fraction = self.heat_to_ambient / total_factor
-        
-        # Calculate heat to each component
-        heat_to_coolant = total_heat * coolant_fraction
-        heat_to_oil = total_heat * oil_fraction
-        heat_to_exhaust = total_heat * exhaust_fraction
-        heat_to_ambient = total_heat * ambient_fraction
-        
-        return {
-            'total': total_heat,
-            'coolant': heat_to_coolant,
-            'oil': heat_to_oil,
-            'exhaust': heat_to_exhaust,
-            'ambient': heat_to_ambient
-        }
-    
-    def calculate_fuel_power(self, fuel_mass_flow: float, fuel_energy_density: float = 42.5) -> float:
-        """
-        Calculate chemical power from fuel.
-        
-        Args:
-            fuel_mass_flow: Fuel mass flow rate in g/s
-            fuel_energy_density: Fuel energy density in MJ/kg
-            
-        Returns:
-            Fuel chemical power in W
-        """
-        # Convert g/s to kg/s and MJ/kg to J/kg
-        return (fuel_mass_flow / 1000) * fuel_energy_density * 1e6
-    
-    def calculate_engine_power(self, engine_rpm: float, engine_torque: float) -> float:
-        """
-        Calculate engine power output.
-        
-        Args:
-            engine_rpm: Engine speed in RPM
-            engine_torque: Engine torque in Nm
-            
-        Returns:
-            Engine power in W
-        """
-        # Power (W) = Torque (Nm) * Angular velocity (rad/s)
-        return engine_torque * engine_rpm * 2 * np.pi / 60
-    
-    def calculate_thermal_transfer(self, cooling_system: CoolingSystem,
-                                 ambient_temp: float, vehicle_speed: float,
-                                 engine_rpm: float, engine_load: float) -> Dict[str, float]:
-        """
-        Calculate heat transfer between components and to ambient.
-        
-        Args:
-            cooling_system: CoolingSystem instance
-            ambient_temp: Ambient temperature in °C
-            vehicle_speed: Vehicle speed in m/s
-            engine_rpm: Engine speed in RPM
-            engine_load: Engine load factor (0-1)
-            
-        Returns:
-            Dictionary with heat transfer rates
-        """
-        # Heat transfer between engine and oil
-        temp_diff_engine_oil = self.engine_temp - self.oil_temp
-        q_engine_oil = temp_diff_engine_oil * self.config.htc_oil_to_block
-        
-        # Heat transfer between engine and coolant
-        temp_diff_engine_coolant = self.engine_temp - self.coolant_temp
-        q_engine_coolant = temp_diff_engine_coolant * self.config.htc_coolant_to_block
-        
-        # Heat transfer from engine to ambient air (convection)
-        temp_diff_engine_ambient = self.engine_temp - ambient_temp
-        # Convection coefficient increases with vehicle speed
-        convection_factor = 1.0 + 0.1 * vehicle_speed
-        q_engine_ambient = temp_diff_engine_ambient * self.config.htc_block_to_air * convection_factor
-        
-        # Heat rejection from radiator
-        q_radiator = cooling_system.calculate_heat_rejection(
-            self.coolant_temp, ambient_temp, vehicle_speed
-        )
-        
-        # Heat transfer from oil (simplified oil cooler model)
-        # Assume oil cooler effectiveness proportional to speed and temp difference
-        oil_cooler_factor = 0.005 * vehicle_speed  # W/K·(m/s)
-        temp_diff_oil_ambient = self.oil_temp - ambient_temp
-        q_oil_ambient = temp_diff_oil_ambient * oil_cooler_factor
-        
-        return {
-            'engine_oil': q_engine_oil,
-            'engine_coolant': q_engine_coolant,
-            'engine_ambient': q_engine_ambient,
-            'radiator': q_radiator,
-            'oil_ambient': q_oil_ambient
-        }
-    
-    def update_temperatures(self, heat_generated, cooling_power, dt, ambient_temp=25.0):
-        """
-        Update engine, coolant, and oil temperatures based on heat generated and cooling.
-        
-        Args:
-            heat_generated: Heat generated by engine in Joules
-            cooling_power: Cooling power in Watts
-            dt: Time step in seconds
-            ambient_temp: Ambient temperature in °C
-            
-        Returns:
-            Updated temperatures dict
-        """
-        import numpy as np
 
-        # Save current temperatures for rate limiting
-        prev_engine_temp = self.engine_temperature
-        prev_coolant_temp = self.coolant_temperature
-        prev_oil_temp = self.oil_temperature
-        
-        # Calculate engine temperature change due to heat generation
-        engine_heat_capacity = self.engine_thermal_mass * self.specific_heat_capacity
-        raw_engine_temp_change = heat_generated / engine_heat_capacity if engine_heat_capacity > 0 else 0
-        
-        # Apply thermal inertia for more realistic temperature changes
-        # Limit maximum temperature change per time step
-        max_engine_temp_change = 10.0 * dt  # Maximum 10°C per second
-        engine_temp_change = min(raw_engine_temp_change, max_engine_temp_change)
-        
-        # Calculate coolant temperature change from engine heat
-        # Some of the engine heat goes to the coolant
-        coolant_heat_capacity = self.coolant_thermal_mass * self.coolant_specific_heat
-        heat_to_coolant = heat_generated * 0.7  # 70% of heat goes to coolant
-        raw_coolant_temp_change = heat_to_coolant / coolant_heat_capacity if coolant_heat_capacity > 0 else 0
-        
-        # Apply thermal inertia and limit for coolant
-        max_coolant_temp_change = 8.0 * dt  # Maximum 8°C per second
-        coolant_temp_change = min(raw_coolant_temp_change, max_coolant_temp_change)
-        
-        # Calculate oil temperature change
-        # Oil heats up from engine and cools via heat exchange with coolant
-        oil_heat_capacity = self.oil_thermal_mass * self.oil_specific_heat
-        heat_to_oil = heat_generated * 0.2  # 20% of heat goes to oil
-        raw_oil_temp_change = heat_to_oil / oil_heat_capacity if oil_heat_capacity > 0 else 0
-        
-        # Apply thermal inertia and limit for oil
-        max_oil_temp_change = 6.0 * dt  # Maximum 6°C per second
-        oil_temp_change = min(raw_oil_temp_change, max_oil_temp_change)
-        
-        # Calculate cooling effect on coolant
-        cooling_effect = cooling_power * dt / coolant_heat_capacity if coolant_heat_capacity > 0 else 0
-        cooling_effect = min(cooling_effect, coolant_temp_change + 5.0 * dt)  # Limit cooling effect
-        
-        # Apply temperature changes
-        self.engine_temperature += engine_temp_change
-        self.coolant_temperature += coolant_temp_change - cooling_effect
-        self.oil_temperature += oil_temp_change
-        
-        # Heat exchange between engine and coolant
-        temp_diff_engine_coolant = self.engine_temperature - self.coolant_temperature
-        heat_exchange_engine_coolant = 0.1 * temp_diff_engine_coolant * dt  # Simplified heat exchange
-        
-        # Heat exchange between engine and oil
-        temp_diff_engine_oil = self.engine_temperature - self.oil_temperature
-        heat_exchange_engine_oil = 0.05 * temp_diff_engine_oil * dt
-        
-        # Heat exchange between oil and coolant
-        temp_diff_oil_coolant = self.oil_temperature - self.coolant_temperature
-        heat_exchange_oil_coolant = 0.03 * temp_diff_oil_coolant * dt
-        
-        # Apply heat exchange effects
-        self.engine_temperature -= (heat_exchange_engine_coolant + heat_exchange_engine_oil)
-        self.oil_temperature += heat_exchange_engine_oil - heat_exchange_oil_coolant
-        self.coolant_temperature += heat_exchange_engine_coolant + heat_exchange_oil_coolant
-        
-        # Apply ambient cooling (when engine is off or at very low loads)
-        ambient_cooling_factor = 0.01 * dt
-        self.engine_temperature -= ambient_cooling_factor * (self.engine_temperature - ambient_temp)
-        self.coolant_temperature -= ambient_cooling_factor * (self.coolant_temperature - ambient_temp)
-        self.oil_temperature -= ambient_cooling_factor * (self.oil_temperature - ambient_temp)
-        
-        # Define temperature limits
-        min_temp = 0.0
-        max_temp = 150.0
-        min_coolant_temp = 0.0
-        max_coolant_temp = 120.0
-        min_oil_temp = 0.0
-        max_oil_temp = 150.0
-        
-        # Use the object's limits if available
-        if hasattr(self, 'min_temp'):
-            min_temp = self.min_temp
-        if hasattr(self, 'max_temp'):
-            max_temp = self.max_temp
-        if hasattr(self, 'min_coolant_temp'):
-            min_coolant_temp = self.min_coolant_temp
-        if hasattr(self, 'max_coolant_temp'):
-            max_coolant_temp = self.max_coolant_temp
-        if hasattr(self, 'min_oil_temp'):
-            min_oil_temp = self.min_oil_temp
-        if hasattr(self, 'max_oil_temp'):
-            max_oil_temp = self.max_oil_temp
-                
-        # Validate and cap temperatures using our new helper method
-        self.engine_temperature = self._validate_temperature(
-            self.engine_temperature, min_temp, max_temp, "engine")
-        self.coolant_temperature = self._validate_temperature(
-            self.coolant_temperature, min_coolant_temp, max_coolant_temp, "coolant")
-        self.oil_temperature = self._validate_temperature(
-            self.oil_temperature, min_oil_temp, max_oil_temp, "oil")
-        
-        # Check for excessive temperature changes
-        # Define thresholds for excessive changes (°C)
-        engine_threshold = 30.0
-        coolant_threshold = 20.0
-        oil_threshold = 15.0
-        
-        # Calculate absolute changes
-        engine_change = abs(self.engine_temperature - prev_engine_temp)
-        coolant_change = abs(self.coolant_temperature - prev_coolant_temp)
-        oil_change = abs(self.oil_temperature - prev_oil_temp)
-        
-        # Check for excessive changes
-        import logging
-        if engine_change > engine_threshold:
-            logging.warning(f"Excessive engine temperature change detected: {engine_change:.1f}°C")
-            # Limit the change to the threshold
-            self.engine_temperature = prev_engine_temp + np.sign(self.engine_temperature - prev_engine_temp) * engine_threshold
-            
-        if coolant_change > coolant_threshold:
-            logging.warning(f"Excessive coolant temperature change detected: {coolant_change:.1f}°C")
-            self.coolant_temperature = prev_coolant_temp + np.sign(self.coolant_temperature - prev_coolant_temp) * coolant_threshold
-            
-        if oil_change > oil_threshold:
-            logging.warning(f"Excessive oil temperature change detected: {oil_change:.1f}°C")
-            self.oil_temperature = prev_oil_temp + np.sign(self.oil_temperature - prev_oil_temp) * oil_threshold
-        
-        # Return current temperatures
-        return {
-            'engine_temp': self.engine_temperature,
-            'coolant_temp': self.coolant_temperature,
-            'oil_temp': self.oil_temperature
-        }
-    
-    def get_temperature_state(self) -> Dict[str, float]:
-        """
-        Get current temperature state.
-        
-        Returns:
-            Dictionary with current temperatures
-        """
-        return {
-            'engine': self.engine_temp,
-            'oil': self.oil_temp,
-            'coolant': self.coolant_temp
-        }
-    
-    def get_temperature_effects(self) -> Dict[str, float]:
-        """
-        Calculate temperature effects on engine performance.
-        
-        Returns:
-            Dictionary with temperature effect factors
-        """
-        # Engine temperature effect on power
-        # Optimal around 90-100°C, reduced when too cold or too hot
-        engine_temp_factor = 0.5 + 0.5 * np.exp(-0.002 * (self.engine_temp - 95)**2)
-        
-        # Oil temperature effect on friction
-        # Optimal around 90-110°C, higher friction when too cold
-        if self.oil_temp < 60:
-            oil_temp_factor = 0.7 + 0.3 * self.oil_temp / 60  # Cold oil has high friction
-        elif self.oil_temp < 100:
-            oil_temp_factor = 1.0  # Optimal range
-        else:
-            # Slight increase in friction with very hot oil
-            oil_temp_factor = 1.0 + 0.05 * (self.oil_temp - 100) / 20
-        
-        # Coolant temperature effect on volumetric efficiency
-        # Cooler intake charge is denser (better efficiency)
-        # But too cold means poor fuel vaporization
-        if self.coolant_temp < 70:
-            coolant_temp_factor = 0.85 + 0.15 * self.coolant_temp / 70
-        elif self.coolant_temp < 90:
-            coolant_temp_factor = 1.0  # Optimal range
-        else:
-            # Decreased volumetric efficiency with hot coolant
-            coolant_temp_factor = 1.0 - 0.1 * (self.coolant_temp - 90) / 20
-        
-        return {
-            'power': engine_temp_factor,
-            'friction': oil_temp_factor,
-            'volumetric_efficiency': coolant_temp_factor
-        }
-    def _validate_temperature(self, temp, min_temp, max_temp, component_name):
-        """
-        Validate temperature value and cap if outside reasonable range.
-        
         Args:
-            temp: Temperature to validate
-            min_temp: Minimum allowed temperature
-            max_temp: Maximum allowed temperature
-            component_name: Name of component for logging
-            
-        Returns:
-            Validated temperature value
+            config: ThermalConfig instance.
+            engine: Optional MotorcycleEngine instance for power/fuel calculations.
         """
-        import numpy as np
-        import logging
-        
-        # Check for NaN or non-numeric values
-        if not np.isfinite(temp):
-            logging.warning(f"Invalid {component_name} temperature detected (NaN or Inf). Setting to ambient (25°C).")
-            return 25.0  # Reset to ambient temp
-            
-        if temp < min_temp:
-            logging.warning(f"Unreasonable low {component_name} temperature detected: {temp:.1f}°C. Capping at {min_temp}°C.")
-            return min_temp
-        elif temp > max_temp:
-            logging.warning(f"Unreasonable high {component_name} temperature detected: {temp:.1f}°C. Capping at {max_temp}°C.")
-            return max_temp
-        return temp
+        self.config = config
+        self.engine = engine
+
+        # Fuel properties (needed for heat calculation) - Default to E85 if engine not provided
+        # It's better if the FuelSystem provides this.
+        self.fuel_energy_density_J_kg = 29.2e6 # Approx E85
+        if engine and hasattr(engine, 'fuel_properties'):
+             # Assuming engine has loaded fuel properties
+             self.fuel_energy_density_J_kg = engine.fuel_properties.energy_density_J_per_kg
+
+    def calculate_heat_generation(self, rpm: float, throttle: float) -> Dict[str, float]:
+        """
+        Calculate heat generation sources based on engine operating point.
+
+        Args:
+            rpm: Engine speed (RPM).
+            throttle: Throttle position (0-1).
+
+        Returns:
+            Dictionary with heat generation rates (W) for 'total', 'coolant', 'oil', etc.
+        """
+        if self.engine is None:
+            logger.warning("Engine model needed for accurate heat generation calculation. Using estimates.")
+            # Estimate power and fuel flow if no engine model
+            # Very rough estimation
+            max_power_kw = 70.0 # Example
+            power_kw = max_power_kw * throttle * (rpm / 14000.0)**0.8
+            fuel_flow_g_s = (power_kw * 400.0) / 3600.0 # Estimate from BSFC
+        else:
+            # Use engine model methods
+            power_kw = self.engine.get_power(rpm, throttle)
+            fuel_flow_g_s = self.engine.get_fuel_consumption(rpm, throttle)
+
+        fuel_power_watts = (fuel_flow_g_s / 1000.0) * self.fuel_energy_density_J_kg
+        engine_power_watts = power_kw * 1000.0
+
+        # Total waste heat
+        total_waste_heat_watts = max(0.0, fuel_power_watts - engine_power_watts)
+
+        # Distribute waste heat
+        dist = self.config.heat_distribution
+        heat_to_coolant = total_waste_heat_watts * dist['coolant']
+        heat_to_oil = total_waste_heat_watts * dist['oil']
+        heat_to_exhaust = total_waste_heat_watts * dist['exhaust']
+        heat_to_ambient = total_waste_heat_watts * dist['ambient']
+
+        return {
+            'total_waste': total_waste_heat_watts,
+            'to_coolant': heat_to_coolant,
+            'to_oil': heat_to_oil,
+            'to_exhaust': heat_to_exhaust, # Usually not tracked further
+            'to_ambient': heat_to_ambient  # Direct loss from block
+        }
+
+    def calculate_internal_heat_transfer(self, temps: Dict[str, float]) -> Dict[str, float]:
+        """
+        Calculate heat transfer rates between internal components (W).
+
+        Args:
+            temps: Dictionary with current temperatures {'engine', 'oil', 'coolant'}.
+
+        Returns:
+            Dictionary with heat transfer rates {'oil_to_block', 'coolant_to_block'}.
+            Positive value means heat flows FROM the first component TO the second.
+        """
+        eng_temp = temps['engine']
+        oil_temp = temps['oil']
+        cool_temp = temps['coolant']
+
+        # Heat transfer from oil TO engine block
+        q_oil_to_block = self.config.htc_oil_to_block * (oil_temp - eng_temp)
+
+        # Heat transfer from coolant TO engine block
+        q_coolant_to_block = self.config.htc_coolant_to_block * (cool_temp - eng_temp)
+
+        return {
+            # Note the signs: positive Q means heat flows FROM first TO second
+            'oil_to_block': -q_oil_to_block,  # Heat from block TO oil
+            'coolant_to_block': -q_coolant_to_block # Heat from block TO coolant
+        }
+
+    def calculate_ambient_heat_loss(self, temps: Dict[str, float], ambient_temp: float, vehicle_speed: float) -> Dict[str, float]:
+         """
+         Calculate heat loss from components directly to the ambient air (W).
+
+         Args:
+             temps: Dictionary with current temperatures {'engine', 'oil', 'coolant'}.
+             ambient_temp: Ambient air temperature (°C).
+             vehicle_speed: Vehicle speed (m/s).
+
+         Returns:
+             Dictionary with heat loss rates {'block_to_ambient', 'oil_to_ambient'}.
+             Positive value means heat flows FROM component TO ambient.
+         """
+         eng_temp = temps['engine']
+         oil_temp = temps['oil']
+         # Coolant loss primarily via radiator, handled by CoolingSystem
+
+         # Heat loss from engine block to ambient
+         # HTC increases with speed (convection)
+         htc_ambient = self.config.htc_block_to_ambient * (1 + 0.05 * vehicle_speed) # Simple speed dependence
+         q_block_to_ambient = htc_ambient * (eng_temp - ambient_temp)
+
+         # Simplified oil sump cooling
+         # Assume a small effective area and HTC for oil sump exposed to air
+         htc_oil_ambient = 20.0 * (1 + 0.08 * vehicle_speed) # W/K total, includes area factor
+         q_oil_to_ambient = htc_oil_ambient * (oil_temp - ambient_temp)
+
+         return {
+             'block_to_ambient': max(0, q_block_to_ambient), # Ensure non-negative loss
+             'oil_to_ambient': max(0, q_oil_to_ambient)
+         }
+
+
+# --- External Cooling System (Placeholder/Interface) ---
+# This defines the expected interface for the cooling system that interacts
+# with the ThermalSimulation. The actual implementation comes from thermal.cooling_system.
+class CoolingSystemInterface:
+    def calculate_heat_rejection(self, coolant_temp: float, ambient_temp: float, coolant_flow_rate: float, vehicle_speed: float) -> float:
+        """Calculates heat rejection by the radiator system."""
+        raise NotImplementedError
+    def get_total_coolant_mass(self) -> float:
+        """Returns the total mass of coolant in the external system (radiator, hoses)."""
+        raise NotImplementedError
 
 
 class ThermalSimulation:
-    """Simulation of engine thermal dynamics over time."""
-    
-    def __init__(self, engine_model: EngineHeatModel, cooling_system: CoolingSystem):
+    """Simulates the engine's thermal dynamics over time."""
+
+    def __init__(self, engine_model: EngineHeatModel, cooling_system: CoolingSystemInterface):
         """
         Initialize thermal simulation.
-        
+
         Args:
-            engine_model: EngineHeatModel instance
-            cooling_system: CoolingSystem instance
+            engine_model: EngineHeatModel instance.
+            cooling_system: Instance conforming to CoolingSystemInterface.
         """
         self.engine_model = engine_model
         self.cooling_system = cooling_system
-        
-        # Simulation data storage
-        self.time_points = []
-        self.temperature_data = []
-        self.heat_flow_data = []
-        self.cooling_data = []
-    
+        self.config = engine_model.config # Use the config from the heat model
+
+        # Get thermal capacities
+        self.capacities = self.config.get_thermal_capacities() # J/K
+        # Add capacity for coolant in the external system
+        coolant_mass_external = self.cooling_system.get_total_coolant_mass() if hasattr(self.cooling_system, 'get_total_coolant_mass') else 1.5 # Default guess
+        self.capacities['coolant_external'] = coolant_mass_external * self.config.specific_heat_coolant
+        self.capacities['coolant_total'] = self.capacities['coolant_engine'] + self.capacities['coolant_external']
+
+        if any(c <= 0 for c in self.capacities.values()):
+            logger.warning(f"Zero or negative thermal capacity detected: {self.capacities}. Temperature changes might be unstable.")
+            # Set very small positive values to avoid division by zero
+            for k,v in self.capacities.items():
+                if v <= 0: self.capacities[k] = 1e-3
+
+
+        # Simulation state (temperatures in Celsius)
+        self.temps = {
+            'engine': 25.0,
+            'oil': 25.0,
+            'coolant': 25.0 # Represents average coolant temp in the whole system
+        }
+
+        # History storage
+        self.history = {'time': [], 'temps': [], 'heat_flows': []}
+
     def reset(self, initial_temps: Dict[str, float] = None):
-        """
-        Reset simulation to initial state.
-        
-        Args:
-            initial_temps: Optional dictionary with initial temperatures
-        """
-        # Reset data storage
-        self.time_points = []
-        self.temperature_data = []
-        self.heat_flow_data = []
-        self.cooling_data = []
-        
-        # Reset engine model temperatures
+        """Reset simulation to initial state."""
         if initial_temps:
-            self.engine_model.engine_temp = initial_temps.get('engine', 25.0)
-            self.engine_model.oil_temp = initial_temps.get('oil', 25.0)
-            self.engine_model.coolant_temp = initial_temps.get('coolant', 25.0)
+            self.temps['engine'] = initial_temps.get('engine', 25.0)
+            self.temps['oil'] = initial_temps.get('oil', 25.0)
+            self.temps['coolant'] = initial_temps.get('coolant', 25.0)
         else:
-            self.engine_model.engine_temp = 25.0
-            self.engine_model.oil_temp = 25.0
-            self.engine_model.coolant_temp = 25.0
-    
-    def run_step(self, engine_rpm: float, engine_torque: float, fuel_mass_flow: float,
-               ambient_temp: float, vehicle_speed: float, dt: float) -> Dict[str, float]:
+            self.temps = {'engine': 25.0, 'oil': 25.0, 'coolant': 25.0}
+        self.history = {'time': [], 'temps': [], 'heat_flows': []}
+        logger.info(f"Thermal simulation reset. Initial temps: {self.temps}")
+
+    def run_step(self, rpm: float, throttle: float, ambient_temp: float,
+               vehicle_speed: float, coolant_flow_rate: float, dt: float) -> Dict[str, float]:
         """
-        Run a single simulation step.
-        
+        Run a single simulation step using Euler integration.
+
         Args:
-            engine_rpm: Engine speed in RPM
-            engine_torque: Engine torque in Nm
-            fuel_mass_flow: Fuel mass flow rate in g/s
-            ambient_temp: Ambient temperature in °C
-            vehicle_speed: Vehicle speed in m/s
-            dt: Time step in seconds
-            
+            rpm: Engine RPM.
+            throttle: Throttle position (0-1).
+            ambient_temp: Ambient temperature (°C).
+            vehicle_speed: Vehicle speed (m/s).
+            coolant_flow_rate: Coolant flow rate (L/min).
+            dt: Time step (s).
+
         Returns:
-            Dictionary with updated temperatures
+            Dictionary with updated temperatures.
         """
-        # Calculate engine load (approximation)
-        if engine_rpm > 0:
-            engine_load = min(1.0, engine_torque / 70.0)  # Assuming 70 Nm as max torque
-        else:
-            engine_load = 0.0
-        
-        # Calculate engine and fuel power
-        engine_power = self.engine_model.calculate_engine_power(engine_rpm, engine_torque)
-        fuel_power = self.engine_model.calculate_fuel_power(fuel_mass_flow)
-        
-        # Calculate heat sources
-        heat_sources = self.engine_model.calculate_heat_sources(
-            fuel_power, engine_power, engine_rpm, engine_load
+        # --- 1. Calculate Heat Generation ---
+        heat_gen = self.engine_model.calculate_heat_generation(rpm, throttle)
+
+        # --- 2. Calculate Heat Transfer ---
+        heat_transfer_internal = self.engine_model.calculate_internal_heat_transfer(self.temps)
+        heat_loss_ambient = self.engine_model.calculate_ambient_heat_loss(self.temps, ambient_temp, vehicle_speed)
+        heat_rejection_radiator = self.cooling_system.calculate_heat_rejection(
+            self.temps['coolant'], ambient_temp, coolant_flow_rate, vehicle_speed
         )
-        
-        # Calculate heat transfers
-        heat_transfers = self.engine_model.calculate_thermal_transfer(
-            self.cooling_system, ambient_temp, vehicle_speed, engine_rpm, engine_load
-        )
-        
-        # Update temperatures
-        temps = self.engine_model.update_temperatures(heat_sources, heat_transfers, dt)
-        
-        # Store data
-        self.time_points.append(self.time_points[-1] + dt if self.time_points else dt)
-        self.temperature_data.append(temps)
-        self.heat_flow_data.append({**heat_sources, **heat_transfers})
-        self.cooling_data.append(self.cooling_system.get_system_state())
-        
-        return temps
-    
-    def run_profile(self, profile_data: Dict[str, np.ndarray], dt: float = 0.1) -> Dict[str, np.ndarray]:
+
+        # --- 3. Calculate Net Heat Flow for Each Component ---
+        # Engine Block: Gains from oil/coolant sources, loses to ambient, loses to internal transfer
+        q_net_engine = (heat_gen['to_ambient'] # Direct heat gen to ambient (handled by loss)
+                       - heat_transfer_internal['oil_to_block'] # From block to oil
+                       - heat_transfer_internal['coolant_to_block'] # From block to coolant
+                       - heat_loss_ambient['block_to_ambient']) # From block to ambient air
+
+        # Oil: Gains from engine source, gains from block, loses to ambient
+        q_net_oil = (heat_gen['to_oil']
+                    + heat_transfer_internal['oil_to_block'] # From block to oil
+                    - heat_loss_ambient['oil_to_ambient'])
+
+        # Coolant: Gains from engine source, gains from block, loses via radiator
+        q_net_coolant = (heat_gen['to_coolant']
+                        + heat_transfer_internal['coolant_to_block'] # From block to coolant
+                        - heat_rejection_radiator) # Rejected by external system
+
+        # --- 4. Update Temperatures (dT = Q * dt / C) ---
+        delta_t_engine = (q_net_engine * dt) / self.capacities['engine_block']
+        delta_t_oil = (q_net_oil * dt) / self.capacities['engine_oil']
+        # Use total coolant capacity for the average coolant temperature change
+        delta_t_coolant = (q_net_coolant * dt) / self.capacities['coolant_total']
+
+        self.temps['engine'] += delta_t_engine
+        self.temps['oil'] += delta_t_oil
+        self.temps['coolant'] += delta_t_coolant
+
+        # Clamp temperatures (using config limits, ensure they are loaded)
+        self.temps['engine'] = np.clip(self.temps['engine'], ambient_temp - 15, self.config.critical_temp_engine + 20)
+        self.temps['coolant'] = np.clip(self.temps['coolant'], ambient_temp - 15, self.config.critical_temp_coolant + 15)
+        self.temps['oil'] = np.clip(self.temps['oil'], ambient_temp - 15, self.config.critical_temp_oil + 20)
+
+
+        # --- 5. Store History ---
+        current_time = self.history['time'][-1] + dt if self.history['time'] else dt
+        self.history['time'].append(current_time)
+        self.history['temps'].append(self.temps.copy())
+        self.history['heat_flows'].append({
+            'gen_total': heat_gen['total_waste'],
+            'gen_coolant': heat_gen['to_coolant'],
+            'gen_oil': heat_gen['to_oil'],
+            'tr_oil_block': heat_transfer_internal['oil_to_block'],
+            'tr_coolant_block': heat_transfer_internal['coolant_to_block'],
+            'loss_block_amb': heat_loss_ambient['block_to_ambient'],
+            'loss_oil_amb': heat_loss_ambient['oil_to_ambient'],
+            'rej_radiator': heat_rejection_radiator
+        })
+
+        return self.temps.copy()
+
+    def run_profile(self, profile_data: pd.DataFrame, dt: float = 0.1) -> pd.DataFrame:
         """
-        Run simulation over a time profile.
-        
+        Run simulation over a time profile provided as a DataFrame.
+
         Args:
-            profile_data: Dictionary with arrays for time, engine_rpm, engine_torque, etc.
-            dt: Time step in seconds
-            
+            profile_data: DataFrame with columns 'time', 'rpm', 'throttle', 'ambient_temp', 'vehicle_speed', 'coolant_flow'.
+            dt: Simulation time step (s).
+
         Returns:
-            Dictionary with simulation results
+            DataFrame with simulation results including temperatures.
         """
-        # Reset simulation
-        self.reset()
-        
-        # Extract profile data
-        time = profile_data['time']
-        engine_rpm = profile_data['engine_rpm']
-        engine_torque = profile_data['engine_torque']
-        fuel_mass_flow = profile_data.get('fuel_mass_flow', np.zeros_like(time))
-        ambient_temp = profile_data.get('ambient_temp', np.full_like(time, 25.0))
-        vehicle_speed = profile_data.get('vehicle_speed', np.zeros_like(time))
-        
-        # Run simulation for each time step
-        temp_engine = []
-        temp_oil = []
-        temp_coolant = []
-        
-        # Calculate number of steps
-        total_time = time[-1]
-        num_steps = int(total_time / dt) + 1
-        
-        # Create interpolation functions for input variables
-        f_rpm = interp1d(time, engine_rpm, bounds_error=False, fill_value="extrapolate")
-        f_torque = interp1d(time, engine_torque, bounds_error=False, fill_value="extrapolate")
-        f_fuel = interp1d(time, fuel_mass_flow, bounds_error=False, fill_value="extrapolate")
-        f_ambient = interp1d(time, ambient_temp, bounds_error=False, fill_value="extrapolate")
-        f_speed = interp1d(time, vehicle_speed, bounds_error=False, fill_value="extrapolate")
-        
-        # Run simulation
-        for i in range(num_steps):
-            t = i * dt
-            
-            # Interpolate inputs
-            rpm = float(f_rpm(t))
-            torque = float(f_torque(t))
-            fuel = float(f_fuel(t))
-            ambient = float(f_ambient(t))
-            speed = float(f_speed(t))
-            
-            # Run step
-            temps = self.run_step(rpm, torque, fuel, ambient, speed, dt)
-            
-            # Store results
-            temp_engine.append(temps['engine'])
-            temp_oil.append(temps['oil'])
-            temp_coolant.append(temps['coolant'])
-        
-        # Create result arrays
-        result_time = np.array(self.time_points)
-        result_temp_engine = np.array(temp_engine)
-        result_temp_oil = np.array(temp_oil)
-        result_temp_coolant = np.array(temp_coolant)
-        
-        return {
-            'time': result_time,
-            'temp_engine': result_temp_engine,
-            'temp_oil': result_temp_oil,
-            'temp_coolant': result_temp_coolant
-        }
-    
-    def run_steady_state(self, engine_rpm: float, engine_torque: float, fuel_mass_flow: float,
-                       ambient_temp: float, vehicle_speed: float, 
-                       max_time: float = 600.0, tolerance: float = 0.1) -> Dict[str, float]:
+        required_cols = ['time', 'rpm', 'throttle', 'ambient_temp', 'vehicle_speed', 'coolant_flow']
+        if not all(col in profile_data.columns for col in required_cols):
+            raise ValueError(f"Profile data missing required columns: {required_cols}")
+
+        # Reset simulation, start at first profile temperature or 25C
+        initial_temp = profile_data['ambient_temp'].iloc[0] if 'ambient_temp' in profile_data else 25.0
+        self.reset(initial_temps={'engine': initial_temp+5, 'oil': initial_temp, 'coolant': initial_temp})
+
+        profile_time = profile_data['time'].values
+        sim_times = np.arange(profile_time[0], profile_time[-1] + dt, dt)
+
+        # Create interpolation functions for inputs
+        interp_rpm = interp1d(profile_time, profile_data['rpm'], bounds_error=False, fill_value='extrapolate')
+        interp_throttle = interp1d(profile_time, profile_data['throttle'], bounds_error=False, fill_value='extrapolate')
+        interp_ambient = interp1d(profile_time, profile_data['ambient_temp'], bounds_error=False, fill_value='extrapolate')
+        interp_speed = interp1d(profile_time, profile_data['vehicle_speed'], bounds_error=False, fill_value='extrapolate')
+        interp_flow = interp1d(profile_time, profile_data['coolant_flow'], bounds_error=False, fill_value='extrapolate')
+
+        for t in sim_times[1:]: # Start from the second time step
+            # Interpolate inputs at current time t
+            current_rpm = float(interp_rpm(t))
+            current_throttle = float(interp_throttle(t))
+            current_ambient = float(interp_ambient(t))
+            current_speed = float(interp_speed(t))
+            current_flow = float(interp_flow(t))
+
+            # Run simulation step
+            self.run_step(current_rpm, current_throttle, current_ambient, current_speed, current_flow, dt)
+
+        # Create results DataFrame
+        results_df = pd.DataFrame({
+            'time': self.history['time'],
+            'engine_temp': [t['engine'] for t in self.history['temps']],
+            'coolant_temp': [t['coolant'] for t in self.history['temps']],
+            'oil_temp': [t['oil'] for t in self.history['temps']],
+            'heat_rejected_kw': [h['rej_radiator']/1000.0 for h in self.history['heat_flows']]
+        })
+        logger.info(f"Profile simulation complete. Max temps: Eng={results_df['engine_temp'].max():.1f}C, Cool={results_df['coolant_temp'].max():.1f}C, Oil={results_df['oil_temp'].max():.1f}C")
+        return results_df
+
+
+    def run_steady_state(self, rpm: float, throttle: float, ambient_temp: float,
+                       vehicle_speed: float, coolant_flow_rate: float,
+                       max_time: float = 1200.0, tolerance: float = 0.01) -> Dict[str, float]:
         """
-        Run simulation until steady state is reached.
-        
+        Run simulation until steady state temperatures are reached.
+
         Args:
-            engine_rpm: Engine speed in RPM
-            engine_torque: Engine torque in Nm
-            fuel_mass_flow: Fuel mass flow rate in g/s
-            ambient_temp: Ambient temperature in °C
-            vehicle_speed: Vehicle speed in m/s
-            max_time: Maximum simulation time in seconds
-            tolerance: Temperature change tolerance for steady state in °C/s
-            
+            rpm, throttle, ambient_temp, vehicle_speed, coolant_flow_rate: Operating conditions.
+            max_time: Maximum simulation time (s).
+            tolerance: Temperature change tolerance (°C/s) to define steady state.
+
         Returns:
-            Dictionary with steady state temperatures
+            Dictionary with steady state temperatures and time to reach steady state.
         """
-        # Reset simulation
-        self.reset()
-        
-        # Run simulation steps until steady state or max time
+        self.reset(initial_temps={'engine': ambient_temp+5, 'oil': ambient_temp, 'coolant': ambient_temp})
+        dt = 0.5 # Use a slightly larger time step for steady state convergence
         time = 0.0
-        dt = 1.0  # 1 second time step for steady state calculation
-        
+        last_temps = self.temps.copy()
+
         while time < max_time:
-            # Run step
-            temps = self.run_step(
-                engine_rpm, engine_torque, fuel_mass_flow,
-                ambient_temp, vehicle_speed, dt
-            )
-            
+            temps = self.run_step(rpm, throttle, ambient_temp, vehicle_speed, coolant_flow_rate, dt)
             time += dt
-            
-            # Check if steady state reached (last 30 seconds)
-            if len(self.time_points) > 30:
-                # Calculate temperature change rates over last 30 seconds
-                engine_rate = abs(temps['engine'] - self.temperature_data[-30]['engine']) / 30
-                oil_rate = abs(temps['oil'] - self.temperature_data[-30]['oil']) / 30
-                coolant_rate = abs(temps['coolant'] - self.temperature_data[-30]['coolant']) / 30
-                
-                if engine_rate < tolerance and oil_rate < tolerance and coolant_rate < tolerance:
-                    break
-        
-        return {
-            'engine': temps['engine'],
-            'oil': temps['oil'],
-            'coolant': temps['coolant'],
-            'time_to_steady': time
-        }
-    
+
+            # Check for convergence
+            temp_change_rate = abs(temps['engine'] - last_temps['engine']) / dt
+            if time > 30 and temp_change_rate < tolerance: # Check after initial warmup
+                 logger.info(f"Steady state reached at t={time:.1f}s. Temps: {temps}")
+                 return {**temps, 'time_to_steady': time}
+
+            last_temps = temps.copy()
+
+        logger.warning(f"Steady state not reached within max_time={max_time}s. Returning final temps.")
+        return {**self.temps, 'time_to_steady': max_time}
+
+    # --- Plotting Methods ---
     def plot_temperature_profile(self, save_path: Optional[str] = None):
-        """
-        Plot temperature profile over time.
-        
-        Args:
-            save_path: Optional path to save the plot
-        """
-        if not self.time_points:
-            raise ValueError("No simulation data available")
-        
-        # Extract temperature data
-        time = np.array(self.time_points)
-        temp_engine = np.array([data['engine'] for data in self.temperature_data])
-        temp_oil = np.array([data['oil'] for data in self.temperature_data])
-        temp_coolant = np.array([data['coolant'] for data in self.temperature_data])
-        
-        plt.figure(figsize=(10, 6))
-        
-        # Plot temperatures
-        plt.plot(time, temp_engine, 'r-', label='Engine Block')
-        plt.plot(time, temp_oil, 'g-', label='Oil')
-        plt.plot(time, temp_coolant, 'b-', label='Coolant')
-        
-        # Add labels and legend
-        plt.xlabel('Time (s)')
-        plt.ylabel('Temperature (°C)')
-        plt.title('Engine Thermal Simulation')
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-        
-        # Set reasonable y-axis limits
-        plt.ylim(20, max(max(temp_engine), max(temp_oil), max(temp_coolant)) * 1.1)
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-        plt.show()
-    
+        """Plot temperature profile over time using the centralized plotting function."""
+        if not self.history['time']:
+             logger.error("No simulation history to plot.")
+             return
+
+        from ..utils.plotting import plot_thermal_performance, save_plot
+
+        # Prepare data dictionary for the plotting function
+        plot_data = {
+            'time': self.history['time'],
+            'engine_temp': [t['engine'] for t in self.history['temps']],
+            'coolant_temp': [t['coolant'] for t in self.history['temps']],
+            'oil_temp': [t['oil'] for t in self.history['temps']],
+            # Include limits if available in config
+            'thermal_limits': {
+                'engine_warning': self.config.warning_temp_engine,
+                'engine_critical': self.config.critical_temp_engine,
+                'coolant_warning': self.config.warning_temp_coolant,
+                'coolant_critical': self.config.critical_temp_coolant
+            }
+            # Add ambient temp if needed for plot context (assuming constant for now)
+            # 'ambient_temp': [ambient_temp_used] * len(self.history['time'])
+        }
+
+        fig = plot_thermal_performance(plot_data, title="Engine Thermal Simulation")
+        if save_path and fig: save_plot(fig, save_path)
+        elif fig: plt.show()
+        if fig: plt.close(fig)
+
     def plot_heat_flow(self, save_path: Optional[str] = None):
-        """
-        Plot heat flow over time.
-        
-        Args:
-            save_path: Optional path to save the plot
-        """
-        if not self.time_points:
-            raise ValueError("No simulation data available")
-        
-        # Extract heat flow data
-        time = np.array(self.time_points)
-        heat_total = np.array([data['total'] for data in self.heat_flow_data])
-        heat_coolant = np.array([data['coolant'] for data in self.heat_flow_data])
-        heat_oil = np.array([data['oil'] for data in self.heat_flow_data])
-        heat_radiator = np.array([data['radiator'] for data in self.heat_flow_data])
-        
-        plt.figure(figsize=(10, 6))
-        
-        # Plot heat flows
-        plt.plot(time, heat_total / 1000, 'k-', label='Total Waste Heat')
-        plt.plot(time, heat_coolant / 1000, 'r-', label='To Coolant')
-        plt.plot(time, heat_oil / 1000, 'g-', label='To Oil')
-        plt.plot(time, heat_radiator / 1000, 'b-', label='Radiator Rejection')
-        
-        # Add labels and legend
-        plt.xlabel('Time (s)')
-        plt.ylabel('Heat Flow (kW)')
-        plt.title('Engine Heat Flow')
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-        plt.show()
-    
-    def plot_cooling_system(self, save_path: Optional[str] = None):
-        """
-        Plot cooling system state over time.
-        
-        Args:
-            save_path: Optional path to save the plot
-        """
-        if not self.time_points:
-            raise ValueError("No simulation data available")
-        
-        # Extract cooling system data
-        time = np.array(self.time_points)
-        fan_state = np.array([data['fan_state'] for data in self.cooling_data])
-        thermostat = np.array([data['thermostat_position'] for data in self.cooling_data])
-        airflow = np.array([data['radiator_airflow'] for data in self.cooling_data])
-        
-        # Create plot with two y-axes
-        fig, ax1 = plt.subplots(figsize=(10, 6))
-        
-        # Plot fan state and thermostat position
-        ax1.plot(time, fan_state, 'r-', label='Fan Duty Cycle')
-        ax1.plot(time, thermostat, 'g-', label='Thermostat Position')
-        ax1.set_xlabel('Time (s)')
-        ax1.set_ylabel('State (0-1)')
-        ax1.set_ylim(0, 1.1)
-        
-        # Create secondary y-axis for airflow
-        ax2 = ax1.twinx()
-        ax2.plot(time, airflow, 'b-', label='Radiator Airflow')
-        ax2.set_ylabel('Airflow (m³/s)')
-        
-        # Add labels and legend
-        plt.title('Cooling System State')
-        ax1.grid(True, alpha=0.3)
-        
-        # Combine legends
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-        plt.show()
+        """Plot heat flow rates over time."""
+        if not self.history['time']:
+             logger.error("No simulation history to plot.")
+             return
 
+        from ..utils.plotting import save_plot # Local import
 
+        time = self.history['time']
+        fig, ax = plt.subplots(figsize=(12, 7))
+
+        # Plot heat generation/rejection rates
+        ax.plot(time, [h['gen_total']/1000 for h in self.history['heat_flows']], label='Total Waste Heat Gen (kW)', color='black', linestyle=':')
+        ax.plot(time, [h['gen_coolant']/1000 for h in self.history['heat_flows']], label='Heat to Coolant (kW)', color='blue', alpha=0.7)
+        ax.plot(time, [h['gen_oil']/1000 for h in self.history['heat_flows']], label='Heat to Oil (kW)', color='green', alpha=0.7)
+        ax.plot(time, [h['rej_radiator']/1000 for h in self.history['heat_flows']], label='Heat Rejected by Radiator (kW)', color='red')
+        ax.plot(time, [h['loss_block_amb']/1000 for h in self.history['heat_flows']], label='Block Ambient Loss (kW)', color='grey', linestyle='--')
+
+        _apply_common_ax_settings(ax, xlabel='Time (s)', ylabel='Heat Flow (kW)', title='Engine Heat Flows')
+        ax.legend(loc='best')
+
+        plt.tight_layout()
+        if save_path: save_plot(fig, save_path)
+        plt.show()
+        plt.close(fig)
+
+# --- Cooling Performance Analysis Class ---
+# (This class uses the ThermalSimulation to analyze performance)
 class CoolingPerformance:
-    """Analysis of cooling system performance for Formula Student applications."""
-    
-    def __init__(self, engine_model: EngineHeatModel, cooling_system: CoolingSystem):
-        """
-        Initialize cooling performance analyzer.
-        
-        Args:
-            engine_model: EngineHeatModel instance
-            cooling_system: CoolingSystem instance
-        """
+    """Analyzes cooling system performance based on thermal simulations."""
+
+    def __init__(self, engine_model: EngineHeatModel, cooling_system: CoolingSystemInterface):
+        """Initialize with engine and cooling system models."""
         self.engine_model = engine_model
         self.cooling_system = cooling_system
         self.simulation = ThermalSimulation(engine_model, cooling_system)
-        
-        # Performance data storage
-        self.steady_state_map = {}
-        self.transient_responses = {}
-    
-    def generate_steady_state_map(self, rpm_range: List[float], torque_range: List[float],
-                                ambient_temp: float = 25.0, vehicle_speed: float = 10.0,
-                                fuel_consumption=None) -> Dict:
+        self.results = {} # Store analysis results
+
+    def generate_steady_state_map(self, rpm_range: List[float], load_range: List[float],
+                                ambient_temp: float = 25.0, vehicle_speed: float = 15.0,
+                                coolant_flow_rate: float = 50.0) -> Dict:
         """
-        Generate steady state temperature map for different operating points.
-        
+        Generate steady state temperature map over engine RPM and load.
+
         Args:
-            rpm_range: List of engine speeds in RPM
-            torque_range: List of engine torques in Nm
-            ambient_temp: Ambient temperature in °C
-            vehicle_speed: Vehicle speed in m/s
-            fuel_consumption: Optional function to calculate fuel consumption (g/s)
-                              from RPM and torque
-            
+            rpm_range: List or array of engine speeds (RPM).
+            load_range: List or array of engine loads (0-1 throttle equivalent).
+            ambient_temp: Ambient temperature (°C).
+            vehicle_speed: Vehicle speed (m/s).
+            coolant_flow_rate: Coolant flow rate (L/min).
+
         Returns:
-            Dictionary with steady state temperature maps
+            Dictionary containing the steady state map results.
         """
-        # Initialize result matrices
         n_rpm = len(rpm_range)
-        n_torque = len(torque_range)
-        
-        temp_engine = np.zeros((n_rpm, n_torque))
-        temp_oil = np.zeros((n_rpm, n_torque))
-        temp_coolant = np.zeros((n_rpm, n_torque))
-        time_to_steady = np.zeros((n_rpm, n_torque))
-        
-        # Calculate steady state temperature for each operating point
-        for i, rpm in enumerate(rpm_range):
-            for j, torque in enumerate(torque_range):
-                print(f"Calculating steady state for {rpm} RPM, {torque} Nm...")
-                
-                # Calculate fuel consumption if function provided, otherwise estimate
-                if fuel_consumption:
-                    fuel_flow = fuel_consumption(rpm, torque)
-                else:
-                    # Rough estimate: 250 g/kWh BSFC
-                    power_kw = self.engine_model.calculate_engine_power(rpm, torque) / 1000
-                    fuel_flow = power_kw * 250 / 3600 if power_kw > 0 else 0.1
-                
-                # Run steady state simulation
-                result = self.simulation.run_steady_state(
-                    rpm, torque, fuel_flow, ambient_temp, vehicle_speed
+        n_load = len(load_range)
+        temp_engine_map = np.zeros((n_load, n_rpm))
+        temp_coolant_map = np.zeros((n_load, n_rpm))
+        temp_oil_map = np.zeros((n_load, n_rpm))
+        time_map = np.zeros((n_load, n_rpm))
+
+        logger.info(f"Generating steady state map ({n_rpm} RPMs x {n_load} loads)...")
+
+        for j, load in enumerate(load_range):
+            for i, rpm in enumerate(rpm_range):
+                # Throttle approx = load
+                throttle = load
+                # Torque approx from engine model (can be refined)
+                torque = self.engine_model.engine.get_torque(rpm, throttle) if self.engine_model.engine else 50.0 * load
+
+                steady_state = self.simulation.run_steady_state(
+                    rpm, throttle, ambient_temp, vehicle_speed, coolant_flow_rate
                 )
-                
-                # Store results
-                temp_engine[i, j] = result['engine']
-                temp_oil[i, j] = result['oil']
-                temp_coolant[i, j] = result['coolant']
-                time_to_steady[i, j] = result['time_to_steady']
-        
-        # Store results
-        self.steady_state_map = {
-            'rpm': np.array(rpm_range),
-            'torque': np.array(torque_range),
-            'temp_engine': temp_engine,
-            'temp_oil': temp_oil,
-            'temp_coolant': temp_coolant,
-            'time_to_steady': time_to_steady,
-            'ambient_temp': ambient_temp,
-            'vehicle_speed': vehicle_speed
+                temp_engine_map[j, i] = steady_state['engine']
+                temp_coolant_map[j, i] = steady_state['coolant']
+                temp_oil_map[j, i] = steady_state['oil']
+                time_map[j, i] = steady_state['time_to_steady']
+                logger.debug(f"  RPM={rpm:.0f}, Load={load:.1f} -> Eng={steady_state['engine']:.1f}C")
+
+        self.results['steady_state_map'] = {
+            'rpms': np.array(rpm_range),
+            'loads': np.array(load_range),
+            'engine_temps': temp_engine_map,
+            'coolant_temps': temp_coolant_map,
+            'oil_temps': temp_oil_map,
+            'time_to_steady': time_map,
+            'conditions': {'ambient': ambient_temp, 'speed': vehicle_speed, 'flow': coolant_flow_rate}
         }
-        
-        return self.steady_state_map
-    
-    def analyze_transient_response(self, rpm_step: Tuple[float, float], 
-                                 torque_step: Tuple[float, float],
-                                 ambient_temp: float = 25.0, 
-                                 vehicle_speed: float = 10.0,
-                                 fuel_consumption=None,
-                                 duration: float = 300.0) -> Dict:
+        logger.info("Steady state map generation complete.")
+        return self.results['steady_state_map']
+
+    def analyze_transient_response(self, step_change: Dict, duration: float = 300.0, dt: float = 0.1) -> Dict:
         """
-        Analyze transient thermal response to step changes.
-        
+        Analyze transient thermal response to a step change in operating conditions.
+
         Args:
-            rpm_step: Tuple of (initial_rpm, final_rpm)
-            torque_step: Tuple of (initial_torque, final_torque)
-            ambient_temp: Ambient temperature in °C
-            vehicle_speed: Vehicle speed in m/s
-            fuel_consumption: Optional function to calculate fuel consumption
-            duration: Simulation duration after step in seconds
-            
+            step_change: Dict defining the step, e.g.,
+                         {'initial': {'rpm': 3000, 'throttle': 0.2},
+                          'final': {'rpm': 10000, 'throttle': 0.8},
+                          'common': {'ambient_temp': 25, 'vehicle_speed': 15, 'coolant_flow': 50}}
+            duration: Simulation duration after the step (s).
+            dt: Simulation time step (s).
+
         Returns:
-            Dictionary with transient response data
+            Dictionary with transient response data (time, temps).
         """
-        # Reset simulation
-        self.simulation.reset()
-        
-        # Initial conditions - run to steady state
-        initial_rpm, final_rpm = rpm_step
-        initial_torque, final_torque = torque_step
-        
-        # Calculate fuel consumption
-        if fuel_consumption:
-            initial_fuel = fuel_consumption(initial_rpm, initial_torque)
-            final_fuel = fuel_consumption(final_rpm, final_torque)
-        else:
-            # Rough estimate
-            initial_power = self.engine_model.calculate_engine_power(initial_rpm, initial_torque) / 1000
-            final_power = self.engine_model.calculate_engine_power(final_rpm, final_torque) / 1000
-            initial_fuel = initial_power * 250 / 3600 if initial_power > 0 else 0.1
-            final_fuel = final_power * 250 / 3600 if final_power > 0 else 0.1
-        
-        # Run initial steady state
-        print("Running initial steady state...")
-        initial_state = self.simulation.run_steady_state(
-            initial_rpm, initial_torque, initial_fuel, ambient_temp, vehicle_speed
+        initial = step_change['initial']
+        final = step_change['final']
+        common = step_change['common']
+
+        logger.info(f"Analyzing transient response from {initial} to {final}...")
+
+        # 1. Run to initial steady state
+        init_steady = self.simulation.run_steady_state(
+            initial['rpm'], initial['throttle'], common['ambient_temp'],
+            common['vehicle_speed'], common['coolant_flow']
         )
-        
-        # Reset simulation but keep final temperatures
-        self.simulation.reset(initial_state)
-        
-        # Create time profile for step change
-        dt = 0.1  # 0.1 second time step
-        time = np.arange(0, duration + dt, dt)
-        n_steps = len(time)
-        
-        # Create step profiles
-        rpm_profile = np.full_like(time, final_rpm)
-        torque_profile = np.full_like(time, final_torque)
-        fuel_profile = np.full_like(time, final_fuel)
-        ambient_profile = np.full_like(time, ambient_temp)
-        speed_profile = np.full_like(time, vehicle_speed)
-        
-        # Run simulation
-        print("Running transient response...")
-        profile_data = {
-            'time': time,
-            'engine_rpm': rpm_profile,
-            'engine_torque': torque_profile,
-            'fuel_mass_flow': fuel_profile,
-            'ambient_temp': ambient_profile,
-            'vehicle_speed': speed_profile
-        }
-        
-        results = self.simulation.run_profile(profile_data, dt)
-        
-        # Calculate response characteristics
-        temp_engine = results['temp_engine']
-        temp_oil = results['temp_oil']
-        temp_coolant = results['temp_coolant']
-        
-        # Find 63% rise time (time constant)
-        engine_final = temp_engine[-1]
-        engine_initial = temp_engine[0]
-        engine_delta = engine_final - engine_initial
-        engine_target = engine_initial + 0.63 * engine_delta
-        
-        oil_final = temp_oil[-1]
-        oil_initial = temp_oil[0]
-        oil_delta = oil_final - oil_initial
-        oil_target = oil_initial + 0.63 * oil_delta
-        
-        coolant_final = temp_coolant[-1]
-        coolant_initial = temp_coolant[0]
-        coolant_delta = coolant_final - coolant_initial
-        coolant_target = coolant_initial + 0.63 * coolant_delta
-        
-        # Find closest points to 63% rise
-        engine_tc_idx = np.argmin(np.abs(temp_engine - engine_target))
-        oil_tc_idx = np.argmin(np.abs(temp_oil - oil_target))
-        coolant_tc_idx = np.argmin(np.abs(temp_coolant - coolant_target))
-        
-        engine_time_constant = time[engine_tc_idx]
-        oil_time_constant = time[oil_tc_idx]
-        coolant_time_constant = time[coolant_tc_idx]
-        
-        # Store results
-        response_data = {
-            'time': time,
-            'temp_engine': temp_engine,
-            'temp_oil': temp_oil,
-            'temp_coolant': temp_coolant,
-            'engine_initial': engine_initial,
-            'engine_final': engine_final,
-            'oil_initial': oil_initial,
-            'oil_final': oil_final,
-            'coolant_initial': coolant_initial,
-            'coolant_final': coolant_final,
-            'engine_time_constant': engine_time_constant,
-            'oil_time_constant': oil_time_constant,
-            'coolant_time_constant': coolant_time_constant
-        }
-        
-        # Store in instance for later analysis
-        step_key = f"{initial_rpm}-{final_rpm}_{initial_torque}-{final_torque}"
-        self.transient_responses[step_key] = response_data
-        
-        return response_data
-    
-    def analyze_cooling_system_sizing(self, reference_rpm: float, reference_torque: float,
-                                    ambient_range: List[float], 
-                                    radiator_sizes: List[float],
-                                    fuel_consumption=None) -> Dict:
+
+        # 2. Run profile simulation after the step change
+        self.simulation.reset(initial_temps=init_steady) # Start from steady state
+        profile_time = np.arange(0, duration + dt, dt)
+        profile_data = pd.DataFrame({
+            'time': profile_time,
+            'rpm': np.full_like(profile_time, final['rpm']),
+            'throttle': np.full_like(profile_time, final['throttle']),
+            'ambient_temp': np.full_like(profile_time, common['ambient_temp']),
+            'vehicle_speed': np.full_like(profile_time, common['vehicle_speed']),
+            'coolant_flow': np.full_like(profile_time, common['coolant_flow'])
+        })
+        transient_results_df = self.simulation.run_profile(profile_data, dt=dt)
+
+        step_key = f"rpm{initial['rpm']:.0f}t{initial['throttle']:.1f}_to_rpm{final['rpm']:.0f}t{final['throttle']:.1f}"
+        self.results[f'transient_{step_key}'] = transient_results_df
+        logger.info("Transient response simulation complete.")
+        return transient_results_df # Return the DataFrame
+
+    def analyze_cooling_system_sizing(self, op_point: Dict, radiator_sizes: List[float],
+                                    ambient_temps: List[float]) -> Dict:
         """
-        Analyze cooling system sizing requirements.
-        
+        Analyze required radiator sizing for a given operating point across ambient temps.
+
         Args:
-            reference_rpm: Reference engine RPM for analysis
-            reference_torque: Reference engine torque for analysis
-            ambient_range: List of ambient temperatures to analyze
-            radiator_sizes: List of radiator sizes (relative to baseline)
-            fuel_consumption: Optional function to calculate fuel consumption
-            
+            op_point: Dict defining the operating point {'rpm', 'throttle'}.
+            radiator_sizes: List of radiator core areas (m^2) to test.
+            ambient_temps: List of ambient temperatures (°C) to test.
+
         Returns:
-            Dictionary with cooling system sizing analysis
+            Dictionary with max temperatures for each size and ambient temp.
         """
-        # Initialize results
-        n_ambient = len(ambient_range)
-        n_sizes = len(radiator_sizes)
-        
-        max_coolant_temp = np.zeros((n_ambient, n_sizes))
-        cooling_margin = np.zeros((n_ambient, n_sizes))
-        
-        # Save original radiator size
-        original_size = self.cooling_system.config.radiator_area
-        
-        # Calculate fuel consumption
-        if fuel_consumption:
-            fuel_flow = fuel_consumption(reference_rpm, reference_torque)
-        else:
-            # Rough estimate
-            power_kw = self.engine_model.calculate_engine_power(reference_rpm, reference_torque) / 1000
-            fuel_flow = power_kw * 250 / 3600 if power_kw > 0 else 0.1
-        
-        vehicle_speed = 10.0  # m/s (consistent test condition)
-        
-        # Run analysis for each combination
-        for i, ambient in enumerate(ambient_range):
-            for j, size_factor in enumerate(radiator_sizes):
-                print(f"Analyzing ambient {ambient}°C, radiator size factor {size_factor}...")
-                
-                # Adjust radiator size
-                self.cooling_system.config.radiator_area = original_size * size_factor
-                
-                # Run steady state simulation
-                result = self.simulation.run_steady_state(
-                    reference_rpm, reference_torque, fuel_flow, ambient, vehicle_speed
+        if not ExternalCoolingSystem:
+             logger.error("ExternalCoolingSystem implementation not available for sizing analysis.")
+             return {}
+
+        original_radiator_area = self.cooling_system.radiator.core_area # Assuming access to radiator
+
+        results = {'ambient_temps': ambient_temps, 'radiator_sizes': radiator_sizes}
+        max_temps = np.zeros((len(ambient_temps), len(radiator_sizes)))
+
+        logger.info("Analyzing cooling system sizing...")
+        for j, size in enumerate(radiator_sizes):
+            # Modify the cooling system's radiator area for this test
+            self.cooling_system.radiator.core_area = size
+            logger.debug(f" Testing radiator size: {size:.3f} m^2")
+            for i, ambient in enumerate(ambient_temps):
+                steady_state = self.simulation.run_steady_state(
+                    op_point['rpm'], op_point['throttle'], ambient,
+                    vehicle_speed=15.0, coolant_flow_rate=50.0 # Use representative speed/flow
                 )
-                
-                # Store results
-                max_coolant_temp[i, j] = result['coolant']
-                cooling_margin[i, j] = self.cooling_system.config.max_engine_temp - result['engine']
-        
-        # Restore original radiator size
-        self.cooling_system.config.radiator_area = original_size
-        
-        # Store and return results
-        sizing_results = {
-            'ambient_temps': np.array(ambient_range),
-            'radiator_sizes': np.array(radiator_sizes),
-            'max_coolant_temp': max_coolant_temp,
-            'cooling_margin': cooling_margin,
-            'reference_rpm': reference_rpm,
-            'reference_torque': reference_torque
+                max_temps[i, j] = steady_state['engine'] # Store max engine temp
+
+        self.cooling_system.radiator.core_area = original_radiator_area # Restore original size
+        results['max_engine_temps'] = max_temps
+        self.results['sizing_analysis'] = results
+        logger.info("Cooling sizing analysis complete.")
+        return results
+
+    # --- Plotting Wrappers ---
+    def plot_steady_state_map(self, map_type: str = 'engine', save_path: Optional[str] = None):
+        """Plot the generated steady state map."""
+        if 'steady_state_map' not in self.results:
+             logger.error("Steady state map not generated yet.")
+             return
+
+        from ..utils.plotting import plot_cooling_system_map, save_plot # Local import
+
+        map_data = self.results['steady_state_map']
+        plot_data = {
+             'speeds': map_data['rpms'], # Use RPM for x-axis
+             'engine_loads': map_data['loads'], # Use Load for y-axis
+             'temperature_map': map_data[f'{map_type}_temps'],
+             'ambient_temperature': map_data['conditions']['ambient']
+             # Add limits if available in config
         }
-        
-        return sizing_results
-    
-    def plot_steady_state_map(self, temp_type: str = 'coolant', save_path: Optional[str] = None):
-        """
-        Plot steady state temperature map.
-        
-        Args:
-            temp_type: Type of temperature to plot ('engine', 'oil', or 'coolant')
-            save_path: Optional path to save the plot
-        """
-        if not self.steady_state_map:
-            raise ValueError("Steady state map not generated")
-        
-        # Get data
-        rpm = self.steady_state_map['rpm']
-        torque = self.steady_state_map['torque']
-        
-        if temp_type == 'engine':
-            temp_data = self.steady_state_map['temp_engine']
-            title = 'Engine Block Temperature (°C)'
-        elif temp_type == 'oil':
-            temp_data = self.steady_state_map['temp_oil']
-            title = 'Oil Temperature (°C)'
-        elif temp_type == 'coolant':
-            temp_data = self.steady_state_map['temp_coolant']
-            title = 'Coolant Temperature (°C)'
-        else:
-            raise ValueError("temp_type must be 'engine', 'oil', or 'coolant'")
-        
-        # Create meshgrid for contour plot
-        rpm_grid, torque_grid = np.meshgrid(rpm, torque)
-        
-        plt.figure(figsize=(10, 8))
-        
-        # Create contour plot
-        contour = plt.contourf(rpm_grid, torque_grid, temp_data.T, 20, cmap='hot')
-        plt.colorbar(contour, label='Temperature (°C)')
-        
-        # Add contour lines with labels
-        contour_lines = plt.contour(rpm_grid, torque_grid, temp_data.T, 10, colors='black', alpha=0.5)
-        plt.clabel(contour_lines, inline=True, fontsize=8)
-        
-        # Add labels and title
-        plt.xlabel('Engine Speed (RPM)')
-        plt.ylabel('Engine Torque (Nm)')
-        plt.title(f'Steady State {title}')
-        
-        # Add annotation with conditions
-        ambient = self.steady_state_map['ambient_temp']
-        speed = self.steady_state_map['vehicle_speed']
-        plt.annotate(f'Ambient: {ambient}°C, Vehicle Speed: {speed} m/s',
-                    xy=(0.05, 0.05), xycoords='axes fraction',
-                    bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8))
-        
-        plt.grid(True, alpha=0.3, linestyle='--')
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-        plt.show()
-    
-    def plot_transient_response(self, step_key: Optional[str] = None, save_path: Optional[str] = None):
-        """
-        Plot transient thermal response.
-        
-        Args:
-            step_key: Optional key for specific response to plot
-            save_path: Optional path to save the plot
-        """
-        if not self.transient_responses:
-            raise ValueError("No transient responses available")
-        
-        # Use the most recent response if no key provided
-        if step_key is None:
-            step_key = list(self.transient_responses.keys())[-1]
-        
-        if step_key not in self.transient_responses:
-            raise ValueError(f"Step key {step_key} not found in transient responses")
-        
-        # Get data
-        response = self.transient_responses[step_key]
-        time = response['time']
-        temp_engine = response['temp_engine']
-        temp_oil = response['temp_oil']
-        temp_coolant = response['temp_coolant']
-        
-        plt.figure(figsize=(10, 6))
-        
-        # Plot temperatures
-        plt.plot(time, temp_engine, 'r-', label='Engine Block')
-        plt.plot(time, temp_oil, 'g-', label='Oil')
-        plt.plot(time, temp_coolant, 'b-', label='Coolant')
-        
-        # Plot time constants
-        engine_tc = response['engine_time_constant']
-        oil_tc = response['oil_time_constant']
-        coolant_tc = response['coolant_time_constant']
-        
-        plt.axvline(x=engine_tc, color='r', linestyle='--', alpha=0.5,
-                   label=f'Engine τ = {engine_tc:.1f}s')
-        plt.axvline(x=oil_tc, color='g', linestyle='--', alpha=0.5,
-                   label=f'Oil τ = {oil_tc:.1f}s')
-        plt.axvline(x=coolant_tc, color='b', linestyle='--', alpha=0.5,
-                   label=f'Coolant τ = {coolant_tc:.1f}s')
-        
-        # Add labels and legend
-        plt.xlabel('Time (s)')
-        plt.ylabel('Temperature (°C)')
-        plt.title(f'Transient Thermal Response: {step_key}')
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-        plt.show()
-    
-    def plot_cooling_sizing(self, sizing_results: Dict, save_path: Optional[str] = None):
-        """
-        Plot cooling system sizing analysis.
-        
-        Args:
-            sizing_results: Results from analyze_cooling_system_sizing
-            save_path: Optional path to save the plot
-        """
-        ambient_temps = sizing_results['ambient_temps']
-        radiator_sizes = sizing_results['radiator_sizes']
-        max_coolant_temp = sizing_results['max_coolant_temp']
-        cooling_margin = sizing_results['cooling_margin']
-        
-        # Create figure with two subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        
-        # Create meshgrid
-        ambient_grid, size_grid = np.meshgrid(ambient_temps, radiator_sizes)
-        
-        # Plot max coolant temperature
-        contour1 = ax1.contourf(ambient_grid, size_grid, max_coolant_temp.T, 20, cmap='hot')
-        fig.colorbar(contour1, ax=ax1, label='Max Coolant Temp (°C)')
-        
-        # Add contour lines with labels
-        contour_lines1 = ax1.contour(ambient_grid, size_grid, max_coolant_temp.T, 
-                                    levels=[85, 90, 95, 100, 105, 110], colors='black', alpha=0.5)
-        ax1.clabel(contour_lines1, inline=True, fontsize=8)
-        
-        # Plot cooling margin
-        contour2 = ax2.contourf(ambient_grid, size_grid, cooling_margin.T, 20, cmap='viridis')
-        fig.colorbar(contour2, ax=ax2, label='Cooling Margin (°C)')
-        
-        # Add contour lines with labels
-        contour_lines2 = ax2.contour(ambient_grid, size_grid, cooling_margin.T, 
-                                   levels=[5, 10, 15, 20, 25], colors='black', alpha=0.5)
-        ax2.clabel(contour_lines2, inline=True, fontsize=8)
-        
-        # Add red line for minimum acceptable margin (10°C)
-        safe_level = np.ones_like(ambient_temps) * 10
-        ax2.plot(ambient_temps, safe_level, 'r--', linewidth=2, label='Min Safe Margin')
-        
-        # Add labels
-        ax1.set_xlabel('Ambient Temperature (°C)')
-        ax1.set_ylabel('Radiator Size Factor')
-        ax1.set_title('Maximum Coolant Temperature')
-        
-        ax2.set_xlabel('Ambient Temperature (°C)')
-        ax2.set_ylabel('Radiator Size Factor')
-        ax2.set_title('Engine Cooling Margin')
-        ax2.legend()
-        
-        # Add overall title
-        rpm = sizing_results['reference_rpm']
-        torque = sizing_results['reference_torque']
-        plt.suptitle(f'Cooling System Sizing Analysis: {rpm} RPM, {torque} Nm', fontsize=14)
-        
-        plt.tight_layout(rect=[0, 0, 1, 0.96])  # Make room for title
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-        plt.show()
+
+        fig = plot_cooling_system_map(plot_data, title=f'Steady State {map_type.title()} Temperature Map')
+        if save_path and fig: save_plot(fig, save_path)
+        elif fig: plt.show()
+        if fig: plt.close(fig)
 
 
-# Example usage
-if __name__ == "__main__":
-    import os
-    import sys
-    sys.path.append('..')  # Add parent directory to path
-    
-    try:
-        from engine.motorcycle_engine import MotorcycleEngine
-        
-        # Create engine
-        config_path = os.path.join("configs", "engine", "cbr600f4i.yaml")
-        engine = MotorcycleEngine(config_path=config_path)
-        
-        # Create thermal configuration
-        thermal_config = ThermalConfig()
-        
-        # Create cooling system
-        cooling_system = CoolingSystem(thermal_config)
-        
-        # Create engine heat model
-        heat_model = EngineHeatModel(thermal_config, engine)
-        
-        # Create thermal simulation
-        simulation = ThermalSimulation(heat_model, cooling_system)
-        
-        print("Running thermal simulation...")
-        
-        # Create a simple test profile
-        # Start with idle, then high load, then cool down
-        total_time = 600  # 10 minutes
-        time = np.arange(0, total_time, 1)  # 1 second steps
-        
-        # Create profile segments
-        idle_time = 60
-        high_load_time = 300
-        cool_down_time = total_time - idle_time - high_load_time
-        
-        # RPM profile: idle -> high RPM -> idle
-        rpm_profile = np.zeros_like(time)
-        rpm_profile[:idle_time] = engine.idle_rpm
-        rpm_profile[idle_time:idle_time+high_load_time] = 10000
-        rpm_profile[idle_time+high_load_time:] = engine.idle_rpm
-        
-        # Torque profile
-        torque_profile = np.zeros_like(time)
-        torque_profile[:idle_time] = 5  # Low torque at idle
-        torque_profile[idle_time:idle_time+high_load_time] = 60  # High torque
-        torque_profile[idle_time+high_load_time:] = 5  # Back to idle
-        
-        # Simple fuel consumption estimate
-        fuel_profile = np.zeros_like(time)
-        for i, (rpm, torque) in enumerate(zip(rpm_profile, torque_profile)):
-            power_kw = heat_model.calculate_engine_power(rpm, torque) / 1000
-            fuel_profile[i] = max(0.1, power_kw * 250 / 3600)  # Rough BSFC-based estimate
-        
-        # Ambient conditions
-        ambient_temp = np.full_like(time, 25.0)  # Constant ambient temperature
-        vehicle_speed = np.zeros_like(time)
-        vehicle_speed[:idle_time] = 0  # Stationary
-        vehicle_speed[idle_time:idle_time+high_load_time] = 15  # Moving at 15 m/s (~54 km/h)
-        vehicle_speed[idle_time+high_load_time:] = 0  # Stationary again
-        
-        # Create profile data
-        profile_data = {
-            'time': time,
-            'engine_rpm': rpm_profile,
-            'engine_torque': torque_profile,
-            'fuel_mass_flow': fuel_profile,
-            'ambient_temp': ambient_temp,
-            'vehicle_speed': vehicle_speed
-        }
-        
-        # Run simulation
-        results = simulation.run_profile(profile_data)
-        
-        # Plot results
-        simulation.plot_temperature_profile()
-        simulation.plot_heat_flow()
-        simulation.plot_cooling_system()
-        
-        # Analyze cooling performance
-        cooling_performance = CoolingPerformance(heat_model, cooling_system)
-        
-        # Run a transient response analysis (simplified for example)
-        response = cooling_performance.analyze_transient_response(
-            rpm_step=(engine.idle_rpm, 10000),
-            torque_step=(5, 60),
-            ambient_temp=25.0,
-            vehicle_speed=15.0,
-            duration=300
-        )
-        
-        # Plot transient response
-        cooling_performance.plot_transient_response()
-        
-        print("Thermal simulation completed.")
-        
-    except ImportError:
-        print("MotorcycleEngine class not available, running with simplified models")
-        
-        # Create configuration
-        thermal_config = ThermalConfig()
-        
-        # Print configuration
-        print("Thermal Configuration:")
-        for key, value in thermal_config.to_dict().items():
-            print(f"  {key}: {value}")
-        
-        # Create cooling system and engine heat model
-        cooling_system = CoolingSystem(thermal_config)
-        heat_model = EngineHeatModel(thermal_config)
-        
-        # Run a simple test
-        engine_rpm = 6000
-        engine_torque = 40
-        fuel_flow = 1.2  # g/s
-        ambient_temp = 25
-        vehicle_speed = 10
-        
-        # Calculate heat rejection
-        heat_rejection = cooling_system.calculate_heat_rejection(
-            coolant_temp=90, ambient_temp=ambient_temp, vehicle_speed=vehicle_speed
-        )
-        
-        print(f"\nAt {vehicle_speed} m/s, radiator can reject {heat_rejection/1000:.2f} kW of heat")
-        
-        # Calculate heat generation
-        engine_power = heat_model.calculate_engine_power(engine_rpm, engine_torque)
-        fuel_power = heat_model.calculate_fuel_power(fuel_flow)
-        
-        heat_sources = heat_model.calculate_heat_sources(
-            fuel_power, engine_power, engine_rpm, 0.7
-        )
-        
-        print("\nHeat Generation at 6000 RPM, 40 Nm:")
-        print(f"  Engine Power: {engine_power/1000:.2f} kW")
-        print(f"  Fuel Power: {fuel_power/1000:.2f} kW")
-        print(f"  Total Waste Heat: {heat_sources['total']/1000:.2f} kW")
-        print(f"  Heat to Coolant: {heat_sources['coolant']/1000:.2f} kW")
-        print(f"  Heat to Oil: {heat_sources['oil']/1000:.2f} kW")
+    def plot_transient_response(self, step_key: str, save_path: Optional[str] = None):
+        """Plot a specific transient response."""
+        result_key = f'transient_{step_key}'
+        if result_key not in self.results:
+            logger.error(f"Transient response '{step_key}' not found.")
+            return
+
+        from ..utils.plotting import plot_thermal_performance, save_plot # Local import
+
+        transient_df = self.results[result_key]
+        # Convert DataFrame back to dict format expected by plot_thermal_performance
+        plot_data = transient_df.to_dict(orient='list')
+
+        fig = plot_thermal_performance(plot_data, title=f'Transient Response: {step_key}')
+        if save_path and fig: save_plot(fig, save_path)
+        elif fig: plt.show()
+        if fig: plt.close(fig)
+
+    def plot_cooling_sizing(self, save_path: Optional[str] = None):
+        """Plot the results of the cooling system sizing analysis."""
+        if 'sizing_analysis' not in self.results:
+            logger.error("Sizing analysis not performed yet.")
+            return
+
+        from ..utils.plotting import save_plot # Local import
+
+        sizing_data = self.results['sizing_analysis']
+        ambient_temps = sizing_data['ambient_temps']
+        radiator_sizes = sizing_data['radiator_sizes']
+        max_engine_temps = sizing_data['max_engine_temps']
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+        X, Y = np.meshgrid(ambient_temps, radiator_sizes)
+        contour = ax.contourf(X, Y, max_engine_temps.T, levels=15, cmap=THERMAL_CMAP)
+        cbar = plt.colorbar(contour)
+        cbar.set_label('Max Engine Temperature (°C)')
+
+        # Add contour lines
+        contour_lines = ax.contour(X, Y, max_engine_temps.T, levels=[105, 115, 125], colors='black', linestyles=['--', '-', ':'])
+        ax.clabel(contour_lines, inline=True, fontsize=8, fmt='%.0f C')
+
+        _apply_common_ax_settings(ax, xlabel='Ambient Temperature (°C)', ylabel='Radiator Core Area (m^2)', title='Cooling System Sizing Analysis')
+
+        plt.tight_layout()
+        if save_path: save_plot(fig, save_path)
+        plt.show()
+        plt.close(fig)

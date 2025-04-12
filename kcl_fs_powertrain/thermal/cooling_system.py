@@ -1,13 +1,8 @@
 """
-Cooling system module for Formula Student powertrain simulation.
+Core cooling system components module for Formula Student simulation.
 
-This module provides detailed models of cooling system components for Formula Student
-car applications, including radiators, water pumps, cooling fans, and thermostats.
-It calculates heat rejection capacity, coolant flow, and temperature distribution
-throughout the cooling system under various operating conditions.
-
-The module is designed to work with the engine thermal model to provide comprehensive
-thermal management simulation for the Honda CBR600F4i engine adapted for Formula Student.
+Models radiators, water pumps, cooling fans, and thermostats, integrated
+into a complete cooling system model.
 """
 
 import os
@@ -17,1333 +12,1133 @@ import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional, Union, Callable
 import logging
 from enum import Enum, auto
+import yaml
+from scipy.interpolate import interp1d
+
+# Constants (ideally import from utils, define fallback here)
+try:
+    from ..utils.constants import AIR_DENSITY_SEA_LEVEL, AIR_SPECIFIC_HEAT_CP, WATER_DENSITY, WATER_SPECIFIC_HEAT
+except ImportError:
+    AIR_DENSITY_SEA_LEVEL = 1.225
+    AIR_SPECIFIC_HEAT_CP = 1005.0
+    WATER_DENSITY = 1000.0
+    WATER_SPECIFIC_HEAT = 4186.0
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
-logger = logging.getLogger("Cooling_System")
+logger = logging.getLogger("CoolingSystemComponents")
 
 
 class RadiatorType(Enum):
-    """Enumeration of different radiator types used in Formula Student cars."""
-    SINGLE_CORE_ALUMINUM = auto()  # Standard aluminum single-core radiator
-    DOUBLE_CORE_ALUMINUM = auto()  # High-performance dual-core aluminum radiator
-    SINGLE_CORE_COPPER = auto()    # Copper-based single-core radiator
-    CUSTOM = auto()                # Custom specification radiator
-
+    """Radiator core construction types."""
+    SINGLE_CORE_ALUMINUM = auto()
+    DOUBLE_CORE_ALUMINUM = auto()
+    SINGLE_CORE_COPPER = auto()
+    CUSTOM = auto()
 
 class PumpType(Enum):
-    """Enumeration of different water pump types."""
-    MECHANICAL = auto()  # Engine-driven mechanical water pump
-    ELECTRIC = auto()    # Electric water pump with variable flow control
-    CUSTOM = auto()      # Custom specification pump
-
+    """Water pump drive types."""
+    MECHANICAL = auto() # Engine driven
+    ELECTRIC = auto()   # Electrically driven
+    CUSTOM = auto()
 
 class FanType(Enum):
-    """Enumeration of different cooling fan types."""
-    SINGLE_SPEED = auto()    # Basic single-speed cooling fan
-    VARIABLE_SPEED = auto()  # Variable speed cooling fan with PWM control
-    DUAL_FAN = auto()        # Dual fan configuration for enhanced airflow
-    CUSTOM = auto()          # Custom specification fan arrangement
-
+    """Cooling fan types."""
+    SINGLE_SPEED = auto()
+    VARIABLE_SPEED = auto()
+    DUAL_FAN = auto()
+    CUSTOM = auto()
 
 class Radiator:
-    """
-    Radiator model for Formula Student cooling system.
-    
-    This class models the radiator's thermal behavior, including heat transfer
-    characteristics and airflow effects. It calculates heat rejection capacity
-    based on coolant flow, air flow, and temperature differentials.
-    """
-    
-    def __init__(self, 
+    """Models a heat exchanger (radiator)."""
+    def __init__(self,
                  radiator_type: RadiatorType = RadiatorType.SINGLE_CORE_ALUMINUM,
                  core_area: float = 0.15,        # m²
                  core_thickness: float = 0.045,  # m
-                 fin_density: float = 14,        # fins/inch
+                 fin_density: float = 16,        # fins/inch
                  tube_rows: int = 2,
-                 max_pressure: float = 1.5,      # bar
+                 max_pressure: float = 1.5,      # bar (gauge)
+                 coolant_volume: float = 0.5,    # Liters (volume within radiator)
+                 config_path: Optional[str] = None,
                  custom_params: Optional[Dict] = None):
         """
-        Initialize the radiator model with specific parameters.
-        
+        Initialize the radiator model.
+
         Args:
-            radiator_type: Type of radiator construction
-            core_area: Radiator core area in m²
-            core_thickness: Radiator core thickness in m
-            fin_density: Number of cooling fins per inch
-            tube_rows: Number of tube rows in the core
-            max_pressure: Maximum system pressure in bar
-            custom_params: Optional dictionary with custom parameters
+            radiator_type: Type of radiator construction.
+            core_area: Radiator core frontal area (m²).
+            core_thickness: Radiator core depth (m).
+            fin_density: Cooling fins per inch.
+            tube_rows: Number of coolant tube rows.
+            max_pressure: Maximum operating pressure (bar gauge).
+            coolant_volume: Internal coolant volume (L).
+            config_path: Optional path to YAML config file.
+            custom_params: Optional dictionary for CUSTOM type or overrides.
         """
         self.radiator_type = radiator_type
         self.core_area = core_area
         self.core_thickness = core_thickness
         self.fin_density = fin_density
         self.tube_rows = tube_rows
-        self.max_pressure = max_pressure
-        
-        # Initialize derived properties
-        self.total_volume = core_area * core_thickness  # m³
-        self.air_side_surface_area = self._calculate_surface_area()  # m²
-        
-        # Default thermal properties based on radiator type
-        if radiator_type == RadiatorType.SINGLE_CORE_ALUMINUM:
-            self.base_effectiveness = 0.68
-            self.thermal_conductivity = 205  # W/(m·K) for aluminum
-            self.weight = core_area * 5.0  # kg, estimated based on size
-        elif radiator_type == RadiatorType.DOUBLE_CORE_ALUMINUM:
-            self.base_effectiveness = 0.75
-            self.thermal_conductivity = 205  # W/(m·K) for aluminum
-            self.weight = core_area * 7.5  # kg, estimated based on size
-        elif radiator_type == RadiatorType.SINGLE_CORE_COPPER:
-            self.base_effectiveness = 0.72
-            self.thermal_conductivity = 385  # W/(m·K) for copper
-            self.weight = core_area * 8.5  # kg, estimated based on size
-        elif radiator_type == RadiatorType.CUSTOM:
-            # Use custom parameters if provided
-            if custom_params:
-                self.base_effectiveness = custom_params.get('effectiveness', 0.70)
-                self.thermal_conductivity = custom_params.get('thermal_conductivity', 205)
-                self.weight = custom_params.get('weight', core_area * 6.0)
-            else:
-                # Default values for custom type
-                self.base_effectiveness = 0.70
-                self.thermal_conductivity = 205
-                self.weight = core_area * 6.0
-        
-        # Current state parameters
-        self.current_effectiveness = self.base_effectiveness
-        
-        logger.info(f"Radiator initialized: {radiator_type.name}, {core_area:.2f}m² core area")
-    
+        self.max_pressure_bar = max_pressure
+        self.coolant_volume_L = coolant_volume
+
+        # Load from config if path provided
+        if config_path and os.path.exists(config_path):
+             self._load_config(config_path)
+
+        # Apply custom params or set defaults based on type
+        params = custom_params or {}
+        self._apply_type_defaults_and_custom(params)
+
+        # Derived properties
+        self.total_core_volume_m3 = self.core_area * self.core_thickness
+        self.air_side_surface_area_m2 = self._calculate_surface_area()
+
+        # State variables
+        self.current_effectiveness: float = self.base_effectiveness # Initial assumption
+
+        logger.info(f"Radiator initialized: Type={self.radiator_type.name}, Area={self.core_area:.3f}m², Thick={self.core_thickness*1000:.0f}mm, Weight={self.weight_kg:.2f}kg")
+
+    def _load_config(self, config_path: str):
+         """Load parameters from YAML config file."""
+         try:
+             with open(config_path, 'r') as f:
+                 config = yaml.safe_load(f)
+             rad_config = config.get('radiator', {})
+             # Update attributes if present in config
+             self.radiator_type = RadiatorType[rad_config.get('type', self.radiator_type.name).upper()]
+             self.core_area = float(rad_config.get('core_area', self.core_area))
+             self.core_thickness = float(rad_config.get('core_thickness', self.core_thickness))
+             self.fin_density = float(rad_config.get('fin_density', self.fin_density))
+             self.tube_rows = int(rad_config.get('tube_rows', self.tube_rows))
+             self.max_pressure_bar = float(rad_config.get('max_pressure', self.max_pressure_bar))
+             self.coolant_volume_L = float(rad_config.get('coolant_volume', self.coolant_volume_L))
+             # Allow custom params in config to override defaults
+             self._apply_type_defaults_and_custom(rad_config)
+             logger.info(f"Radiator config loaded from {config_path}")
+         except Exception as e:
+             logger.error(f"Error loading radiator config from {config_path}: {e}. Using existing values.")
+
+
+    def _apply_type_defaults_and_custom(self, params: Dict):
+        """Set default properties based on type, overridden by params."""
+        defaults = {}
+        if self.radiator_type == RadiatorType.SINGLE_CORE_ALUMINUM:
+            defaults = {'base_effectiveness': 0.68, 'thermal_conductivity': 205, 'weight_factor': 30.0} # kg/m^2 estimate
+        elif self.radiator_type == RadiatorType.DOUBLE_CORE_ALUMINUM:
+            defaults = {'base_effectiveness': 0.75, 'thermal_conductivity': 205, 'weight_factor': 45.0}
+        elif self.radiator_type == RadiatorType.SINGLE_CORE_COPPER:
+            defaults = {'base_effectiveness': 0.72, 'thermal_conductivity': 385, 'weight_factor': 55.0}
+        elif self.radiator_type == RadiatorType.CUSTOM:
+            defaults = {'base_effectiveness': 0.70, 'thermal_conductivity': 205, 'weight_factor': 35.0} # Generic custom
+
+        self.base_effectiveness = float(params.get('base_effectiveness', defaults.get('base_effectiveness', 0.7)))
+        self.thermal_conductivity_W_mK = float(params.get('thermal_conductivity', defaults.get('thermal_conductivity', 205)))
+        weight_factor = float(params.get('weight_factor', defaults.get('weight_factor', 35.0)))
+        self.weight_kg = float(params.get('weight_kg', self.core_area * weight_factor)) # Estimate weight if not given
+
     def _calculate_surface_area(self) -> float:
-        """
-        Calculate the air side surface area of the radiator.
-        
-        Returns:
-            Surface area in m²
-        """
-        # Convert fin density from fins/inch to fins/m
+        """Estimate the air-side heat transfer surface area."""
+        # Simplified model - more accurate would need detailed fin/tube geometry
         fins_per_meter = self.fin_density * 39.37
-        
-        # Estimate fin area based on core dimensions and fin density
-        # This is a simplified model that can be refined with specific radiator data
-        fin_thickness = 0.0001  # m, typical fin thickness
-        fin_height = self.core_thickness * 0.8  # m, estimate
-        fin_count = self.core_area * fins_per_meter
-        
-        # Area contribution from fins
-        fin_area = fin_count * 2 * fin_height * (self.core_area / fin_count)**0.5
-        
-        # Area contribution from tubes
-        tube_area = self.core_area * self.tube_rows * 1.2  # Factor for tube surface exposure
-        
-        # Total air-side surface area
+        # Approx fin height assuming some space for tubes
+        fin_height = self.core_thickness * 0.8 / self.tube_rows if self.tube_rows > 0 else self.core_thickness * 0.8
+        # Approx number of channels based on area width (assume square root for width)
+        approx_width = np.sqrt(self.core_area)
+        num_channels = approx_width * fins_per_meter # Channels between fins
+
+        # Area = 2 * height * length * num_channels (for both sides of fins)
+        # Assume fin length is related to core area / width
+        fin_area = 2 * fin_height * approx_width * num_channels
+
+        # Add tube surface area (rough estimate)
+        tube_area = self.core_area * self.tube_rows * 1.5 # Factor for tube surface exposure
+
         return fin_area + tube_area
-    
-    def calculate_heat_rejection(self, coolant_temp: float, ambient_temp: float, 
-                           coolant_flow_rate: float, air_flow_rate: float) -> float:
-        """
-        Calculate heat rejection rate from the radiator.
-        
-        Args:
-            coolant_temp: Coolant temperature in °C
-            ambient_temp: Ambient temperature in °C
-            coolant_flow_rate: Coolant flow rate through radiator in L/min
-            air_flow_rate: Air flow rate through radiator in m³/s
-            
-        Returns:
-            Heat rejection rate in watts (W)
-        """
-        # Update effectiveness based on flow rates
-        self._update_effectiveness(coolant_flow_rate, air_flow_rate)
-        
-        # Air properties
-        air_density = 1.2  # kg/m³
-        air_specific_heat = 1005.0  # J/kg·K
-        
-        # Coolant properties
-        coolant_density = 1050.0  # kg/m³
-        coolant_specific_heat = 3900.0  # J/kg·K
-        
-        # Convert coolant flow rate from L/min to kg/s
-        coolant_mass_flow = coolant_flow_rate * coolant_density / 60000
-        
-        # Air mass flow rate
-        air_mass_flow = air_density * air_flow_rate
-        
+
+    def _calculate_effectiveness(self, coolant_flow_kg_s: float, air_flow_kg_s: float) -> float:
+        """Calculate dynamic effectiveness based on flow rates using NTU method."""
+        # Heat capacities
+        Cp_coolant = WATER_SPECIFIC_HEAT # Assume water-like coolant
+        Cp_air = AIR_SPECIFIC_HEAT_CP
+
+        C_coolant = coolant_flow_kg_s * Cp_coolant
+        C_air = air_flow_kg_s * Cp_air
+
+        if min(C_coolant, C_air) < 1e-3: return 0.0 # Avoid division by zero if no flow
+
+        C_min = min(C_coolant, C_air)
+        C_max = max(C_coolant, C_air)
+        C_ratio = C_min / C_max
+
+        # Overall heat transfer coefficient * Area (UA) - This is the tricky part to estimate
+        # Let's link UA to the base_effectiveness and a reference condition
+        # Assume reference condition C_min_ref leads to base_effectiveness
+        # Ref flows: coolant 50 L/min (~0.8 kg/s), air 15 m/s through 0.15 m^2 (~2.7 kg/s) -> C_air is C_min
+        C_min_ref = 2.7 * Cp_air # Reference C_min
+        NTU_ref = -np.log(1 - self.base_effectiveness) # Assuming C_ratio ~ 0 (simplification) for ref NTU
+        UA_ref = NTU_ref * C_min_ref
+
+        # Scale UA based on current flow conditions (e.g., using correlations like Dittus-Boelter)
+        # Simplified scaling: UA scales roughly with flow^0.8
+        # Assume UA scales primarily with the limiting fluid (C_min)
+        flow_ratio = C_min / C_min_ref if C_min_ref > 0 else 1.0
+        UA = UA_ref * (flow_ratio ** 0.6) # Simplified scaling exponent
+
+        # Calculate current NTU
+        NTU = UA / C_min
+
+        # Effectiveness for cross-flow (unmixed-unmixed is common for radiators)
+        # More complex formula, simplified as epsilon = 1 - exp(-NTU) for C_ratio ~ 0
+        # Or use a generic correlation:
+        epsilon = 1 - np.exp(-NTU * (1 + C_ratio**0.22) / (C_ratio**0.22)) # Approximate correlation
+
+        # Use simpler formula if C_ratio is very small
+        if C_ratio < 0.1:
+             epsilon = 1 - np.exp(-NTU)
+
+        effectiveness = np.clip(epsilon, 0.0, 0.95) # Cap effectiveness
+        self.current_effectiveness = effectiveness # Store current value
+        return effectiveness
+
+    def calculate_heat_rejection(self, coolant_temp_C: float, ambient_temp_C: float,
+                           coolant_flow_lpm: float, air_flow_m3_s: float) -> float:
+        """Calculate heat rejection rate (W) using NTU method."""
+        # Convert flows to kg/s
+        coolant_density_kg_L = WATER_DENSITY / 1000.0 # Approx.
+        coolant_flow_kg_s = coolant_flow_lpm * coolant_density_kg_L / 60.0
+        air_density_kg_m3 = AIR_DENSITY_SEA_LEVEL # Use standard density
+        air_flow_kg_s = air_flow_m3_s * air_density_kg_m3
+
+        # Calculate dynamic effectiveness
+        effectiveness = self._calculate_effectiveness(coolant_flow_kg_s, air_flow_kg_s)
+
+        # Calculate Cmin
+        C_coolant = coolant_flow_kg_s * WATER_SPECIFIC_HEAT
+        C_air = air_flow_kg_s * AIR_SPECIFIC_HEAT_CP
+        C_min = min(C_coolant, C_air) if min(C_coolant, C_air) > 1e-3 else 0.0
+
         # Temperature difference
-        temp_diff = max(0, coolant_temp - ambient_temp)
-        
-        # Calculate NTU-effectiveness based heat transfer
-        # Use the minimum of the two capacity rates
-        c_air = air_mass_flow * air_specific_heat
-        c_coolant = coolant_mass_flow * coolant_specific_heat
-        c_min = min(c_air, c_coolant)
-        
-        # Heat rejection (W)
-        heat_rejection = c_min * self.current_effectiveness * temp_diff
-        
-        return heat_rejection
-    
-    def _update_effectiveness(self, coolant_flow_rate: float, air_flow_rate: float):
-        """
-        Update radiator effectiveness based on flow rates.
-        
-        Args:
-            coolant_flow_rate: Coolant flow rate in L/min
-            air_flow_rate: Air flow rate in m³/s
-        """
-        # Flow rate effects on effectiveness
-        if coolant_flow_rate < 10:  # Low coolant flow
-            coolant_factor = 0.8 + 0.2 * (coolant_flow_rate / 10)
-        else:  # Normal to high coolant flow
-            coolant_factor = 1.0 + 0.05 * min(1.0, (coolant_flow_rate - 10) / 20)
-        
-        # Air flow effects
-        if air_flow_rate < 0.3:  # Low air flow
-            air_factor = 0.7 + 0.3 * (air_flow_rate / 0.3)
-        else:  # Normal to high air flow
-            air_factor = 1.0 + 0.1 * min(1.0, (air_flow_rate - 0.3) / 0.5)
-        
-        # Update effectiveness
-        self.current_effectiveness = self.base_effectiveness * coolant_factor * air_factor
-    
-    def calculate_pressure_drop(self, coolant_flow_rate: float) -> float:
-        """
-        Calculate pressure drop across the radiator at given flow rate.
-        
-        Args:
-            coolant_flow_rate: Coolant flow rate in L/min
-            
-        Returns:
-            Pressure drop in bar
-        """
-        # Simplified quadratic model for pressure drop
-        # Coefficients can be tuned based on specific radiator data
-        base_flow = 15  # L/min, reference flow rate
-        base_drop = 0.2  # bar, pressure drop at reference flow
-        
-        # Scale quadratically with flow rate
-        factor = (coolant_flow_rate / base_flow)**2
-        pressure_drop = base_drop * factor
-        
+        delta_T = coolant_temp_C - ambient_temp_C
+
+        # Heat rejection Q = epsilon * Cmin * deltaT
+        heat_rejection_W = effectiveness * C_min * delta_T
+        return max(0.0, heat_rejection_W) # Heat rejection cannot be negative
+
+    def calculate_pressure_drop_coolant_bar(self, coolant_flow_lpm: float) -> float:
+        """Estimate coolant pressure drop (bar) based on flow rate."""
+        # Simplified quadratic model: DeltaP = k * flow^2
+        # Need a reference point (e.g., 0.1 bar drop at 50 L/min)
+        ref_flow = 50.0 # L/min
+        ref_drop = 0.10 # bar
+        k = ref_drop / (ref_flow**2) if ref_flow > 0 else 0
+        pressure_drop = k * coolant_flow_lpm**2
         return pressure_drop
-    
-    def calculate_coolant_exit_temp(self, inlet_temp: float, heat_rejection: float, 
-                                  coolant_flow_rate: float) -> float:
-        """
-        Calculate coolant exit temperature after passing through radiator.
-        
-        Args:
-            inlet_temp: Coolant inlet temperature in °C
-            heat_rejection: Heat rejected by radiator in watts
-            coolant_flow_rate: Coolant flow rate in L/min
-            
-        Returns:
-            Coolant exit temperature in °C
-        """
-        # Calculate coolant properties
-        coolant_density = 1000  # kg/m³
-        coolant_specific_heat = 3900  # J/(kg·K)
-        
-        # Convert flow rate to kg/s
-        mass_flow = coolant_flow_rate * (coolant_density / 60000)
-        
-        # Calculate temperature change (Q = m * c * ΔT)
-        if mass_flow > 0:
-            delta_t = heat_rejection / (mass_flow * coolant_specific_heat)
-        else:
-            delta_t = 0
-        
-        # Calculate exit temperature
-        exit_temp = inlet_temp - delta_t
-        
-        return exit_temp
-    
+
+    def calculate_pressure_drop_air_pa(self, air_flow_m3_s: float) -> float:
+        """Estimate air-side pressure drop (Pa) based on flow rate."""
+        # Simplified quadratic model: DeltaP = k * flow^2
+        # Estimate k based on typical FS radiator data (e.g., 100 Pa drop at 0.5 m^3/s)
+        ref_flow = 0.5 # m^3/s
+        ref_drop = 100.0 # Pa
+        k = ref_drop / (ref_flow**2) if ref_flow > 0 else 0
+        pressure_drop = k * air_flow_m3_s**2
+        return pressure_drop
+
+    def calculate_coolant_exit_temp(self, inlet_temp_C: float, heat_rejection_W: float,
+                                  coolant_flow_lpm: float) -> float:
+        """Calculate coolant exit temperature (°C)."""
+        coolant_density_kg_L = WATER_DENSITY / 1000.0
+        mass_flow_kg_s = coolant_flow_lpm * coolant_density_kg_L / 60.0
+
+        if mass_flow_kg_s <= 1e-6: # No flow, no temperature change
+             return inlet_temp_C
+
+        # Q = m_dot * Cp * delta_T => delta_T = Q / (m_dot * Cp)
+        delta_T = heat_rejection_W / (mass_flow_kg_s * WATER_SPECIFIC_HEAT)
+        exit_temp_C = inlet_temp_C - delta_T
+        return exit_temp_C # Can potentially be lower than ambient if heat rejection is very high
+
     def get_radiator_specs(self) -> Dict:
-        """
-        Get specifications of the radiator.
-        
-        Returns:
-            Dictionary with radiator specifications
-        """
+        """Return radiator specifications as a dictionary."""
         return {
             'type': self.radiator_type.name,
-            'core_area': self.core_area,
-            'core_thickness': self.core_thickness,
-            'fin_density': self.fin_density,
+            'core_area_m2': self.core_area,
+            'core_thickness_m': self.core_thickness,
+            'fin_density_fpi': self.fin_density,
             'tube_rows': self.tube_rows,
-            'max_pressure': self.max_pressure,
+            'max_pressure_bar': self.max_pressure_bar,
+            'coolant_volume_L': self.coolant_volume_L,
             'base_effectiveness': self.base_effectiveness,
-            'thermal_conductivity': self.thermal_conductivity,
-            'weight': self.weight,
-            'air_side_surface_area': self.air_side_surface_area
+            'thermal_conductivity_W_mK': self.thermal_conductivity_W_mK,
+            'weight_kg': self.weight_kg,
+            'air_side_surface_area_m2': self.air_side_surface_area_m2
         }
 
 
 class WaterPump:
-    """
-    Water pump model for Formula Student cooling system.
-    
-    This class models the water pump's flow characteristics based on pump type,
-    including pressure-flow relationships and power consumption. It can represent
-    either mechanical (engine-driven) or electric water pumps.
-    """
-    
-    def __init__(self, 
-                 pump_type: PumpType = PumpType.MECHANICAL,
-                 max_flow_rate: float = 80.0,     # L/min
-                 max_pressure: float = 1.8,       # bar
-                 nominal_speed: float = 3600.0,   # RPM
-                 mechanical_efficiency: float = 0.65,
+    """Models a coolant water pump."""
+    def __init__(self,
+                 pump_type: PumpType = PumpType.ELECTRIC,
+                 max_flow_rate_lpm: float = 80.0,
+                 max_pressure_bar: float = 0.5, # Typical head for automotive pumps
+                 nominal_speed_rpm: float = 6000.0, # For electric pumps
+                 mechanical_efficiency: float = 0.60,
+                 config_path: Optional[str] = None,
                  custom_params: Optional[Dict] = None):
         """
         Initialize water pump model.
-        
+
         Args:
-            pump_type: Type of water pump
-            max_flow_rate: Maximum flow rate in L/min
-            max_pressure: Maximum pressure in bar
-            nominal_speed: Nominal pump speed in RPM
-            mechanical_efficiency: Pump mechanical efficiency (0-1)
-            custom_params: Optional dictionary with custom parameters
+            pump_type: Type of water pump.
+            max_flow_rate_lpm: Max flow rate (L/min) at zero pressure head.
+            max_pressure_bar: Max pressure head (bar gauge) at zero flow.
+            nominal_speed_rpm: Speed for nominal performance (electric).
+            mechanical_efficiency: Pump shaft-to-hydraulic efficiency (0-1).
+            config_path: Optional path to YAML config file.
+            custom_params: Optional dictionary for CUSTOM type or overrides.
         """
         self.pump_type = pump_type
-        self.max_flow_rate = max_flow_rate
-        self.max_pressure = max_pressure
-        self.nominal_speed = nominal_speed
+        self.max_flow_rate_lpm = max_flow_rate_lpm
+        self.max_pressure_bar = max_pressure_bar
+        self.nominal_speed_rpm = nominal_speed_rpm
         self.mechanical_efficiency = mechanical_efficiency
-        
-        # Set pump-specific parameters based on type
-        if pump_type == PumpType.MECHANICAL:
-            self.speed_ratio = 1.0  # Speed ratio relative to engine speed
-            self.power_consumption_max = 500.0  # W
-            self.weight = 0.8  # kg
-        elif pump_type == PumpType.ELECTRIC:
-            self.speed_ratio = 0.0  # Not tied to engine speed
-            self.power_consumption_max = 150.0  # W
-            self.weight = 0.5  # kg
-            self.voltage = 12.0  # V
-            self.current_draw_max = 12.5  # A
-        elif pump_type == PumpType.CUSTOM:
-            # Use custom parameters if provided
-            if custom_params:
-                self.speed_ratio = custom_params.get('speed_ratio', 0.0)
-                self.power_consumption_max = custom_params.get('power_consumption_max', 250.0)
-                self.weight = custom_params.get('weight', 0.6)
-                self.voltage = custom_params.get('voltage', 12.0)
-                self.current_draw_max = custom_params.get('current_draw_max', 10.0)
-            else:
-                # Default values for custom type
-                self.speed_ratio = 0.5
-                self.power_consumption_max = 250.0
-                self.weight = 0.6
-                self.voltage = 12.0
-                self.current_draw_max = 10.0
-        
-        # Current operating state
-        self.current_speed = 0.0  # RPM
-        self.current_flow_rate = 0.0  # L/min
-        self.current_pressure = 0.0  # bar
-        self.current_power = 0.0  # W
-        
-        logger.info(f"Water pump initialized: {pump_type.name}, max flow: {max_flow_rate} L/min")
-    
-    def update_pump_speed(self, engine_rpm: Optional[float] = None, 
-                         control_signal: Optional[float] = None):
-        """
-        Update pump speed based on engine RPM or control signal.
-        
-        Args:
-            engine_rpm: Engine speed in RPM (for mechanical pumps)
-            control_signal: Control signal (0-1) for electric pumps
-        """
-        if self.pump_type == PumpType.MECHANICAL and engine_rpm is not None:
-            # Mechanical pump tied to engine speed
-            self.current_speed = engine_rpm * self.speed_ratio
-        elif self.pump_type == PumpType.ELECTRIC and control_signal is not None:
-            # Electric pump controlled by PWM signal
-            control_signal = max(0.0, min(1.0, control_signal))  # Clamp to 0-1
-            self.current_speed = self.nominal_speed * control_signal
+
+        # Load from config if path provided
+        if config_path and os.path.exists(config_path):
+             self._load_config(config_path)
+
+        # Apply custom params or set defaults based on type
+        params = custom_params or {}
+        self._apply_type_defaults_and_custom(params)
+
+        # State variables
+        self.current_speed_rpm: float = 0.0
+        self.current_flow_lpm: float = 0.0
+        self.current_pressure_bar: float = 0.0 # Pressure generated
+        self.current_power_W: float = 0.0    # Electrical/Mechanical power consumed
+
+        # Pump curve (flow vs pressure head at nominal speed)
+        self._create_pump_curve()
+
+        logger.info(f"Water Pump initialized: Type={self.pump_type.name}, MaxFlow={self.max_flow_rate_lpm:.1f}LPM, MaxHead={self.max_pressure_bar:.2f}bar")
+
+    def _load_config(self, config_path: str):
+        """Load parameters from YAML config file."""
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            pump_config = config.get('water_pump', {})
+            self.pump_type = PumpType[pump_config.get('type', self.pump_type.name).upper()]
+            self.max_flow_rate_lpm = float(pump_config.get('max_flow_rate', self.max_flow_rate_lpm))
+            self.max_pressure_bar = float(pump_config.get('max_pressure', self.max_pressure_bar))
+            self.nominal_speed_rpm = float(pump_config.get('nominal_speed', self.nominal_speed_rpm))
+            self.mechanical_efficiency = float(pump_config.get('mechanical_efficiency', self.mechanical_efficiency))
+            # Allow custom params in config to override defaults
+            self._apply_type_defaults_and_custom(pump_config)
+            logger.info(f"Pump config loaded from {config_path}")
+        except Exception as e:
+            logger.error(f"Error loading pump config from {config_path}: {e}. Using existing values.")
+
+    def _apply_type_defaults_and_custom(self, params: Dict):
+        """Set default properties based on type, overridden by params."""
+        defaults = {}
+        if self.pump_type == PumpType.MECHANICAL:
+             defaults = {'speed_ratio': 1.0, 'power_consumption_factor': 0.08, 'weight_kg': 0.8} # W/RPM approx, weight
+        elif self.pump_type == PumpType.ELECTRIC:
+             defaults = {'voltage': 12.0, 'current_draw_max_A': 12.0, 'weight_kg': 0.5}
+        elif self.pump_type == PumpType.CUSTOM:
+             defaults = {'voltage': 12.0, 'current_draw_max_A': 10.0, 'weight_kg': 0.6}
+
+        # Set attributes, using params value if present, else defaults value
+        self.speed_ratio = float(params.get('speed_ratio', defaults.get('speed_ratio', 0.0))) # Only relevant for MECHANICAL
+        self.power_consumption_factor = float(params.get('power_consumption_factor', defaults.get('power_consumption_factor', 0.0))) # W/RPM for mech, or baseline for elec
+        self.weight_kg = float(params.get('weight_kg', defaults.get('weight_kg', 0.6)))
+        self.voltage_V = float(params.get('voltage', defaults.get('voltage', 12.0))) # Only relevant for ELECTRIC
+        self.current_draw_max_A = float(params.get('current_draw_max_A', defaults.get('current_draw_max_A', 0.0))) # Only relevant for ELECTRIC
+
+    def _create_pump_curve(self):
+        """Create the pump's flow vs pressure head curve at nominal speed."""
+        # Simplified quadratic curve: Flow = MaxFlow * (1 - (Pressure / MaxPressure)^0.5)
+        # Or use linear for simplicity if preferred: Flow = MaxFlow * (1 - Pressure / MaxPressure)
+        pressures = np.linspace(0, self.max_pressure_bar, 20)
+        # Linear model:
+        flows = self.max_flow_rate_lpm * (1 - pressures / self.max_pressure_bar)
+        # Quadratic model (more realistic for centrifugal):
+        # flows = self.max_flow_rate_lpm * (1 - np.sqrt(pressures / self.max_pressure_bar))
+        flows = np.maximum(0, flows) # Ensure non-negative flow
+
+        # Store points for affinity law scaling
+        self._nominal_curve_pressures = pressures
+        self._nominal_curve_flows = flows
+
+        # Create interpolation function for nominal speed
+        self._nominal_flow_func = interp1d(pressures, flows, kind='linear',
+                                          bounds_error=False, fill_value=(self.max_flow_rate_lpm, 0.0))
+
+    def update_pump_speed(self, engine_rpm: Optional[float] = None, control_signal: Optional[float] = None):
+        """Update pump speed based on engine RPM (mechanical) or control signal (electric)."""
+        if self.pump_type == PumpType.MECHANICAL:
+            if engine_rpm is None: logger.warning("Engine RPM needed for mechanical pump speed.")
+            self.current_speed_rpm = (engine_rpm or 0) * self.speed_ratio
+        elif self.pump_type == PumpType.ELECTRIC:
+            if control_signal is None: logger.warning("Control signal needed for electric pump speed.")
+            self.current_speed_rpm = self.nominal_speed_rpm * np.clip(control_signal or 0, 0.0, 1.0)
+        else: # Custom
+             # Assuming custom pump speed is set externally or via control_signal
+             self.current_speed_rpm = self.nominal_speed_rpm * np.clip(control_signal or 0, 0.0, 1.0)
+
+        self.current_speed_rpm = max(0, self.current_speed_rpm) # Ensure non-negative speed
+
+    def calculate_flow_rate_lpm(self, system_pressure_drop_bar: float) -> float:
+        """Calculate flow rate (LPM) based on current speed and system pressure drop."""
+        if self.nominal_speed_rpm <= 0: return 0.0 # Cannot scale if nominal speed is zero
+        speed_ratio = self.current_speed_rpm / self.nominal_speed_rpm
+
+        # Affinity Laws: Flow ~ Speed, Pressure ~ Speed^2
+        scaled_max_flow = self.max_flow_rate_lpm * speed_ratio
+        scaled_max_pressure = self.max_pressure_bar * speed_ratio**2
+
+        # Use the scaled curve to find flow at the system pressure drop
+        if scaled_max_pressure <= system_pressure_drop_bar:
+            # Pump cannot overcome system resistance at this speed
+            flow_rate = 0.0
+            self.current_pressure_bar = scaled_max_pressure # Max pressure it can generate
         else:
-            # No change if appropriate input not provided
-            logger.warning(f"Inappropriate pump control input for {self.pump_type.name} pump")
-    
-    def calculate_flow_rate(self, system_pressure: float) -> float:
-        """
-        Calculate flow rate based on current pump speed and system pressure.
-        
-        Args:
-            system_pressure: System backpressure in bar
-            
-        Returns:
-            Flow rate in L/min
-        """
-        # Calculate max theoretical flow and pressure at current speed
-        speed_factor = self.current_speed / self.nominal_speed
-        theoretical_max_flow = self.max_flow_rate * speed_factor
-        theoretical_max_pressure = self.max_pressure * speed_factor**2
-        
-        # Handle case where pump can't overcome system pressure
-        if system_pressure >= theoretical_max_pressure:
-            self.current_flow_rate = 0.0
-            self.current_pressure = system_pressure
+            # Interpolate on the scaled curve (recreate function with scaled values)
+            scaled_pressures = self._nominal_curve_pressures * speed_ratio**2
+            scaled_flows = self._nominal_curve_flows * speed_ratio
+            scaled_func = interp1d(scaled_pressures, scaled_flows, kind='linear',
+                                   bounds_error=False, fill_value=(scaled_max_flow, 0.0))
+            flow_rate = float(scaled_func(system_pressure_drop_bar))
+            self.current_pressure_bar = system_pressure_drop_bar # Pressure generated matches system drop
+
+        self.current_flow_lpm = max(0.0, flow_rate)
+        return self.current_flow_lpm
+
+    def calculate_power_consumption_W(self) -> float:
+        """Estimate pump power consumption (W)."""
+        if self.current_speed_rpm <= 0 or self.mechanical_efficiency <= 0:
+            self.current_power_W = 0.0
             return 0.0
-        
-        # Calculate flow rate using affinity laws and pump curve
-        # This is a simplified quadratic model for the pump curve
-        # Flow decreases linearly with pressure
-        flow_factor = 1.0 - (system_pressure / theoretical_max_pressure)
-        self.current_flow_rate = theoretical_max_flow * flow_factor
-        self.current_pressure = system_pressure
-        
-        return self.current_flow_rate
-    
-    def calculate_power_consumption(self) -> float:
-        """
-        Calculate power consumption of the pump.
-        
-        Returns:
-            Power consumption in watts
-        """
-        if self.current_speed == 0.0:
-            self.current_power = 0.0
-            return 0.0
-        
-        # Calculate hydraulic power
-        # P_hydraulic = flow_rate * pressure * conversion_factor
-        hydraulic_power = (self.current_flow_rate / 60000) * (self.current_pressure * 100000)
-        
-        # Apply mechanical efficiency
-        self.current_power = hydraulic_power / self.mechanical_efficiency
-        
-        # Add baseline power consumption (mechanical losses, etc.)
-        baseline_power = self.power_consumption_max * 0.1 * (self.current_speed / self.nominal_speed)
-        self.current_power += baseline_power
-        
-        return self.current_power
-    
+
+        # Hydraulic Power (W) = Flow (m^3/s) * Pressure (Pa)
+        flow_m3_s = self.current_flow_lpm * LITERS_TO_M3 / 60.0
+        pressure_Pa = self.current_pressure_bar * BAR_TO_PA
+        hydraulic_power = flow_m3_s * pressure_Pa
+
+        # Shaft/Electrical Power = Hydraulic Power / Efficiency
+        shaft_power = hydraulic_power / self.mechanical_efficiency
+
+        # Add baseline losses (mechanical friction or electrical standby)
+        # Simplified: Assume some baseline power proportional to max power and speed ratio cubed
+        baseline_power = 0.0
+        if self.pump_type == PumpType.MECHANICAL:
+            # Estimate max shaft power needed at max flow/pressure/speed
+            max_hyd_power = (self.max_flow_rate_lpm * LITERS_TO_M3 / 60.0) * (self.max_pressure_bar * BAR_TO_PA)
+            max_shaft_power = max_hyd_power / self.mechanical_efficiency
+            baseline_power = max_shaft_power * 0.05 * (self.current_speed_rpm / self.nominal_speed_rpm)**3 # 5% baseline loss factor
+        elif self.pump_type == PumpType.ELECTRIC:
+            # Max electrical power ~ V * Imax
+            max_elec_power = self.voltage_V * self.current_draw_max_A
+            baseline_power = max_elec_power * 0.05 * (self.current_speed_rpm / self.nominal_speed_rpm) # Small baseline electrical loss
+
+        self.current_power_W = shaft_power + baseline_power
+        # Ensure non-negative power
+        self.current_power_W = max(0.0, self.current_power_W)
+
+        # Cap at max electrical power for electric pumps
+        if self.pump_type == PumpType.ELECTRIC and self.current_draw_max_A > 0:
+             self.current_power_W = min(self.current_power_W, self.voltage_V * self.current_draw_max_A)
+
+        return self.current_power_W
+
     def get_pump_state(self) -> Dict:
-        """
-        Get current state of the pump.
-        
-        Returns:
-            Dictionary with current pump state
-        """
+        """Get current operating state of the pump."""
         return {
-            'type': self.pump_type.name,
-            'current_speed': self.current_speed,
-            'current_flow_rate': self.current_flow_rate,
-            'current_pressure': self.current_pressure,
-            'current_power': self.current_power
+            'speed_rpm': self.current_speed_rpm,
+            'flow_lpm': self.current_flow_lpm,
+            'pressure_bar': self.current_pressure_bar, # Pressure generated
+            'power_W': self.current_power_W
         }
-    
+
     def get_pump_specs(self) -> Dict:
-        """
-        Get specifications of the pump.
-        
-        Returns:
-            Dictionary with pump specifications
-        """
+        """Get pump specifications."""
         specs = {
             'type': self.pump_type.name,
-            'max_flow_rate': self.max_flow_rate,
-            'max_pressure': self.max_pressure,
-            'nominal_speed': self.nominal_speed,
+            'max_flow_rate_lpm': self.max_flow_rate_lpm,
+            'max_pressure_bar': self.max_pressure_bar,
+            'nominal_speed_rpm': self.nominal_speed_rpm,
             'mechanical_efficiency': self.mechanical_efficiency,
-            'weight': self.weight
+            'weight_kg': self.weight_kg
         }
-        
-        # Add type-specific parameters
         if self.pump_type == PumpType.MECHANICAL:
             specs['speed_ratio'] = self.speed_ratio
         elif self.pump_type == PumpType.ELECTRIC:
-            specs['voltage'] = self.voltage
-            specs['current_draw_max'] = self.current_draw_max
-            
+            specs['voltage_V'] = self.voltage_V
+            specs['current_draw_max_A'] = self.current_draw_max_A
         return specs
 
 
 class CoolingFan:
-    """
-    Cooling fan model for Formula Student car.
-    
-    This class models the behavior of electric cooling fans, including
-    airflow generation, power consumption, and control characteristics.
-    """
-    
-    def __init__(self, 
-                 fan_type: FanType = FanType.SINGLE_SPEED,
-                 max_airflow: float = 0.3,         # m³/s
-                 diameter: float = 0.25,           # m
-                 max_power: float = 90.0,          # W
-                 voltage: float = 12.0,            # V
+    """Models an electric cooling fan."""
+    def __init__(self,
+                 fan_type: FanType = FanType.VARIABLE_SPEED,
+                 max_airflow_m3s: float = 0.3,
+                 diameter_m: float = 0.25,
+                 max_power_W: float = 90.0,
+                 voltage_V: float = 12.0,
+                 config_path: Optional[str] = None,
                  custom_params: Optional[Dict] = None):
         """
         Initialize cooling fan model.
-        
+
         Args:
-            fan_type: Type of cooling fan
-            max_airflow: Maximum airflow in m³/s
-            diameter: Fan diameter in m
-            max_power: Maximum power consumption in W
-            voltage: Operating voltage in V
-            custom_params: Optional dictionary with custom parameters
+            fan_type: Type of cooling fan.
+            max_airflow_m3s: Max airflow (m³/s) at zero static pressure.
+            diameter_m: Fan blade diameter (m).
+            max_power_W: Max electrical power consumption (W).
+            voltage_V: Operating voltage (V).
+            config_path: Optional path to YAML config file.
+            custom_params: Optional dictionary for CUSTOM type or overrides.
         """
         self.fan_type = fan_type
-        self.max_airflow = max_airflow
-        self.diameter = diameter
-        self.max_power = max_power
-        self.voltage = voltage
-        
-        # Calculate derived properties
-        self.area = np.pi * (diameter / 2)**2
-        
-        # Set fan-specific parameters based on type
-        if fan_type == FanType.SINGLE_SPEED:
-            self.control_type = "on_off"
-            self.num_fans = 1
-            self.weight = 0.5  # kg
-        elif fan_type == FanType.VARIABLE_SPEED:
-            self.control_type = "pwm"
-            self.num_fans = 1
-            self.weight = 0.55  # kg
-        elif fan_type == FanType.DUAL_FAN:
-            self.control_type = "on_off"
-            self.num_fans = 2
-            self.weight = 1.0  # kg
-            self.max_airflow *= 1.8  # Not quite double due to interference
-            self.max_power *= 2.0
-        elif fan_type == FanType.CUSTOM:
-            # Use custom parameters if provided
-            if custom_params:
-                self.control_type = custom_params.get('control_type', "pwm")
-                self.num_fans = custom_params.get('num_fans', 1)
-                self.weight = custom_params.get('weight', 0.6)
-            else:
-                # Default values for custom type
-                self.control_type = "pwm"
-                self.num_fans = 1
-                self.weight = 0.6
-        
-        # Current operating state
-        self.current_duty_cycle = 0.0  # 0-1 for PWM control, 0 or 1 for on/off
-        self.current_airflow = 0.0  # m³/s
-        self.current_power = 0.0  # W
-        self.is_active = False
-        
-        logger.info(f"Cooling fan initialized: {fan_type.name}, max airflow: {max_airflow} m³/s")
-    
+        self.max_airflow_m3s = max_airflow_m3s
+        self.diameter_m = diameter_m
+        self.max_power_W = max_power_W
+        self.voltage_V = voltage_V
+
+        # Load from config if path provided
+        if config_path and os.path.exists(config_path):
+             self._load_config(config_path)
+
+        # Apply custom params or set defaults based on type
+        params = custom_params or {}
+        self._apply_type_defaults_and_custom(params)
+
+        # Derived properties
+        self.area_m2 = np.pi * (self.diameter_m / 2.0)**2
+
+        # State variables
+        self.current_duty_cycle: float = 0.0 # 0-1 (or 0/1 for on/off)
+        self.current_airflow_m3s: float = 0.0
+        self.current_power_W: float = 0.0
+        self.is_active: bool = False
+
+        # Fan curve (Pressure vs Flow) - Simplified placeholder
+        # P = Pmax * (1 - (Q/Qmax)^2)
+        self.max_static_pressure_pa = 150.0 # Estimated max pressure at zero flow
+
+        logger.info(f"Cooling Fan initialized: Type={self.fan_type.name}, MaxAirflow={self.max_airflow_m3s:.2f}m³/s, Dia={self.diameter_m*1000:.0f}mm")
+
+    def _load_config(self, config_path: str):
+        """Load parameters from YAML config file."""
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            fan_config = config.get('cooling_fan', {})
+            self.fan_type = FanType[fan_config.get('type', self.fan_type.name).upper()]
+            self.max_airflow_m3s = float(fan_config.get('max_airflow', self.max_airflow_m3s))
+            self.diameter_m = float(fan_config.get('diameter', self.diameter_m))
+            self.max_power_W = float(fan_config.get('max_power', self.max_power_W))
+            self.voltage_V = float(fan_config.get('voltage', self.voltage_V))
+            self._apply_type_defaults_and_custom(fan_config) # Apply other params
+            logger.info(f"Fan config loaded from {config_path}")
+        except Exception as e:
+            logger.error(f"Error loading fan config from {config_path}: {e}. Using existing values.")
+
+    def _apply_type_defaults_and_custom(self, params: Dict):
+        """Set default properties based on type, overridden by params."""
+        defaults = {}
+        if self.fan_type == FanType.SINGLE_SPEED:
+            defaults = {'control_type': 'on_off', 'num_fans': 1, 'weight_kg': 0.5}
+        elif self.fan_type == FanType.VARIABLE_SPEED:
+            defaults = {'control_type': 'pwm', 'num_fans': 1, 'weight_kg': 0.55}
+        elif self.fan_type == FanType.DUAL_FAN:
+             # For DUAL_FAN, max_airflow/power should represent the COMBINED effect
+            defaults = {'control_type': 'on_off', 'num_fans': 2, 'weight_kg': 1.0}
+        elif self.fan_type == FanType.CUSTOM:
+            defaults = {'control_type': 'pwm', 'num_fans': 1, 'weight_kg': 0.6}
+
+        self.control_type = params.get('control_type', defaults.get('control_type', 'pwm'))
+        self.num_fans = int(params.get('num_fans', defaults.get('num_fans', 1)))
+        self.weight_kg = float(params.get('weight_kg', defaults.get('weight_kg', 0.6)))
+        self.max_static_pressure_pa = float(params.get('max_static_pressure_pa', self.max_static_pressure_pa))
+
+
     def update_control(self, control_signal: float):
-        """
-        Update fan control state based on control signal.
-        
-        Args:
-            control_signal: Control signal (0-1)
-        """
-        control_signal = max(0.0, min(1.0, control_signal))  # Clamp to 0-1
-        
+        """Update fan state based on control signal (0-1)."""
+        control_signal = np.clip(control_signal, 0.0, 1.0)
+
         if self.control_type == "on_off":
-            # On/off control with hysteresis
-            # Turn on if signal > 0.6, turn off if signal < 0.4
-            if control_signal > 0.6:
-                self.current_duty_cycle = 1.0
-                self.is_active = True
-            elif control_signal < 0.4:
-                self.current_duty_cycle = 0.0
-                self.is_active = False
-                
-        elif self.control_type == "pwm":
-            # PWM control (proportional)
-            self.current_duty_cycle = control_signal
-            self.is_active = control_signal > 0.05  # Minimum threshold for activation
-        
-        # Update airflow and power based on duty cycle
+             # Simple threshold logic
+             self.current_duty_cycle = 1.0 if control_signal > 0.5 else 0.0
+        else: # pwm or variable speed
+             self.current_duty_cycle = control_signal
+
+        self.is_active = self.current_duty_cycle > 0.05 # Active if duty > 5%
         self._update_outputs()
-    
+
     def _update_outputs(self):
-        """Update airflow and power consumption based on current duty cycle."""
-        # Calculate airflow (approximately cubic relationship with duty cycle)
-        if self.is_active:
-            # Use cubic function for variable speed fans, step function for on/off
-            if self.control_type == "pwm":
-                self.current_airflow = self.max_airflow * self.current_duty_cycle**3
-            else:  # on_off
-                self.current_airflow = self.max_airflow * self.current_duty_cycle
-                
-            # Calculate power consumption (approximately cubic relationship)
-            self.current_power = self.max_power * self.current_duty_cycle**3
-        else:
-            self.current_airflow = 0.0
-            self.current_power = 0.0
-    
-    def calculate_power_consumption(self) -> float:
+        """Update airflow and power based on duty cycle."""
+        if not self.is_active:
+            self.current_airflow_m3s = 0.0
+            self.current_power_W = 0.0
+            return
+
+        # Fan laws: Airflow ~ Speed, Pressure ~ Speed^2, Power ~ Speed^3
+        # Assume speed is proportional to duty cycle for PWM fans
+        speed_ratio = self.current_duty_cycle
+
+        # Airflow and power scale with speed^3 (roughly)
+        self.current_airflow_m3s = self.max_airflow_m3s * speed_ratio**3
+        self.current_power_W = self.max_power_W * speed_ratio**3
+
+        # For on/off, it's just max values when on
+        if self.control_type == "on_off":
+             self.current_airflow_m3s = self.max_airflow_m3s if self.current_duty_cycle > 0 else 0.0
+             self.current_power_W = self.max_power_W if self.current_duty_cycle > 0 else 0.0
+
+
+    def get_airflow_m3s(self, system_pressure_drop_pa: float = 0.0) -> float:
         """
-        Calculate current power consumption.
-        
-        Returns:
-            Power consumption in watts
-        """
-        return self.current_power
-    
-    def calculate_back_pressure_effect(self, system_back_pressure: float) -> float:
-        """
-        Calculate reduction in airflow due to system back pressure.
-        
+        Calculate actual airflow (m³/s) considering system pressure drop.
+
         Args:
-            system_back_pressure: System back pressure in pascals
-            
+            system_pressure_drop_pa: Pressure drop the fan works against (Pa).
+
         Returns:
-            Airflow reduction factor (0-1)
+            Actual airflow in m³/s.
         """
-        # This is a simplified model of fan performance vs system pressure
-        # Actual fans would have a more complex pressure-flow curve
-        
-        # Typical pressure-flow relationship
-        # As back pressure increases, airflow decreases
-        max_pressure_capability = 250.0  # Pa, typical for automotive fans
-        
-        if system_back_pressure >= max_pressure_capability:
-            return 0.0  # No flow if back pressure too high
-        
-        # Linear model for simplicity
-        reduction_factor = 1.0 - (system_back_pressure / max_pressure_capability)
-        
-        return reduction_factor
-    
+        if not self.is_active:
+            return 0.0
+
+        # Use the fan curve P = Pmax * (1 - (Q/Qmax)^2) to find Q for given P
+        # Q = Qmax * sqrt(1 - P/Pmax)
+        speed_ratio = self.current_duty_cycle
+        effective_q_max = self.max_airflow_m3s * speed_ratio**3 # Airflow scales with speed^3
+        effective_p_max = self.max_static_pressure_pa * speed_ratio**2 # Pressure scales with speed^2
+
+        if effective_p_max <= 0 or system_pressure_drop_pa >= effective_p_max:
+            return 0.0 # Cannot overcome pressure drop
+
+        flow_rate = effective_q_max * np.sqrt(1.0 - system_pressure_drop_pa / effective_p_max)
+
+        # Store current airflow state
+        self.current_airflow_m3s = max(0.0, flow_rate)
+        return self.current_airflow_m3s
+
     def get_fan_state(self) -> Dict:
-        """
-        Get current state of the fan.
-        
-        Returns:
-            Dictionary with current fan state
-        """
+        """Get current fan state."""
         return {
-            'type': self.fan_type.name,
             'is_active': self.is_active,
-            'current_duty_cycle': self.current_duty_cycle,
-            'current_airflow': self.current_airflow,
-            'current_power': self.current_power
+            'duty_cycle': self.current_duty_cycle,
+            'airflow_m3s': self.current_airflow_m3s,
+            'power_W': self.current_power_W
         }
-    
+
     def get_fan_specs(self) -> Dict:
-        """
-        Get specifications of the fan.
-        
-        Returns:
-            Dictionary with fan specifications
-        """
+        """Get fan specifications."""
         return {
             'type': self.fan_type.name,
-            'max_airflow': self.max_airflow,
-            'diameter': self.diameter,
-            'max_power': self.max_power,
-            'voltage': self.voltage,
-            'area': self.area,
+            'max_airflow_m3s': self.max_airflow_m3s,
+            'diameter_m': self.diameter_m,
+            'max_power_W': self.max_power_W,
+            'voltage_V': self.voltage_V,
+            'area_m2': self.area_m2,
             'control_type': self.control_type,
             'num_fans': self.num_fans,
-            'weight': self.weight
+            'weight_kg': self.weight_kg,
+            'max_static_pressure_pa': self.max_static_pressure_pa
         }
 
 
 class Thermostat:
-    """
-    Thermostat model for Formula Student cooling system.
-    
-    This class models the behavior of the engine thermostat, which regulates
-    coolant flow through the radiator to maintain optimal engine temperature.
-    """
-    
-    def __init__(self, 
-                 opening_temp: float = 82.0,   # °C
-                 full_open_temp: float = 92.0, # °C
-                 bypass_flow_max: float = 15.0, # L/min
-                 custom_params: Optional[Dict] = None):
+    """Models a coolant thermostat."""
+    def __init__(self,
+                 opening_temp_C: float = 82.0,
+                 full_open_temp_C: float = 92.0,
+                 config_path: Optional[str] = None):
         """
         Initialize thermostat model.
-        
+
         Args:
-            opening_temp: Temperature at which thermostat begins to open (°C)
-            full_open_temp: Temperature at which thermostat is fully open (°C)
-            bypass_flow_max: Maximum flow through bypass when thermostat closed (L/min)
-            custom_params: Optional dictionary with custom parameters
+            opening_temp_C: Temperature (°C) thermostat starts opening.
+            full_open_temp_C: Temperature (°C) thermostat is fully open.
+            config_path: Optional path to YAML config file.
         """
-        self.opening_temp = opening_temp
-        self.full_open_temp = full_open_temp
-        self.bypass_flow_max = bypass_flow_max
-        
-        # Apply custom parameters if provided
-        if custom_params:
-            for key, value in custom_params.items():
-                if hasattr(self, key):
-                    setattr(self, key, value)
-        
-        # Current state
-        self.current_opening = 0.0  # 0-1, fraction of full open
-        self.current_temperature = 25.0  # °C
-        
-        logger.info(f"Thermostat initialized: opening range {opening_temp}°C - {full_open_temp}°C")
-    
-    def update_temperature(self, coolant_temp: float):
-        """
-        Update thermostat opening based on coolant temperature.
-        
-        Args:
-            coolant_temp: Current coolant temperature in °C
-        """
-        self.current_temperature = coolant_temp
-        
-        # Calculate opening fraction based on temperature
-        if coolant_temp <= self.opening_temp:
-            self.current_opening = 0.0
-        elif coolant_temp >= self.full_open_temp:
-            self.current_opening = 1.0
+        self.opening_temp_C = opening_temp_C
+        self.full_open_temp_C = full_open_temp_C
+
+        if config_path and os.path.exists(config_path):
+             self._load_config(config_path)
+
+        if self.full_open_temp_C <= self.opening_temp_C:
+            logger.warning("Thermostat full_open_temp <= opening_temp. Adjusting full_open.")
+            self.full_open_temp_C = self.opening_temp_C + 10.0
+
+        # State variable
+        self.current_opening_fraction: float = 0.0 # 0 (closed) to 1 (fully open)
+
+        logger.info(f"Thermostat initialized: Opens {self.opening_temp_C:.1f}°C, Fully Open {self.full_open_temp_C:.1f}°C")
+
+    def _load_config(self, config_path: str):
+        """Load parameters from YAML config file."""
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            thermo_config = config.get('thermostat', {})
+            self.opening_temp_C = float(thermo_config.get('opening_temp', self.opening_temp_C))
+            self.full_open_temp_C = float(thermo_config.get('full_open_temp', self.full_open_temp_C))
+            logger.info(f"Thermostat config loaded from {config_path}")
+        except Exception as e:
+             logger.error(f"Error loading thermostat config from {config_path}: {e}. Using existing values.")
+
+    def update_state(self, coolant_temp_C: float):
+        """Update thermostat opening fraction based on coolant temperature."""
+        if coolant_temp_C <= self.opening_temp_C:
+            self.current_opening_fraction = 0.0
+        elif coolant_temp_C >= self.full_open_temp_C:
+            self.current_opening_fraction = 1.0
         else:
-            # Linear interpolation for partial opening
-            self.current_opening = (coolant_temp - self.opening_temp) / (self.full_open_temp - self.opening_temp)
-    
-    def calculate_flow_distribution(self, total_flow: float) -> Tuple[float, float]:
-        """
-        Calculate flow distribution between radiator and bypass.
-        
-        Args:
-            total_flow: Total coolant flow rate in L/min
-            
-        Returns:
-            Tuple of (radiator_flow, bypass_flow) in L/min
-        """
-        # When thermostat is closed, flow goes through bypass
-        # When thermostat is open, flow goes through radiator
-        # During transition, flow is distributed based on opening fraction
-        
-        if self.current_opening <= 0.0:
-            # Fully closed - all flow through bypass up to its maximum capacity
-            bypass_flow = min(total_flow, self.bypass_flow_max)
-            radiator_flow = 0.0
-        elif self.current_opening >= 1.0:
-            # Fully open - all flow through radiator
-            radiator_flow = total_flow
-            bypass_flow = 0.0
-        else:
-            # Partially open - flow distributed based on opening fraction
-            # and the relative resistance of each path
-            
-            # This is a simplified model - in reality the flow distribution
-            # would depend on the detailed hydraulic characteristics
-            
-            # Calculate base flow balance
-            radiator_fraction = self.current_opening**2  # Non-linear relationship
-            radiator_flow = total_flow * radiator_fraction
-            bypass_flow = total_flow - radiator_flow
-            
-            # Limit bypass flow to its maximum capacity
-            if bypass_flow > self.bypass_flow_max:
-                bypass_flow = self.bypass_flow_max
-                radiator_flow = total_flow - bypass_flow
-        
-        return radiator_flow, bypass_flow
-    
+            # Linear interpolation within the opening range
+            self.current_opening_fraction = (coolant_temp_C - self.opening_temp_C) / (self.full_open_temp_C - self.opening_temp_C)
+
+    def get_opening_fraction(self) -> float:
+        """Return the current opening fraction (0-1)."""
+        return self.current_opening_fraction
+
+    def get_flow_fraction_to_radiator(self) -> float:
+        """Return the fraction of total coolant flow directed to the radiator."""
+        # Assumes flow resistance is proportional to (1 - opening fraction) for bypass
+        # and opening fraction for radiator. Simplified model.
+        return self.current_opening_fraction # Directly use opening fraction
+
     def get_thermostat_state(self) -> Dict:
-        """
-        Get current state of the thermostat.
-        
-        Returns:
-            Dictionary with current thermostat state
-        """
+        """Get current thermostat state."""
         return {
-            'current_temperature': self.current_temperature,
-            'current_opening': self.current_opening,
-            'opening_temp': self.opening_temp,
-            'full_open_temp': self.full_open_temp
+            'opening_fraction': self.current_opening_fraction,
+            'opening_temp_C': self.opening_temp_C,
+            'full_open_temp_C': self.full_open_temp_C
         }
 
 
 class CoolingSystem:
-    """
-    Complete cooling system for Formula Student car.
-    
-    This class integrates all cooling system components (radiator, water pump,
-    cooling fan, thermostat) into a complete system model for simulating
-    thermal management of the Formula Student car.
-    """
-    
-    def __init__(self, 
-                 radiator: Optional[Radiator] = None,
-                 water_pump: Optional[WaterPump] = None,
-                 cooling_fan: Optional[CoolingFan] = None,
-                 thermostat: Optional[Thermostat] = None):
+    """Integrates cooling system components."""
+    def __init__(self,
+                 radiator: Radiator,
+                 water_pump: WaterPump,
+                 cooling_fan: Optional[CoolingFan] = None, # Fan is optional
+                 thermostat: Thermostat = None, # Use default if not provided
+                 coolant_volume_L: float = 2.5, # Total system volume
+                 config_path: Optional[str] = None):
         """
         Initialize the complete cooling system.
-        
+
         Args:
-            radiator: Radiator component
-            water_pump: Water pump component
-            cooling_fan: Cooling fan component
-            thermostat: Thermostat component
+            radiator: Radiator component.
+            water_pump: Water pump component.
+            cooling_fan: Optional CoolingFan component.
+            thermostat: Thermostat component.
+            coolant_volume_L: Total coolant volume in the system (L).
+            config_path: Optional path to YAML config file for system parameters.
         """
-        # Initialize components with defaults if not provided
-        self.radiator = radiator or Radiator()
-        self.water_pump = water_pump or WaterPump()
-        self.cooling_fan = cooling_fan or CoolingFan()
-        self.thermostat = thermostat or Thermostat()
-        
-        # System parameters
-        self.coolant_volume = 3.0  # L, total system volume
-        self.coolant_density = 1050.0  # kg/m³
-        self.coolant_specific_heat = 3900.0  # J/(kg·K)
-        self.system_pressure_cap = 1.2  # bar
-        
-        # Current state
-        self.coolant_temp = 25.0  # °C
-        self.engine_temp = 25.0  # °C
-        self.ambient_temp = 25.0  # °C
-        self.fan_control_signal = 0.0  # 0-1
-        self.pump_control_signal = 0.0  # 0-1 (for electric pump)
-        self.vehicle_speed = 0.0  # m/s
-        self.engine_rpm = 0.0  # RPM
-        self.engine_load = 0.0  # 0-1
-        self.radiator_heat_rejection = 0.0  # W
-        self.engine_heat_input = 0.0  # W
-        
-        # System dynamics
-        self.last_update_time = None
-        
-        logger.info("Complete cooling system initialized")
-    
-    def update_ambient_conditions(self, ambient_temp: float, vehicle_speed: float):
-        """
-        Update ambient conditions affecting the cooling system.
-        
-        Args:
-            ambient_temp: Ambient temperature in °C
-            vehicle_speed: Vehicle speed in m/s
-        """
-        self.ambient_temp = ambient_temp
-        self.vehicle_speed = vehicle_speed
-    
-    def update_engine_state(self, engine_temp: float, engine_rpm: float, 
-                          engine_load: float, engine_heat_input: float):
-        """
-        Update engine state parameters affecting the cooling system.
-        
-        Args:
-            engine_temp: Engine temperature in °C
-            engine_rpm: Engine speed in RPM
-            engine_load: Engine load factor (0-1)
-            engine_heat_input: Heat input to cooling system from engine in W
-        """
-        self.engine_temp = engine_temp
-        self.engine_rpm = engine_rpm
-        self.engine_load = engine_load
-        self.engine_heat_input = engine_heat_input
-    
-    def update_control_signals(self, fan_control: float, pump_control: Optional[float] = None):
-        """
-        Update control signals for cooling system components.
-        
-        Args:
-            fan_control: Fan control signal (0-1)
-            pump_control: Pump control signal (0-1), only used for electric pumps
-        """
-        self.fan_control_signal = max(0.0, min(1.0, fan_control))
-        self.cooling_fan.update_control(self.fan_control_signal)
-        
-        # Update pump control if electric pump
-        if pump_control is not None and self.water_pump.pump_type == PumpType.ELECTRIC:
-            self.pump_control_signal = max(0.0, min(1.0, pump_control))
+        self.radiator = radiator
+        self.water_pump = water_pump
+        self.cooling_fan = cooling_fan
+        self.thermostat = thermostat or Thermostat() # Create default thermostat if none provided
+
+        self.coolant_volume_L = coolant_volume_L
+        self.coolant_density_kg_L = WATER_DENSITY / 1000.0
+        self.coolant_specific_heat_J_kgK = WATER_SPECIFIC_HEAT
+        self.system_pressure_cap_bar = 1.3 # Default pressure cap
+
+        if config_path and os.path.exists(config_path):
+            self._load_config(config_path)
+
+        # State variables
+        self.coolant_temp_C: float = 25.0
+        self.ambient_temp_C: float = 25.0
+        self.vehicle_speed_mps: float = 0.0
+        self.engine_rpm: float = 0.0
+        self.engine_load: float = 0.0 # Example, might not be directly used here
+        self.engine_heat_input_W: float = 0.0 # Heat transferred from engine to coolant (W)
+        self.radiator_heat_rejection_W: float = 0.0
+
+        # Control targets (can be set externally)
+        self.target_coolant_temp_C: float = 90.0
+        self.fan_control_signal: float = 0.0 # External control override
+        self.pump_control_signal: float = 1.0 # External control override (for electric pump)
+        self.use_automatic_control: bool = True # Flag to enable internal automatic control
+
+        # Calculate total coolant mass
+        self.total_coolant_mass_kg = self.coolant_volume_L * self.coolant_density_kg_L
+        self.total_thermal_capacity_J_K = self.total_coolant_mass_kg * self.coolant_specific_heat_J_kgK
+        if self.total_thermal_capacity_J_K <= 0:
+             logger.warning("Total thermal capacity is zero or negative. Temperature simulation may be unstable.")
+             self.total_thermal_capacity_J_K = 1e-3 # Prevent division by zero
+
+        logger.info(f"Cooling System initialized: Volume={self.coolant_volume_L:.1f}L, Cap={self.system_pressure_cap_bar:.1f}bar")
+
+    def _load_config(self, config_path: str):
+         """Load system parameters from YAML config file."""
+         try:
+             with open(config_path, 'r') as f:
+                 config = yaml.safe_load(f)
+             system_config = config.get('system', {})
+             self.coolant_volume_L = float(system_config.get('coolant_volume', self.coolant_volume_L))
+             self.coolant_density_kg_L = float(system_config.get('coolant_density', self.coolant_density_kg_L * 1000)) / 1000.0 # Handle density in kg/m3 or kg/L
+             self.coolant_specific_heat_J_kgK = float(system_config.get('coolant_specific_heat', self.coolant_specific_heat_J_kgK))
+             self.system_pressure_cap_bar = float(system_config.get('system_pressure_cap', self.system_pressure_cap_bar))
+             logger.info(f"Cooling system parameters loaded from {config_path}")
+         except Exception as e:
+             logger.error(f"Error loading system config from {config_path}: {e}. Using existing values.")
+
+    def update_ambient_conditions(self, ambient_temp_C: float, vehicle_speed_mps: float):
+        """Update ambient temperature and vehicle speed."""
+        self.ambient_temp_C = ambient_temp_C
+        self.vehicle_speed_mps = max(0, vehicle_speed_mps) # Ensure non-negative speed
+
+    def update_engine_state(self, engine_rpm: float, engine_load: float, engine_heat_input_W: float):
+        """Update engine operating conditions affecting the cooling system."""
+        self.engine_rpm = max(0, engine_rpm)
+        self.engine_load = np.clip(engine_load, 0.0, 1.0)
+        self.engine_heat_input_W = max(0, engine_heat_input_W) # Heat input must be positive
+
+    def set_control_targets(self, target_temp: Optional[float]=None, auto_control: Optional[bool]=None):
+        """Set control targets and enable/disable automatic control."""
+        if target_temp is not None: self.target_coolant_temp_C = target_temp
+        if auto_control is not None: self.use_automatic_control = auto_control
+
+    def _run_automatic_control(self):
+        """Internal method to calculate control signals based on temperature."""
+        # Fan Control (simple P-controller based on temp exceeding target)
+        temp_error = self.coolant_temp_C - self.target_coolant_temp_C
+        # Activate fan above target, ramp up to max over a 10C range
+        fan_signal = np.clip(temp_error / 10.0, 0.0, 1.0)
+        # Reduce fan need at higher speeds
+        speed_reduction_factor = max(0.0, 1.0 - self.vehicle_speed_mps / 20.0) # Fan less needed above 20 m/s
+        self.fan_control_signal = fan_signal * speed_reduction_factor
+
+        # Pump Control (for electric pump) - keep it simple: full speed if engine running
+        self.pump_control_signal = 1.0 if self.engine_rpm > 0 else 0.0
+
+        # Apply controls to components
+        if self.cooling_fan:
+            self.cooling_fan.update_control(self.fan_control_signal)
+        if self.water_pump.pump_type == PumpType.ELECTRIC:
             self.water_pump.update_pump_speed(control_signal=self.pump_control_signal)
-    
-    def create_automatic_control(self, target_temp: float = 90.0, hysteresis: float = 5.0):
-        """
-        Configure automatic control based on temperature.
-        
-        Args:
-            target_temp: Target coolant temperature in °C
-            hysteresis: Temperature hysteresis for fan control in °C
-        """
-        # Fan control based on coolant temperature
-        fan_control = 0.0
-        
-        if self.coolant_temp > target_temp + hysteresis:
-            fan_control = 1.0  # Full fan if temp is very high
-        elif self.coolant_temp > target_temp:
-            # Linear ramp from 0 to 1 over the hysteresis range
-            fan_control = (self.coolant_temp - target_temp) / hysteresis
-        
-        # Apply control signals
-        self.update_control_signals(fan_control, None)
-    
+
     def update_system_state(self, dt: float):
-        """
-        Update the complete cooling system state for a time step.
-        
-        Args:
-            dt: Time step in seconds
-        """
-        # Update thermostat opening based on coolant temperature
-        self.thermostat.update_temperature(self.coolant_temp)
-        
-        # Update water pump speed based on engine RPM or control signal
+        """Update the cooling system state over a time step dt."""
+        # 1. Update component states based on inputs/controls
+        self.thermostat.update_state(self.coolant_temp_C)
         if self.water_pump.pump_type == PumpType.MECHANICAL:
             self.water_pump.update_pump_speed(engine_rpm=self.engine_rpm)
-        # For electric pump, already updated in update_control_signals
-        
-        # Calculate system pressure based on pump, thermostat, and radiator
-        # This is a simplified system pressure calculation
-        system_pressure = 0.5  # bar, base pressure
-        
-        # Calculate pump flow rate against system pressure
-        total_flow_rate = self.water_pump.calculate_flow_rate(system_pressure)
-        
-        # Calculate flow distribution through thermostat
-        radiator_flow, bypass_flow = self.thermostat.calculate_flow_distribution(total_flow_rate)
-        
-        # Calculate airflow through radiator
-        # Base airflow from vehicle speed (ram air effect)
-        ram_air_factor = 0.5  # Efficiency factor for ram air
-        radiator_area = self.radiator.core_area
-        speed_airflow = self.vehicle_speed * radiator_area * ram_air_factor
-        
-        # Add fan airflow
-        fan_airflow = self.cooling_fan.current_airflow
-        
-        # Total airflow through radiator
-        total_airflow = speed_airflow + fan_airflow
-        
-        # Calculate heat rejection by radiator
-        self.radiator_heat_rejection = self.radiator.calculate_heat_rejection(
-            self.coolant_temp, self.ambient_temp, radiator_flow, total_airflow
+        if self.use_automatic_control:
+             self._run_automatic_control()
+        # Fan/Pump states are now updated
+
+        # 2. Calculate coolant flow rate
+        # Estimate system pressure drop (sum of components)
+        # This is iterative in reality, simplified here
+        flow_guess = self.water_pump.max_flow_rate_lpm / 2.0 # Initial guess
+        system_pressure_drop = self.radiator.calculate_pressure_drop_coolant_bar(flow_guess)
+        # Add pressure drop for engine block, hoses etc. (estimated)
+        system_pressure_drop += 0.1 # Assume 0.1 bar drop elsewhere
+
+        coolant_flow_lpm = self.water_pump.calculate_flow_rate_lpm(system_pressure_drop)
+
+        # 3. Calculate flow distribution
+        flow_to_radiator_lpm = coolant_flow_lpm * self.thermostat.get_flow_fraction_to_radiator()
+
+        # 4. Calculate air flow through radiator
+        radiator_air_pressure_drop_pa = self.radiator.calculate_pressure_drop_air_pa(
+             self.cooling_fan.current_airflow_m3s if self.cooling_fan else 0.0 # Estimate based on fan max
         )
-        
-        # Calculate engine heat input (from external model)
-        net_heat = self.engine_heat_input - self.radiator_heat_rejection
-        
-        # Calculate temperature change (simplified thermal model)
-        coolant_mass = self.coolant_volume * self.coolant_density / 1000  # kg
-        coolant_heat_capacity = coolant_mass * self.coolant_specific_heat  # J/K
-        
-        # Temperature change (Q = m * c * ΔT)
-        if coolant_heat_capacity > 0:
-            delta_temp = net_heat * dt / coolant_heat_capacity
-        else:
-            delta_temp = 0
-        
-        # Update coolant temperature
-        self.coolant_temp += delta_temp
-        
-        # Calculate power consumption
-        self.water_pump.calculate_power_consumption()
-        self.cooling_fan.calculate_power_consumption()
-    
-    def simulate_step(self, ambient_temp: float, vehicle_speed: float,
-                    engine_temp: float, engine_rpm: float, engine_load: float,
-                    engine_heat_input: float, dt: float) -> Dict:
-        """
-        Perform a single simulation step with the provided conditions.
-        
-        Args:
-            ambient_temp: Ambient temperature in °C
-            vehicle_speed: Vehicle speed in m/s
-            engine_temp: Engine temperature in °C
-            engine_rpm: Engine speed in RPM
-            engine_load: Engine load factor (0-1)
-            engine_heat_input: Heat input to cooling system from engine in W
-            dt: Time step in seconds
-            
-        Returns:
-            Dictionary with updated system state
-        """
-        # Update external conditions
-        self.update_ambient_conditions(ambient_temp, vehicle_speed)
-        self.update_engine_state(engine_temp, engine_rpm, engine_load, engine_heat_input)
-        
-        # Create and apply automatic control
-        self.create_automatic_control()
-        
-        # Update system state
+        fan_airflow_actual_m3s = self.cooling_fan.get_airflow_m3s(radiator_air_pressure_drop_pa) if self.cooling_fan else 0.0
+
+        ram_air_mps = self.vehicle_speed_mps # Assume vehicle speed is effective air speed at inlet
+        # Simple addition of ram air and fan air (can be refined)
+        total_air_flow_m3s = (ram_air_mps * self.radiator.core_area * 0.8) + fan_airflow_actual_m3s # 0.8 ram air efficiency factor
+
+        # 5. Calculate heat rejection
+        self.radiator_heat_rejection_W = self.radiator.calculate_heat_rejection(
+            self.coolant_temp_C, self.ambient_temp_C, flow_to_radiator_lpm, total_air_flow_m3s
+        )
+
+        # 6. Update coolant temperature
+        net_heat_W = self.engine_heat_input_W - self.radiator_heat_rejection_W
+        delta_temp = (net_heat_W * dt) / self.total_thermal_capacity_J_K
+        self.coolant_temp_C += delta_temp
+
+        # Clamp temperature (e.g., can't go below ambient easily)
+        self.coolant_temp_C = max(self.ambient_temp_C - 5, self.coolant_temp_C) # Allow slightly below ambient due to potential inaccuracies
+
+        # Update power consumptions
+        self.water_pump.calculate_power_consumption_W()
+        if self.cooling_fan: self.cooling_fan.calculate_power_consumption()
+
+
+    def simulate_step(self, ambient_temp_C: float, vehicle_speed_mps: float,
+                    engine_rpm: float, engine_load: float,
+                    engine_heat_input_W: float, dt: float) -> Dict:
+        """Perform a single simulation step with given conditions."""
+        self.update_ambient_conditions(ambient_temp_C, vehicle_speed_mps)
+        self.update_engine_state(engine_rpm, engine_load, engine_heat_input_W)
         self.update_system_state(dt)
-        
-        # Return current state
         return self.get_system_state()
-    
+
     def get_system_state(self) -> Dict:
-        """
-        Get current state of the complete cooling system.
-        
-        Returns:
-            Dictionary with current cooling system state
-        """
-        return {
-            'coolant_temp': self.coolant_temp,
-            'engine_temp': self.engine_temp,
-            'ambient_temp': self.ambient_temp,
-            'vehicle_speed': self.vehicle_speed,
+        """Get current state of the cooling system."""
+        state = {
+            'coolant_temp_C': self.coolant_temp_C,
+            'ambient_temp_C': self.ambient_temp_C,
+            'vehicle_speed_mps': self.vehicle_speed_mps,
             'engine_rpm': self.engine_rpm,
             'engine_load': self.engine_load,
-            'engine_heat_input': self.engine_heat_input,
-            'radiator_heat_rejection': self.radiator_heat_rejection,
-            'net_heat': self.engine_heat_input - self.radiator_heat_rejection,
+            'engine_heat_input_W': self.engine_heat_input_W,
+            'radiator_heat_rejection_W': self.radiator_heat_rejection_W,
+            'net_heat_rate_W': self.engine_heat_input_W - self.radiator_heat_rejection_W,
             'water_pump': self.water_pump.get_pump_state(),
-            'cooling_fan': self.cooling_fan.get_fan_state(),
             'thermostat': self.thermostat.get_thermostat_state(),
             'fan_control_signal': self.fan_control_signal,
             'pump_control_signal': self.pump_control_signal
         }
-    
+        if self.cooling_fan:
+            state['cooling_fan'] = self.cooling_fan.get_fan_state()
+        return state
+
     def get_system_specs(self) -> Dict:
-        """
-        Get specifications of the complete cooling system.
-        
-        Returns:
-            Dictionary with cooling system specifications
-        """
-        return {
+        """Get specifications of the cooling system components."""
+        specs = {
             'radiator': self.radiator.get_radiator_specs(),
             'water_pump': self.water_pump.get_pump_specs(),
-            'cooling_fan': self.cooling_fan.get_fan_specs(),
-            'thermostat': {
-                'opening_temp': self.thermostat.opening_temp,
-                'full_open_temp': self.thermostat.full_open_temp,
-                'bypass_flow_max': self.thermostat.bypass_flow_max
-            },
+            'thermostat': self.thermostat.get_thermostat_state(), # Includes thresholds
             'system': {
-                'coolant_volume': self.coolant_volume,
-                'coolant_density': self.coolant_density,
-                'coolant_specific_heat': self.coolant_specific_heat,
-                'system_pressure_cap': self.system_pressure_cap
+                'coolant_volume_L': self.coolant_volume_L,
+                'coolant_density_kg_L': self.coolant_density_kg_L,
+                'coolant_specific_heat_J_kgK': self.coolant_specific_heat_J_kgK,
+                'system_pressure_cap_bar': self.system_pressure_cap_bar
             }
         }
-    
-    def calculate_system_performance(self, ambient_temp_range: List[float], 
-                                  engine_heat_range: List[float]) -> Dict:
+        if self.cooling_fan:
+            specs['cooling_fan'] = self.cooling_fan.get_fan_specs()
+        return specs
+
+    def calculate_system_performance(self, ambient_temps_C: List[float],
+                                  engine_heats_W: List[float],
+                                  vehicle_speed_mps: float = 15.0,
+                                  engine_rpm: float = 8000,
+                                  engine_load: float = 0.8) -> Dict:
         """
-        Calculate cooling system performance across a range of conditions.
-        
-        Args:
-            ambient_temp_range: List of ambient temperatures to test (°C)
-            engine_heat_range: List of engine heat inputs to test (W)
-            
+        Calculate steady-state performance across ranges of ambient temps and heat loads.
+
         Returns:
-            Dictionary with performance results
+            Dict with performance map data (steady state coolant temps, rejection rates, etc.).
         """
-        # Initialize results arrays
-        n_ambient = len(ambient_temp_range)
-        n_heat = len(engine_heat_range)
-        
-        coolant_temps = np.zeros((n_ambient, n_heat))
-        rejection_rates = np.zeros((n_ambient, n_heat))
-        fan_duties = np.zeros((n_ambient, n_heat))
-        pump_flows = np.zeros((n_ambient, n_heat))
-        
-        # Test conditions
-        test_rpm = 6000
-        test_load = 0.7
-        test_vehicle_speed = 10.0  # m/s
-        
-        # Run simulations
-        for i, ambient in enumerate(ambient_temp_range):
-            for j, heat in enumerate(engine_heat_range):
-                # Reset system state
-                self.coolant_temp = ambient + 10.0  # Start slightly above ambient
-                self.engine_temp = ambient + 15.0
-                
-                # Run simulation until steady state
-                max_iterations = 100
-                for iteration in range(max_iterations):
-                    # Update state for 1 second
-                    state = self.simulate_step(
-                        ambient, test_vehicle_speed,
-                        self.engine_temp, test_rpm, test_load,
-                        heat, 1.0
-                    )
-                    
-                    # Check for steady state (temperature change < 0.1°C)
-                    if iteration > 0 and abs(state['coolant_temp'] - coolant_temps[i, j]) < 0.1:
-                        break
-                    
-                    coolant_temps[i, j] = state['coolant_temp']
-                    rejection_rates[i, j] = state['radiator_heat_rejection']
-                    fan_duties[i, j] = state['fan_control_signal']
-                    pump_flows[i, j] = state['water_pump']['current_flow_rate']
-        
-        # Calculate performance metrics
-        cooling_capacities = np.zeros(n_ambient)
-        for i in range(n_ambient):
-            # Find maximum heat input that keeps coolant below 100°C
-            max_heat_idx = np.argmax(coolant_temps[i, :] >= 100.0)
-            if max_heat_idx > 0:
-                cooling_capacities[i] = engine_heat_range[max_heat_idx - 1]
-            elif max_heat_idx == 0:
-                cooling_capacities[i] = 0.0  # Can't handle even minimum heat
-            else:
-                cooling_capacities[i] = engine_heat_range[-1]  # Can handle all tested heat levels
-        
+        n_ambient = len(ambient_temps_C)
+        n_heat = len(engine_heats_W)
+        steady_coolant_temps = np.zeros((n_ambient, n_heat))
+        steady_rejection_rates = np.zeros((n_ambient, n_heat))
+        steady_fan_duties = np.zeros((n_ambient, n_heat))
+
+        logger.info(f"Calculating system performance map ({n_ambient} ambients x {n_heat} heat loads)...")
+
+        # Store initial state
+        initial_coolant_temp = self.coolant_temp_C
+
+        for i, ambient in enumerate(ambient_temps_C):
+            for j, heat in enumerate(engine_heats_W):
+                # Reset temp for each point, start near ambient
+                self.coolant_temp_C = ambient + 10.0
+                last_temp = -999 # Force first check pass
+                # Simulate until steady state (or timeout)
+                max_iter = 500
+                for k in range(max_iter):
+                    state = self.simulate_step(ambient, vehicle_speed, engine_rpm, engine_load, heat, dt=1.0) # 1s step
+                    temp_change = abs(self.coolant_temp_C - last_temp)
+                    if k > 10 and temp_change < 0.01: # Check after 10s, tolerance 0.01 C/s
+                         break
+                    last_temp = self.coolant_temp_C
+                else:
+                     logger.warning(f"Steady state not reached for ambient={ambient}, heat={heat/1000:.1f}kW")
+
+                steady_coolant_temps[i, j] = self.coolant_temp_C
+                steady_rejection_rates[i, j] = self.radiator_heat_rejection_W
+                steady_fan_duties[i, j] = self.fan_control_signal
+
+        # Restore initial state
+        self.coolant_temp_C = initial_coolant_temp
+
+        logger.info("Performance map calculation complete.")
         return {
-            'ambient_temps': ambient_temp_range,
-            'engine_heats': engine_heat_range,
-            'coolant_temps': coolant_temps,
-            'rejection_rates': rejection_rates,
-            'fan_duties': fan_duties,
-            'pump_flows': pump_flows,
-            'cooling_capacities': cooling_capacities
+            'ambient_temps_C': np.array(ambient_temps_C),
+            'engine_heats_W': np.array(engine_heats_W),
+            'coolant_temps_C': steady_coolant_temps,
+            'heat_rejection_W': steady_rejection_rates,
+            'fan_duty_cycles': steady_fan_duties,
+            'conditions': {'speed': vehicle_speed_mps, 'rpm': engine_rpm, 'load': engine_load}
         }
-    
+
+    # --- Plotting Wrappers ---
     def plot_performance_map(self, performance_data: Dict, save_path: Optional[str] = None):
-        """
-        Plot cooling system performance map.
-        
-        Args:
-            performance_data: Performance data from calculate_system_performance
-            save_path: Optional path to save the plot
-        """
-        ambient_temps = performance_data['ambient_temps']
-        engine_heats = performance_data['engine_heats']
-        coolant_temps = performance_data['coolant_temps']
-        
-        # Create meshgrid for contour plot
-        X, Y = np.meshgrid(ambient_temps, engine_heats)
-        
-        plt.figure(figsize=(10, 8))
-        
-        # Create contour plot of coolant temperatures
-        contour = plt.contourf(X, Y, coolant_temps.T, 20, cmap='hot')
-        plt.colorbar(contour, label='Coolant Temperature (°C)')
-        
-        # Add contour line for critical temperature (100°C)
-        critical_contour = plt.contour(X, Y, coolant_temps.T, [100], colors='white', linestyles='dashed', linewidths=2)
-        plt.clabel(critical_contour, inline=True, fontsize=10, fmt='%.0f°C')
-        
-        # Add labels and title
-        plt.xlabel('Ambient Temperature (°C)')
-        plt.ylabel('Engine Heat Input (W)')
-        plt.title('Cooling System Performance Map')
-        
-        # Add grid for better readability
-        plt.grid(True, linestyle='--', alpha=0.3)
-        
-        # Save plot if requested
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            
-        plt.tight_layout()
-        plt.show()
-    
+        """Plot the cooling system performance map."""
+        from ..utils.plotting import plot_cooling_system_map, save_plot
+        # Prepare data in the format expected by the plotting function
+        plot_data = {
+            'speeds': performance_data['ambient_temps_C'], # X-axis is ambient temp
+            'engine_loads': performance_data['engine_heats_W'] / 1000.0, # Y-axis is heat load in kW
+            'temperature_map': performance_data['coolant_temps_C'], # Z-axis is coolant temp
+            'ambient_temperature': performance_data['conditions']['ambient'], # Add context
+            # Include limits if needed
+            'coolant_warning_temp': self.thermostat.full_open_temp_C + 8, # Example warning
+            'coolant_critical_temp': self.thermostat.full_open_temp_C + 18 # Example critical
+        }
+        fig = plot_cooling_system_map(plot_data, title='Cooling System Performance Map')
+        # Adjust labels for this specific plot
+        if fig:
+            axes = fig.get_axes()
+            if axes:
+                axes[0].set_xlabel('Ambient Temperature (°C)')
+                axes[0].set_ylabel('Engine Heat Input (kW)')
+                plt.tight_layout(rect=[0, 0, 1, 0.95])
+            if save_path: save_plot(fig, save_path)
+            else: plt.show()
+            plt.close(fig)
+
     def plot_cooling_capacity(self, performance_data: Dict, save_path: Optional[str] = None):
-        """
-        Plot cooling capacity vs ambient temperature.
-        
-        Args:
-            performance_data: Performance data from calculate_system_performance
-            save_path: Optional path to save the plot
-        """
-        ambient_temps = performance_data['ambient_temps']
-        cooling_capacities = performance_data['cooling_capacities']
-        
-        plt.figure(figsize=(10, 6))
-        
-        # Plot cooling capacity
-        plt.plot(ambient_temps, cooling_capacities / 1000, 'b-', linewidth=2)
-        
-        # Add labels and title
-        plt.xlabel('Ambient Temperature (°C)')
-        plt.ylabel('Cooling Capacity (kW)')
-        plt.title('Maximum Cooling Capacity vs Ambient Temperature')
-        
-        # Add grid for better readability
-        plt.grid(True, linestyle='--', alpha=0.7)
-        
-        # Save plot if requested
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            
+        """Plot cooling capacity vs. ambient temperature."""
+        from ..utils.plotting import save_plot # Local import
+
+        ambient_temps = performance_data['ambient_temps_C']
+        engine_heats = performance_data['engine_heats_W']
+        coolant_temps = performance_data['coolant_temps_C']
+        max_allowed_temp = 105.0 # Example limit
+
+        cooling_capacities_kw = []
+        for i in range(len(ambient_temps)):
+            # Find max heat where coolant temp is <= max_allowed_temp
+            valid_heat_indices = np.where(coolant_temps[i, :] <= max_allowed_temp)[0]
+            if len(valid_heat_indices) > 0:
+                max_heat_idx = valid_heat_indices[-1]
+                # Interpolate if possible between last valid and first invalid
+                if max_heat_idx + 1 < len(engine_heats):
+                     t1, t2 = coolant_temps[i, max_heat_idx], coolant_temps[i, max_heat_idx + 1]
+                     h1, h2 = engine_heats[max_heat_idx], engine_heats[max_heat_idx + 1]
+                     if t2 > t1: # Ensure valid interpolation range
+                          interp_heat = h1 + (h2 - h1) * (max_allowed_temp - t1) / (t2 - t1)
+                          cooling_capacities_kw.append(interp_heat / 1000.0)
+                     else:
+                          cooling_capacities_kw.append(engine_heats[max_heat_idx] / 1000.0)
+                else: # Can handle max tested heat
+                     cooling_capacities_kw.append(engine_heats[max_heat_idx] / 1000.0)
+            else: # Cannot handle even the lowest heat load
+                cooling_capacities_kw.append(0.0)
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(ambient_temps, cooling_capacities_kw, 'b-o', linewidth=DEFAULT_LINE_WIDTH)
+        _apply_common_ax_settings(ax, xlabel='Ambient Temperature (°C)', ylabel='Cooling Capacity (kW)',
+                                  title=f'System Cooling Capacity (Limit: {max_allowed_temp}°C Coolant)')
+
         plt.tight_layout()
+        if save_path: save_plot(fig, save_path)
         plt.show()
+        plt.close(fig)
+
+# --- Factory Functions ---
+
+def create_cbr600f4i_cooling_system(config_dir: str = "configs/thermal") -> CoolingSystem:
+    """Create a cooling system based on default CBR600F4i parameters."""
+    # Assumes separate config files exist for each component
+    try:
+        rad_path = os.path.join(config_dir, "radiator_cbr600.yaml") # Example path
+        pump_path = os.path.join(config_dir, "pump_cbr600_mech.yaml")
+        fan_path = os.path.join(config_dir, "fan_cbr600.yaml")
+        thermo_path = os.path.join(config_dir, "thermostat_cbr600.yaml")
+        system_path = os.path.join(config_dir, "system_cbr600.yaml")
+
+        # Create components from potentially specific files
+        radiator = Radiator(config_path=rad_path) if os.path.exists(rad_path) else Radiator()
+        pump = WaterPump(config_path=pump_path) if os.path.exists(pump_path) else WaterPump(pump_type=PumpType.MECHANICAL)
+        fan = CoolingFan(config_path=fan_path) if os.path.exists(fan_path) else CoolingFan()
+        thermostat = Thermostat(config_path=thermo_path) if os.path.exists(thermo_path) else Thermostat()
+
+        # Create system, potentially loading system-level params
+        system = CoolingSystem(radiator, pump, fan, thermostat, config_path=system_path)
+        logger.info("Created CBR600F4i default cooling system.")
+        return system
+    except Exception as e:
+         logger.error(f"Failed to create CBR600F4i system from configs: {e}. Returning basic default.")
+         return CoolingSystem(Radiator(), WaterPump(pump_type=PumpType.MECHANICAL), CoolingFan(), Thermostat())
 
 
-def create_cbr600f4i_cooling_system() -> CoolingSystem:
-    """
-    Create a cooling system configured for the Honda CBR600F4i engine.
-    
-    Returns:
-        CoolingSystem configured for CBR600F4i
-    """
-    # Create radiator
-    radiator = Radiator(
-        radiator_type=RadiatorType.SINGLE_CORE_ALUMINUM,
-        core_area=0.16,       # m²
-        core_thickness=0.04,  # m
-        fin_density=15,       # fins/inch
-        tube_rows=2
-    )
-    
-    # Create water pump (mechanical, engine-driven)
-    water_pump = WaterPump(
-        pump_type=PumpType.MECHANICAL,
-        max_flow_rate=60.0,   # L/min
-        max_pressure=1.6,     # bar
-        nominal_speed=5000.0, # RPM
-        mechanical_efficiency=0.7
-    )
-    
-    # Create cooling fan
-    cooling_fan = CoolingFan(
-        fan_type=FanType.VARIABLE_SPEED,
-        max_airflow=0.25,     # m³/s
-        diameter=0.28,        # m
-        max_power=80.0,       # W
-        voltage=12.0          # V
-    )
-    
-    # Create thermostat
-    thermostat = Thermostat(
-        opening_temp=82.0,    # °C
-        full_open_temp=92.0,  # °C
-        bypass_flow_max=10.0  # L/min
-    )
-    
-    # Create complete cooling system
-    cooling_system = CoolingSystem(
-        radiator=radiator,
-        water_pump=water_pump,
-        cooling_fan=cooling_fan,
-        thermostat=thermostat
-    )
-    
-    # Set additional system parameters
-    cooling_system.coolant_volume = 2.4  # L, typical for CBR600F4i
-    cooling_system.system_pressure_cap = 1.1  # bar
-    
-    return cooling_system
+def create_formula_student_cooling_system(config_dir: str = "configs/thermal") -> CoolingSystem:
+    """Create an optimized cooling system typical for Formula Student."""
+    # Assumes config files are tailored for FS (e.g., electric pump, potentially larger radiator)
+    try:
+        # Use generic config names defined in the project structure
+        rad_path = os.path.join(config_dir, "cooling_system.yaml") # Radiator params might be in main file
+        pump_path = os.path.join(config_dir, "cooling_system.yaml") # Pump params might be in main file
+        fan_path = os.path.join(config_dir, "cooling_system.yaml") # Fan params might be in main file
+        thermo_path = os.path.join(config_dir, "cooling_system.yaml")
+        system_path = os.path.join(config_dir, "cooling_system.yaml") # System params
+
+        # Create components using the main cooling_system config file
+        radiator = Radiator(config_path=rad_path) if os.path.exists(rad_path) else \
+                   Radiator(radiator_type=RadiatorType.DOUBLE_CORE_ALUMINUM, core_area=0.18) # FS default
+        pump = WaterPump(config_path=pump_path) if os.path.exists(pump_path) else \
+               WaterPump(pump_type=PumpType.ELECTRIC, max_flow_rate_lpm=75) # FS default
+        fan = CoolingFan(config_path=fan_path) if os.path.exists(fan_path) else \
+              CoolingFan(fan_type=FanType.VARIABLE_SPEED, max_airflow_m3s=0.35) # FS default
+        thermostat = Thermostat(config_path=thermo_path) if os.path.exists(thermo_path) else \
+                     Thermostat(opening_temp_C=80, full_open_temp_C=90) # FS default
+
+        system = CoolingSystem(radiator, pump, fan, thermostat, config_path=system_path)
+        logger.info("Created Formula Student optimized cooling system.")
+        return system
+    except Exception as e:
+         logger.error(f"Failed to create FS system from configs: {e}. Returning basic default.")
+         return CoolingSystem(Radiator(), WaterPump(), CoolingFan(), Thermostat())
 
 
-def create_formula_student_cooling_system() -> CoolingSystem:
-    """
-    Create an optimized cooling system for Formula Student application.
-    
-    Returns:
-        CoolingSystem optimized for Formula Student
-    """
-    # Create high-performance radiator
-    radiator = Radiator(
-        radiator_type=RadiatorType.DOUBLE_CORE_ALUMINUM,
-        core_area=0.18,       # m², increased for FS application
-        core_thickness=0.045, # m
-        fin_density=16,       # fins/inch
-        tube_rows=2
-    )
-    
-    # Create water pump (electric for better control)
-    water_pump = WaterPump(
-        pump_type=PumpType.ELECTRIC,
-        max_flow_rate=75.0,   # L/min
-        max_pressure=1.8,     # bar
-        nominal_speed=6000.0, # RPM
-        mechanical_efficiency=0.75
-    )
-    
-    # Create dual cooling fans
-    cooling_fan = CoolingFan(
-        fan_type=FanType.DUAL_FAN,
-        max_airflow=0.4,      # m³/s
-        diameter=0.22,        # m, smaller fans for better packaging
-        max_power=160.0,      # W
-        voltage=12.0          # V
-    )
-    
-    # Create optimal thermostat
-    thermostat = Thermostat(
-        opening_temp=80.0,    # °C, opening earlier for better control
-        full_open_temp=88.0,  # °C
-        bypass_flow_max=12.0  # L/min
-    )
-    
-    # Create complete cooling system
-    cooling_system = CoolingSystem(
-        radiator=radiator,
-        water_pump=water_pump,
-        cooling_fan=cooling_fan,
-        thermostat=thermostat
-    )
-    
-    # Set optimized system parameters
-    cooling_system.coolant_volume = 2.2  # L, reduced for weight savings
-    cooling_system.system_pressure_cap = 1.3  # bar, increased for better boiling point
-    
-    return cooling_system
-
-
-# Example usage
+# Example Usage
 if __name__ == "__main__":
-    # Create a Formula Student cooling system
-    cooling_system = create_formula_student_cooling_system()
-    
-    print("Formula Student Cooling System Specifications:")
-    specs = cooling_system.get_system_specs()
-    
-    # Print radiator specs
-    print("\nRadiator:")
-    for key, value in specs['radiator'].items():
-        print(f"  {key}: {value}")
-    
-    # Print water pump specs
-    print("\nWater Pump:")
-    for key, value in specs['water_pump'].items():
-        print(f"  {key}: {value}")
-    
-    # Print cooling fan specs
-    print("\nCooling Fan:")
-    for key, value in specs['cooling_fan'].items():
-        print(f"  {key}: {value}")
-    
-    # Print thermostat specs
-    print("\nThermostat:")
-    for key, value in specs['thermostat'].items():
-        print(f"  {key}: {value}")
-    
-    # Run a simple simulation
-    print("\nRunning simulation...")
-    
-    # Initial conditions
-    ambient_temp = 30.0  # °C
-    vehicle_speed = 15.0  # m/s (~54 km/h)
-    engine_rpm = 8000.0  # RPM
-    engine_load = 0.7    # 70% load
-    engine_heat = 30000.0  # W (30 kW heat into coolant)
-    
-    # Simulate for 60 seconds with 1 second steps
-    for i in range(60):
-        state = cooling_system.simulate_step(
-            ambient_temp, vehicle_speed,
-            cooling_system.coolant_temp, engine_rpm, engine_load,
-            engine_heat, 1.0
-        )
-        
-        # Print every 10 seconds
-        if i % 10 == 0:
-            print(f"\nTime: {i}s")
-            print(f"  Coolant Temp: {state['coolant_temp']:.1f}°C")
-            print(f"  Heat Rejection: {state['radiator_heat_rejection']/1000:.1f} kW")
-            print(f"  Fan Duty: {state['fan_control_signal']*100:.0f}%")
-            print(f"  Pump Flow: {state['water_pump']['current_flow_rate']:.1f} L/min")
-    
-    # Calculate and plot system performance
-    print("\nCalculating performance map...")
-    
-    # Define test ranges
-    ambient_temps = np.linspace(20, 40, 5)  # 20-40°C
-    engine_heats = np.linspace(10000, 50000, 5)  # 10-50 kW
-    
-    # Calculate performance
-    performance = cooling_system.calculate_system_performance(ambient_temps, engine_heats)
-    
-    # Print cooling capacities
-    print("\nCooling Capacities:")
-    for temp, capacity in zip(ambient_temps, performance['cooling_capacities']):
-        print(f"  At {temp:.1f}°C: {capacity/1000:.1f} kW")
-    
-    print("\nSimulation complete!")
+    # Create and test the FS optimized system
+    fs_system = create_formula_student_cooling_system()
+
+    print("\n--- Formula Student Cooling System Specs ---")
+    specs = fs_system.get_system_specs()
+    print(yaml.dump(specs, default_flow_style=False))
+
+    # Simulate a step
+    print("\n--- Simulating Step ---")
+    state = fs_system.simulate_step(
+        ambient_temp_C=30.0,
+        vehicle_speed_mps=5.0, # Low speed
+        engine_rpm=7000,
+        engine_load=0.6,
+        engine_heat_input_W=25000, # 25kW heat
+        dt=1.0
+    )
+    print("State after 1 second step:")
+    print(f" Coolant Temp: {state['coolant_temp_C']:.1f}°C")
+    print(f" Heat Rejected: {state['radiator_heat_rejection_W']/1000:.1f} kW")
+    print(f" Fan Duty: {state.get('cooling_fan',{}).get('duty_cycle',0)*100:.0f}%")
+    print(f" Pump Flow: {state['water_pump']['flow_lpm']:.1f} LPM")
+
+    # Analyze performance
+    print("\n--- Analyzing Performance Map ---")
+    ambients = [20, 25, 30, 35, 40]
+    heats = [10000, 20000, 30000, 40000, 50000]
+    perf_data = fs_system.calculate_system_performance(ambients, heats, vehicle_speed_mps=10.0)
+
+    # Plot performance map
+    fs_system.plot_performance_map(perf_data)
+
+    # Plot cooling capacity
+    fs_system.plot_cooling_capacity(perf_data)

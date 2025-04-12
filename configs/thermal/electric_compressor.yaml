@@ -1,38 +1,44 @@
-﻿# Electric Compressor Configuration for Formula Student
+﻿# Electric Compressor Configuration for Formula Student Cooling Assist
 
 # Compressor parameters
 compressor:
-  type: "CENTRIFUGAL"           # CENTRIFUGAL, AXIAL, MIXED_FLOW, TWIN_STAGE
-  control_method: "ADAPTIVE"    # ON_OFF, VARIABLE_SPEED, PID_CONTROL, ADAPTIVE
-  max_airflow: 0.25             # m³/s
-  max_pressure: 180.0           # Pa
-  max_power: 100.0              # W
-  voltage: 12.0                 # V
-  diameter: 0.1                 # m
-  weight: 0.8                   # kg
-  response_time: 0.2            # seconds
+  type: "CENTRIFUGAL"           # Options: CENTRIFUGAL, AXIAL, MIXED_FLOW, TWIN_STAGE, CUSTOM
+  max_airflow: 0.25             # m³/s - Maximum airflow at free flow conditions
+  max_pressure: 180.0           # Pa - Maximum static pressure rise generated
+  max_power: 100.0              # W - Maximum electrical power consumption
+  voltage: 12.0                 # V - Operating voltage
+  diameter: 0.1                 # m - Compressor impeller/outlet diameter
+  weight: 0.8                   # kg - Compressor weight
+  response_time: 0.2            # seconds - Time constant for speed changes
+  efficiency: 0.68              # Aerodynamic efficiency (0-1)
+  # Optional custom parameters if type is CUSTOM
+  # pressure_ratio_max: 1.25
+  # noise_level: 68
 
 # Control parameters
 control:
-  strategy: "ADAPTIVE"          # ON_OFF, VARIABLE_SPEED, PID_CONTROL, ADAPTIVE
-  target_temp: 90.0             # °C
-  max_temp: 98.0                # °C
-  min_temp: 85.0                # °C
-  
-  # PID control parameters
+  strategy: "ADAPTIVE"          # Options: ON_OFF, VARIABLE_SPEED, PID_CONTROL, ADAPTIVE, CUSTOM
+  target_temp: 90.0             # °C - Target coolant temperature for control logic
+  max_temp: 98.0                # °C - Temperature for maximum compressor speed
+  min_temp: 85.0                # °C - Temperature below which compressor is generally off
+
+  # PID control parameters (only used if strategy is PID_CONTROL)
   pid:
     kp: 0.12                    # Proportional gain
     ki: 0.02                    # Integral gain
     kd: 0.08                    # Derivative gain
-  
-  # Adaptive control parameters
-  adaptive:
-    temp_weight: 0.7
-    speed_weight: 0.2
-    load_weight: 0.1
+    integral_limit: 5.0         # Limit for integral term to prevent windup
 
-# Ducting parameters
+  # Adaptive control parameters (only used if strategy is ADAPTIVE)
+  adaptive:
+    temp_weight: 0.7            # Weight for temperature error in control calculation
+    speed_weight: 0.2           # Weight for vehicle speed (higher speed = less assist)
+    load_weight: 0.1            # Weight for engine load (higher load = more assist)
+    activation_threshold: 0.2   # Minimum weighted sum to activate compressor
+
+# Ducting parameters (associated with the compressor installation)
 ducting:
-  duct_diameter: 0.08           # m
-  duct_length: 0.5              # m
-  discharge_area: 0.01          # m²
+  duct_diameter: 0.08           # m - Diameter of duct connecting compressor to radiator
+  duct_length: 0.5              # m - Length of the duct
+  discharge_area: 0.01          # m² - Area where compressor air exits (e.g., radiator face area covered)
+  pressure_loss_coefficient: 0.8 # Estimated pressure loss coefficient of the ducting

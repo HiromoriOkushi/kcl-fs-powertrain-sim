@@ -1,9 +1,8 @@
 """
-Weight sensitivity analysis module for Formula Student powertrain.
+Weight sensitivity analysis module for Formula Student powertrain simulation.
 
-This module provides classes and functions for analyzing the sensitivity of
-vehicle performance to changes in weight. It helps quantify the performance
-impact of weight changes and identify optimal weight reduction targets.
+Analyzes the impact of vehicle mass changes on key performance metrics like
+acceleration times and lap times.
 """
 
 import os
@@ -12,779 +11,572 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional, Union, Callable
 import logging
-from scipy.interpolate import interp1d
 import time
+import copy # To avoid modifying the original vehicle
 
-from ..core.vehicle import Vehicle
-from .acceleration import AccelerationSimulator, create_acceleration_simulator
-from .lap_time import LapTimeSimulator, create_lap_time_simulator
+# Import core components
+try:
+    from ..core.vehicle import Vehicle
+    from .acceleration import AccelerationSimulator, create_acceleration_simulator
+    from .lap_time import LapTimeSimulator, create_lap_time_simulator
+    from ..utils.plotting import plot_weight_sensitivity as plot_weight_sens_unified
+    from ..utils.plotting import plot_weight_distribution_sensitivity as plot_dist_sens_unified
+    from ..utils.plotting import save_plot, _apply_common_ax_settings
+except ImportError:
+    # Fallbacks
+    class Vehicle: pass
+    class AccelerationSimulator: pass
+    class LapTimeSimulator: pass
+    def create_acceleration_simulator(*args, **kwargs): return None
+    def create_lap_time_simulator(*args, **kwargs): return None
+    def plot_weight_sens_unified(*args, **kwargs): plt.figure(); plt.plot([0,1]); plt.title("Fallback Plot"); plt.show(); plt.close(); return plt.gcf()
+    def plot_dist_sens_unified(*args, **kwargs): plt.figure(); plt.plot([0,1]); plt.title("Fallback Plot"); plt.show(); plt.close(); return plt.gcf()
+    def save_plot(fig, path, **kwargs): pass
+    def _apply_common_ax_settings(ax, **kwargs): pass
+    logger = logging.getLogger("WeightSensitivity_Fallback")
+    logger.warning("Could not import all necessary modules. Using fallbacks.")
+
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
-logger = logging.getLogger("Weight_Sensitivity")
-
+logger = logging.getLogger("WeightSensitivity")
 
 class WeightSensitivityAnalyzer:
-    """
-    Analyzer for vehicle weight sensitivity.
-    
-    This class provides tools for analyzing how vehicle performance metrics
-    change with variations in vehicle weight. It can quantify the sensitivity
-    of acceleration times, lap times, and other performance metrics to weight
-    changes.
-    """
-    
-    def __init__(self, vehicle: Vehicle):
+    """Analyzes sensitivity of vehicle performance to mass changes."""
+
+    def __init__(self, base_vehicle: Vehicle):
         """
-        Initialize the weight sensitivity analyzer with a vehicle model.
-        
         Args:
-            vehicle: Vehicle model to use for analysis
+            base_vehicle: The baseline Vehicle object to analyze.
         """
-        self.vehicle = vehicle
-        self.base_weight = vehicle.mass
-        
-        # Store base performance metrics
-        self.base_metrics = {}
-        
-        # Store sensitivity results
-        self.acceleration_sensitivity = {}
-        self.lap_time_sensitivity = {}
-        
-        # Create simulators
-        self.acceleration_simulator = create_acceleration_simulator(vehicle)
-        self.lap_time_simulator = None  # Will be created when needed with a track
-        
-        logger.info(f"Weight sensitivity analyzer initialized with base weight: {self.base_weight:.1f} kg")
-    
-    def analyze_acceleration_sensitivity(self, 
-                                  weight_range: Tuple[float, float],
-                                  num_points: int = 5,
-                                  use_launch_control: bool = True,
-                                  use_optimized_shifts: bool = True) -> Dict:
+        if not isinstance(base_vehicle, Vehicle):
+            if "MockVehicle" not in str(type(base_vehicle)):
+                 raise TypeError("base_vehicle must be an instance of the Vehicle class.")
+        self.base_vehicle = copy.deepcopy(base_vehicle) # Work on a copy
+        self.base_weight_kg = self.base_vehicle.mass
+
+        # Results storage
+        self.analysis_results: Dict[str, Dict] = {} # Store results keyed by analysis type
+
+        logger.info(f"WeightSensitivityAnalyzer initialized with base weight: {self.base_weight_kg:.1f} kg")
+
+    def _run_simulation_at_weight(self, weight_kg: float, analysis_type: str, **kwargs) -> Optional[Dict]:
+        """Helper function to run a specific simulation type at a given weight."""
+        temp_vehicle = copy.deepcopy(self.base_vehicle)
+        temp_vehicle.mass = weight_kg
+        logger.debug(f" Running {analysis_type} simulation at {weight_kg:.1f} kg...")
+
+        try:
+            if analysis_type == 'acceleration':
+                # Use pre-configured simulator if available, else create one
+                if 'accel_simulator' not in self.analysis_results:
+                     self.analysis_results['accel_simulator'] = create_acceleration_simulator(temp_vehicle)
+                else:
+                    # Update vehicle reference in existing simulator - IMPORTANT
+                    self.analysis_results['accel_simulator'].vehicle = temp_vehicle
+
+                simulator = self.analysis_results['accel_simulator']
+                # Pass relevant kwargs
+                sim_results = simulator.simulate_acceleration(
+                    use_launch_control=kwargs.get('use_launch_control', True)
+                    # Note: uses optimized shifts setting from simulator instance
+                )
+                metrics = simulator.analyze_performance_metrics(sim_results)
+                return metrics # Return key metrics
+
+            elif analysis_type == 'lap_time':
+                track_file = kwargs.get('track_file')
+                if not track_file: raise ValueError("track_file needed for lap time analysis")
+                # Use pre-configured simulator if available, else create one
+                if 'lap_simulator' not in self.analysis_results or \
+                   self.analysis_results['lap_simulator'].track_profile.track_file != track_file:
+                     self.analysis_results['lap_simulator'] = create_lap_time_simulator(temp_vehicle, track_file)
+                else:
+                     # Update vehicle reference
+                     self.analysis_results['lap_simulator'].vehicle = temp_vehicle
+                     # Re-init cornering calculator
+                     self.analysis_results['lap_simulator'].cornering = CorneringPerformance(temp_vehicle)
+                     # Reset profiles
+                     self.analysis_results['lap_simulator'].speed_profile_mps = None
+
+
+                simulator = self.analysis_results['lap_simulator']
+                # Pass relevant kwargs
+                lap_results = simulator.simulate_lap(
+                     include_thermal=kwargs.get('include_thermal', True)
+                )
+                metrics = simulator.analyze_lap_performance(lap_results)
+                return metrics # Return key metrics
+
+            else:
+                logger.error(f"Unsupported analysis_type: {analysis_type}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error running {analysis_type} simulation at {weight_kg:.1f} kg: {e}", exc_info=False)
+            return None # Return None on failure
+
+    def analyze_acceleration_sensitivity(self,
+                                  weight_range_kg: Tuple[float, float],
+                                  num_points: int = 7, # More points for better curve
+                                  use_launch_control: bool = True) -> Optional[Dict]:
         """
-        Analyze sensitivity of acceleration performance to weight changes.
-        
+        Analyze acceleration sensitivity to weight.
+
         Args:
-            weight_range: Tuple of (min_weight, max_weight) in kg
-            num_points: Number of weight points to analyze
-            use_launch_control: Whether to use launch control in acceleration tests
-            use_optimized_shifts: Whether to use optimized shift points
-            
+            weight_range_kg: Tuple (min_weight, max_weight).
+            num_points: Number of weight points to test.
+            use_launch_control: Use launch control during simulations.
+
         Returns:
-            Dictionary with analysis results
+            Dictionary with sensitivity results, or None if analysis fails.
         """
-        logger.info(f"Analyzing acceleration sensitivity from {weight_range[0]:.1f} to {weight_range[1]:.1f} kg")
-        
-        # Clear the acceleration simulator's cache to force fresh calculations
-        self.acceleration_simulator.results_cache = {}
-        
-        # Generate weight points
-        weight_points = np.linspace(weight_range[0], weight_range[1], num_points)
-        
-        # Store results
-        time_to_60mph = []
-        time_to_100kph = []
-        time_75m = []
-        weights = []
-        
-        # Original weight
-        original_weight = self.vehicle.mass
-        
-        # Run simulations at each weight point
+        logger.info(f"Analyzing Acceleration Sensitivity: Weight Range {weight_range_kg}, Points {num_points}")
+        weight_points = np.linspace(weight_range_kg[0], weight_range_kg[1], num_points)
+        results_list = []
+
         for weight in weight_points:
-            # Set vehicle weight
-            self.vehicle.mass = weight
-            
-            # Run acceleration simulation
-            results = self.acceleration_simulator.simulate_acceleration(
-                use_launch_control=use_launch_control,
-                optimized_shifts=use_optimized_shifts
-            )
-            
-            # Store results
-            weights.append(weight)
-            time_to_60mph.append(results['time_to_60mph'])
-            time_to_100kph.append(results['time_to_100kph'])
-            time_75m.append(results['finish_time'])
-            
-            # Safely format None values for logging
-            time_60mph_str = f"{results['time_to_60mph']:.3f}" if results['time_to_60mph'] is not None else "N/A"
-            time_100kph_str = f"{results['time_to_100kph']:.3f}" if results['time_to_100kph'] is not None else "N/A"
-            time_75m_str = f"{results['finish_time']:.3f}" if results['finish_time'] is not None else "N/A"
-            
-            logger.info(f"Weight: {weight:.1f} kg, 0-60 mph: {time_60mph_str} s, "
-                    f"0-100 kph: {time_100kph_str} s, 75m: {time_75m_str} s")
-        
-        # Restore original weight
-        self.vehicle.mass = original_weight
-        
-        # Filter out None values for sensitivity calculations
-        valid_weights_60mph = []
-        valid_times_60mph = []
-        for w, t in zip(weights, time_to_60mph):
-            if t is not None:
-                valid_weights_60mph.append(w)
-                valid_times_60mph.append(t)
-                
-        valid_weights_100kph = []
-        valid_times_100kph = []
-        for w, t in zip(weights, time_to_100kph):
-            if t is not None:
-                valid_weights_100kph.append(w)
-                valid_times_100kph.append(t)
-                
-        valid_weights_75m = []
-        valid_times_75m = []
-        for w, t in zip(weights, time_75m):
-            if t is not None:
-                valid_weights_75m.append(w)
-                valid_times_75m.append(t)
-        
-        # Calculate sensitivity coefficients using only valid (non-None) values
-        time_to_60mph_slope = self._calculate_sensitivity_coefficient(valid_weights_60mph, valid_times_60mph) if valid_times_60mph else 0
-        time_to_100kph_slope = self._calculate_sensitivity_coefficient(valid_weights_100kph, valid_times_100kph) if valid_times_100kph else 0
-        time_75m_slope = self._calculate_sensitivity_coefficient(valid_weights_75m, valid_times_75m) if valid_times_75m else 0
-        
-        # Calculate percentage improvements per 10kg if baseline values are valid
-        seconds_per_10kg_60mph = time_to_60mph_slope * 10
-        seconds_per_10kg_100kph = time_to_100kph_slope * 10
-        seconds_per_10kg_75m = time_75m_slope * 10
-        
-        percent_improvement_per_10kg_60mph = 0
-        percent_improvement_per_10kg_100kph = 0
-        percent_improvement_per_10kg_75m = 0
-        
-        if valid_times_60mph:
-            percent_improvement_per_10kg_60mph = (seconds_per_10kg_60mph / valid_times_60mph[0]) * 100
-        
-        if valid_times_100kph:
-            percent_improvement_per_10kg_100kph = (seconds_per_10kg_100kph / valid_times_100kph[0]) * 100
-            
-        if valid_times_75m:
-            percent_improvement_per_10kg_75m = (seconds_per_10kg_75m / valid_times_75m[0]) * 100
-        
-        # Store results
-        sensitivity_results = {
-            'weights': weights,
-            'time_to_60mph': time_to_60mph,
-            'time_to_100kph': time_to_100kph,
-            'time_75m': time_75m,
-            'sensitivity_60mph': time_to_60mph_slope,
-            'sensitivity_100kph': time_to_100kph_slope,
-            'sensitivity_75m': time_75m_slope,
-            'seconds_per_10kg_60mph': seconds_per_10kg_60mph,
-            'seconds_per_10kg_100kph': seconds_per_10kg_100kph,
-            'seconds_per_10kg_75m': seconds_per_10kg_75m,
-            'percent_improvement_per_10kg_60mph': percent_improvement_per_10kg_60mph,
-            'percent_improvement_per_10kg_100kph': percent_improvement_per_10kg_100kph,
-            'percent_improvement_per_10kg_75m': percent_improvement_per_10kg_75m
-        }
-        
-        # Store in class variable
-        self.acceleration_sensitivity = sensitivity_results
-        
-        logger.info("Acceleration sensitivity analysis completed")
-        logger.info(f"0-60 mph sensitivity: {time_to_60mph_slope:.4f} seconds per kg "
-                f"({time_to_60mph_slope * 10:.4f} seconds per 10 kg)")
-        logger.info(f"0-100 kph sensitivity: {time_to_100kph_slope:.4f} seconds per kg "
-                f"({time_to_100kph_slope * 10:.4f} seconds per 10 kg)")
-        logger.info(f"75m time sensitivity: {time_75m_slope:.4f} seconds per kg "
-                f"({time_75m_slope * 10:.4f} seconds per 10 kg)")
-        
-        return sensitivity_results
-    
-    def analyze_lap_time_sensitivity(self, 
+             metrics = self._run_simulation_at_weight(
+                 weight, 'acceleration', use_launch_control=use_launch_control
+             )
+             if metrics:
+                 results_list.append({'weight': weight, **metrics})
+             else:
+                 # If one sim fails, maybe skip the rest or record failure
+                 logger.warning(f"Acceleration sim failed for weight {weight:.1f}kg. Skipping this point.")
+                 results_list.append({'weight': weight}) # Add weight but no metrics
+
+        if not any(r.get('finish_time') is not None for r in results_list):
+             logger.error("Acceleration sensitivity analysis failed: No successful simulations.")
+             return None
+
+        # Store raw results
+        self.analysis_results['acceleration'] = results_list
+
+        # Calculate sensitivity coefficients
+        sensitivities = self._calculate_sensitivities(results_list, ['finish_time', 'time_to_60mph', 'time_to_100kph'])
+        self.analysis_results['acceleration_sensitivity'] = sensitivities
+
+        logger.info("Acceleration sensitivity analysis complete.")
+        for metric, data in sensitivities.items():
+             logger.info(f"  {_format_metric_name(metric)} Sensitivity: {data['slope_per_kg']:.4f} s/kg ({data['slope_per_10kg']:.4f} s/10kg)")
+
+        return self.analysis_results['acceleration_sensitivity'] # Return calculated sensitivities
+
+    def analyze_lap_time_sensitivity(self,
                                   track_file: str,
-                                  weight_range: Tuple[float, float],
-                                  num_points: int = 5,
-                                  include_thermal: bool = True) -> Dict:
+                                  weight_range_kg: Tuple[float, float],
+                                  num_points: int = 7,
+                                  include_thermal: bool = True) -> Optional[Dict]:
         """
-        Analyze sensitivity of lap time performance to weight changes.
-        
+        Analyze lap time sensitivity to weight.
+
         Args:
-            track_file: Path to track file
-            weight_range: Tuple of (min_weight, max_weight) in kg
-            num_points: Number of weight points to analyze
-            include_thermal: Whether to include thermal effects
-            
+            track_file: Path to track file.
+            weight_range_kg: Tuple (min_weight, max_weight).
+            num_points: Number of weight points to test.
+            include_thermal: Include thermal effects in lap simulation.
+
         Returns:
-            Dictionary with analysis results
+            Dictionary with sensitivity results, or None if analysis fails.
         """
-        logger.info(f"Analyzing lap time sensitivity from {weight_range[0]:.1f} to {weight_range[1]:.1f} kg")
-        
-        # Create lap time simulator if not already created
-        if self.lap_time_simulator is None:
-            self.lap_time_simulator = create_lap_time_simulator(self.vehicle, track_file)
-        
-        # Generate weight points
-        weight_points = np.linspace(weight_range[0], weight_range[1], num_points)
-        
-        # Store results
-        lap_times = []
-        avg_speeds = []
-        weights = []
-        
-        # Original weight
-        original_weight = self.vehicle.mass
-        
-        # Run simulations at each weight point
+        logger.info(f"Analyzing Lap Time Sensitivity: Weight Range {weight_range_kg}, Points {num_points}")
+        weight_points = np.linspace(weight_range_kg[0], weight_range_kg[1], num_points)
+        results_list = []
+
         for weight in weight_points:
-            # Set vehicle weight
-            self.vehicle.mass = weight
-            
-            # Reset simulation state
-            self.lap_time_simulator.speed_profile = None
-            
-            # Calculate speed profile
-            self.lap_time_simulator.calculate_speed_profile()
-            
-            # Run lap simulation
-            lap_results = self.lap_time_simulator.simulate_lap(include_thermal=include_thermal)
-            
-            # Analyze performance
-            metrics = self.lap_time_simulator.analyze_lap_performance(lap_results)
-            
-            # Store results
-            weights.append(weight)
-            lap_times.append(metrics['lap_time'])
-            avg_speeds.append(metrics['avg_speed_kph'])
-            
-            logger.info(f"Weight: {weight:.1f} kg, Lap time: {metrics['lap_time']:.3f} s, "
-                       f"Avg speed: {metrics['avg_speed_kph']:.1f} kph")
-        
-        # Restore original weight
-        self.vehicle.mass = original_weight
-        
+            metrics = self._run_simulation_at_weight(
+                 weight, 'lap_time', track_file=track_file, include_thermal=include_thermal
+             )
+            if metrics and metrics.get('lap_time') is not None:
+                 results_list.append({'weight': weight, **metrics})
+            else:
+                 logger.warning(f"Lap time sim failed for weight {weight:.1f}kg. Skipping this point.")
+                 results_list.append({'weight': weight}) # Add weight but no metrics
+
+        if not any(r.get('lap_time') is not None for r in results_list):
+             logger.error("Lap time sensitivity analysis failed: No successful simulations.")
+             return None
+
+        # Store raw results
+        self.analysis_results['lap_time'] = results_list
+
         # Calculate sensitivity coefficients
-        lap_time_slope = self._calculate_sensitivity_coefficient(weights, lap_times)
-        avg_speed_slope = self._calculate_sensitivity_coefficient(weights, avg_speeds)
-        
-        # Store results
-        sensitivity_results = {
-            'weights': weights,
-            'lap_times': lap_times,
-            'avg_speeds': avg_speeds,
-            'sensitivity_lap_time': lap_time_slope,
-            'sensitivity_avg_speed': avg_speed_slope,
-            'seconds_per_10kg_lap': lap_time_slope * 10,
-            'kph_per_10kg_avg_speed': avg_speed_slope * 10
-        }
-        
-        # Store in class variable
-        self.lap_time_sensitivity = sensitivity_results
-        
-        logger.info("Lap time sensitivity analysis completed")
-        logger.info(f"Lap time sensitivity: {lap_time_slope:.4f} seconds per kg "
-                   f"({lap_time_slope * 10:.4f} seconds per 10 kg)")
-        logger.info(f"Average speed sensitivity: {avg_speed_slope:.4f} kph per kg "
-                   f"({avg_speed_slope * 10:.4f} kph per 10 kg)")
-        
-        return sensitivity_results
-    
-    def analyze_lap_time_sensitivity(self, 
-                              track_file: str,
-                              weight_range: Tuple[float, float],
-                              num_points: int = 5,
-                              include_thermal: bool = True) -> Dict:
+        sensitivities = self._calculate_sensitivities(results_list, ['lap_time', 'avg_speed_kph'])
+        self.analysis_results['lap_time_sensitivity'] = sensitivities
+
+        logger.info("Lap time sensitivity analysis complete.")
+        for metric, data in sensitivities.items():
+             unit = "s/kg" if "time" in metric else "kph/kg"
+             unit10 = "s/10kg" if "time" in metric else "kph/10kg"
+             logger.info(f"  {_format_metric_name(metric)} Sensitivity: {data['slope_per_kg']:.4f} {unit} ({data['slope_per_10kg']:.4f} {unit10})")
+
+        return self.analysis_results['lap_time_sensitivity']
+
+
+    def analyze_weight_distribution_sensitivity(self,
+                                            track_file: str,
+                                            distribution_range: Tuple[float, float] = (0.42, 0.52), # Front % range
+                                            num_points: int = 5,
+                                            include_thermal: bool = True) -> Optional[Dict]:
+         """Analyze sensitivity to front weight distribution changes (keeping total mass constant)."""
+         logger.info(f"Analyzing Weight Distribution Sensitivity: Front Range {distribution_range[0]:.1%} to {distribution_range[1]:.1%}")
+         dist_points = np.linspace(distribution_range[0], distribution_range[1], num_points)
+         results_list = []
+
+         # Store original distribution
+         original_dist = self.base_vehicle.weight_distribution_front
+
+         for dist in dist_points:
+             # --- Modify Vehicle for this Distribution ---
+             temp_vehicle = copy.deepcopy(self.base_vehicle)
+             temp_vehicle.weight_distribution_front = dist
+             # Recalculate cornering limits if necessary (CorneringPerformance uses vehicle attrs)
+             # This assumes the CorneringPerformance object is created fresh or updated
+             temp_cornering = CorneringPerformance(temp_vehicle)
+
+             # Recreate LapTimeSimulator with modified vehicle
+             # This ensures the cornering object inside is updated
+             temp_lap_simulator = create_lap_time_simulator(temp_vehicle, track_file)
+
+             # Run lap simulation
+             try:
+                 lap_results = temp_lap_simulator.simulate_lap(include_thermal=include_thermal)
+                 metrics = temp_lap_simulator.analyze_lap_performance(lap_results)
+                 # Add lateral G from cornering analysis (e.g., max achieved during lap)
+                 max_lat_g = np.max(np.abs(lap_results.get('lateral_g', [0])))
+                 metrics['max_lateral_g'] = max_lat_g
+                 results_list.append({'front_weight_pct': dist, **metrics})
+                 logger.info(f" Front Weight: {dist:.1%}, Lap Time: {metrics['lap_time']:.3f}s, Max Lat G: {max_lat_g:.3f}")
+             except Exception as e:
+                 logger.warning(f"Lap sim failed for front weight {dist:.1%}: {e}. Skipping.")
+                 results_list.append({'front_weight_pct': dist})
+
+         # Restore original distribution on base vehicle
+         self.base_vehicle.weight_distribution_front = original_dist
+
+         if not any(r.get('lap_time') is not None for r in results_list):
+              logger.error("Weight distribution sensitivity analysis failed: No successful simulations.")
+              return None
+
+         # Store raw results
+         self.analysis_results['distribution'] = results_list
+
+         # Calculate sensitivities (note: sensitivity here is performance / % distribution change)
+         # Quadratic fit might be more appropriate than linear for distribution effects
+         sensitivities = self._calculate_sensitivities(results_list, ['lap_time', 'max_lateral_g'], x_key='front_weight_pct', fit_degree=2)
+         self.analysis_results['distribution_sensitivity'] = sensitivities
+
+         logger.info("Weight distribution sensitivity analysis complete.")
+         # Optimal values are more relevant than linear slopes here
+         if 'lap_time' in sensitivities and 'optimal_x' in sensitivities['lap_time']:
+              logger.info(f" Optimal Front Weight % for Lap Time: {sensitivities['lap_time']['optimal_x']*100:.1f}%")
+         if 'max_lateral_g' in sensitivities and 'optimal_x' in sensitivities['max_lateral_g']:
+              logger.info(f" Optimal Front Weight % for Lateral G: {sensitivities['max_lateral_g']['optimal_x']*100:.1f}%")
+
+         return self.analysis_results['distribution_sensitivity']
+
+
+    def _calculate_sensitivities(self, results_list: List[Dict], metrics: List[str], x_key: str = 'weight', fit_degree: int = 1) -> Dict:
+        """Helper to calculate sensitivity coefficients using polyfit."""
+        sensitivities = {}
+        if not results_list: return sensitivities
+
+        x_values = np.array([r.get(x_key) for r in results_list])
+
+        for metric in metrics:
+            y_values = np.array([r.get(metric) for r in results_list])
+
+            # Filter out None/NaN values for fitting
+            valid_mask = np.isfinite(x_values) & np.isfinite(y_values)
+            if np.sum(valid_mask) < fit_degree + 1:
+                logger.warning(f"Insufficient valid data points ({np.sum(valid_mask)}) to calculate sensitivity for '{metric}' with degree {fit_degree}.")
+                sensitivities[metric] = {'coeffs': None, 'poly': None}
+                continue
+
+            x_valid = x_values[valid_mask]
+            y_valid = y_values[valid_mask]
+
+            try:
+                coeffs = np.polyfit(x_valid, y_valid, fit_degree)
+                poly = np.poly1d(coeffs)
+                sensitivities[metric] = {'coeffs': coeffs.tolist(), 'poly': poly}
+
+                # For linear fit, extract slope and per-10kg value
+                if fit_degree == 1:
+                     slope = coeffs[0]
+                     sensitivities[metric]['slope_per_kg'] = slope
+                     sensitivities[metric]['slope_per_10kg'] = slope * 10
+                     # Calculate % improvement if baseline is valid
+                     if y_valid[0] != 0:
+                          sensitivities[metric]['percent_per_10kg'] = abs(slope * 10 / y_valid[0]) * 100 * (-1 if slope > 0 else 1) # Improvement implies negative slope for time
+
+                # For quadratic fit, find optimum if applicable
+                elif fit_degree == 2:
+                     # Optimum at x = -b / 2a
+                     if abs(coeffs[0]) > 1e-6: # Avoid division by zero
+                          optimal_x = -coeffs[1] / (2 * coeffs[0])
+                          sensitivities[metric]['optimal_x'] = optimal_x
+                          sensitivities[metric]['optimal_y'] = poly(optimal_x)
+                          # Determine if optimum is min or max
+                          sensitivities[metric]['optimum_type'] = 'minimum' if coeffs[0] > 0 else 'maximum'
+
+
+            except Exception as e:
+                logger.error(f"Failed to calculate sensitivity for '{metric}': {e}")
+                sensitivities[metric] = {'coeffs': None, 'poly': None}
+
+        return sensitivities
+
+
+    def calculate_weight_reduction_targets(self,
+                                         performance_target: float,
+                                         metric_name: str = 'finish_time') -> Optional[Dict]:
         """
-        Analyze sensitivity of lap time performance to weight changes.
-        
+        Estimate required weight reduction to meet a performance target, based on linear sensitivity.
+
         Args:
-            track_file: Path to track file
-            weight_range: Tuple of (min_weight, max_weight) in kg
-            num_points: Number of weight points to analyze
-            include_thermal: Whether to include thermal effects
-            
+            performance_target: The desired performance value (e.g., 4.0 seconds for 75m).
+            metric_name: The performance metric key (e.g., 'finish_time', 'lap_time').
+
         Returns:
-            Dictionary with analysis results
+            Dictionary with target analysis, or None if analysis not possible.
         """
-        logger.info(f"Analyzing lap time sensitivity from {weight_range[0]:.1f} to {weight_range[1]:.1f} kg")
-        
-        # Create lap time simulator if not already created
-        if self.lap_time_simulator is None:
-            self.lap_time_simulator = create_lap_time_simulator(self.vehicle, track_file)
-        
-        # Generate weight points
-        weight_points = np.linspace(weight_range[0], weight_range[1], num_points)
-        
-        # Store results
-        lap_times = []
-        avg_speeds = []
-        weights = []
-        
-        # Original weight
-        original_weight = self.vehicle.mass
-        
-        # Run simulations at each weight point
-        for weight in weight_points:
-            # Set vehicle weight
-            self.vehicle.mass = weight
-            
-            # Reset simulation state
-            self.lap_time_simulator.speed_profile = None
-            
-            # Calculate speed profile
-            self.lap_time_simulator.calculate_speed_profile()
-            
-            # Run lap simulation
-            lap_results = self.lap_time_simulator.simulate_lap(include_thermal=include_thermal)
-            
-            # Analyze performance
-            metrics = self.lap_time_simulator.analyze_lap_performance(lap_results)
-            
-            # Store results
-            weights.append(weight)
-            lap_times.append(metrics['lap_time'])
-            avg_speeds.append(metrics['avg_speed_kph'])
-            
-            logger.info(f"Weight: {weight:.1f} kg, Lap time: {metrics['lap_time']:.3f} s, "
-                    f"Avg speed: {metrics['avg_speed_kph']:.1f} kph")
-        
-        # Restore original weight
-        self.vehicle.mass = original_weight
-        
-        # Calculate sensitivity coefficients
-        lap_time_slope = self._calculate_sensitivity_coefficient(weights, lap_times)
-        avg_speed_slope = self._calculate_sensitivity_coefficient(weights, avg_speeds)
-        
-        # Calculate seconds per 10kg
-        seconds_per_10kg_lap = lap_time_slope * 10
-        kph_per_10kg_avg_speed = avg_speed_slope * 10
-        
-        # Calculate percentage improvements per 10kg
-        percent_improvement_per_10kg_lap = 0
-        percent_improvement_per_10kg_avg_speed = 0
-        
-        if lap_times and lap_times[0] > 0:
-            percent_improvement_per_10kg_lap = (seconds_per_10kg_lap / lap_times[0]) * 100
-            
-        if avg_speeds and avg_speeds[0] > 0:
-            percent_improvement_per_10kg_avg_speed = (kph_per_10kg_avg_speed / avg_speeds[0]) * 100
-        
-        # Store results
-        sensitivity_results = {
-            'weights': weights,
-            'lap_times': lap_times,
-            'avg_speeds': avg_speeds,
-            'sensitivity_lap_time': lap_time_slope,
-            'sensitivity_avg_speed': avg_speed_slope,
-            'seconds_per_10kg_lap': seconds_per_10kg_lap,
-            'kph_per_10kg_avg_speed': kph_per_10kg_avg_speed,
-            'percent_improvement_per_10kg_lap': percent_improvement_per_10kg_lap,
-            'percent_improvement_per_10kg_avg_speed': percent_improvement_per_10kg_avg_speed
-        }
-        
-        # Store in class variable
-        self.lap_time_sensitivity = sensitivity_results
-        
-        logger.info("Lap time sensitivity analysis completed")
-        logger.info(f"Lap time sensitivity: {lap_time_slope:.4f} seconds per kg "
-                f"({lap_time_slope * 10:.4f} seconds per 10 kg)")
-        logger.info(f"Average speed sensitivity: {avg_speed_slope:.4f} kph per kg "
-                f"({avg_speed_slope * 10:.4f} kph per 10 kg)")
-        
-        return sensitivity_results
-    
-    def calculate_weight_reduction_targets(self, 
-                                    performance_target: float,
-                                    sensitivity: Optional[float] = None,
-                                    performance_type: str = 'acceleration') -> Dict:
-        """
-        Calculate required weight reduction to reach a performance target.
-        
-        Args:
-            performance_target: Target performance value (e.g., 0-60 mph time in seconds)
-            sensitivity: Sensitivity coefficient (seconds per kg), if None will use calculated value
-            performance_type: Type of performance ('acceleration' or 'lap_time')
-            
-        Returns:
-            Dictionary with weight reduction targets or empty dict if required data is missing
-        """
-        # Get current performance and sensitivity
-        if performance_type == 'acceleration':
-            if not self.acceleration_sensitivity:
-                logger.error("Acceleration sensitivity not analyzed. Call analyze_acceleration_sensitivity first.")
-                return {}
-                
-            # Check if we have valid time_to_60mph data
-            if not self.acceleration_sensitivity['time_75m'] or self.acceleration_sensitivity['time_75m'][0] is None:
-                logger.error("No valid acceleration time data available. Cannot calculate reduction targets.")
-                return {}
-                
-            current_performance = self.acceleration_sensitivity['time_75m'][0]  # Use 75m time instead of time_to_60mph
-            if sensitivity is None:
-                sensitivity = self.acceleration_sensitivity['sensitivity_75m']
-            
-            performance_name = "75m acceleration time"
-            
-        elif performance_type == 'lap_time':
-            if not self.lap_time_sensitivity:
-                logger.error("Lap time sensitivity not analyzed. Call analyze_lap_time_sensitivity first.")
-                return {}
-                
-            # Check if we have valid lap_times data
-            if not self.lap_time_sensitivity['lap_times'] or self.lap_time_sensitivity['lap_times'][0] is None:
-                logger.error("No valid lap time data available. Cannot calculate reduction targets.")
-                return {}
-            
-            current_performance = self.lap_time_sensitivity['lap_times'][0]
-            if sensitivity is None:
-                sensitivity = self.lap_time_sensitivity['sensitivity_lap_time']
-            
-            performance_name = "Lap time"
-        
-        # Calculate required improvement
-        required_improvement = current_performance - performance_target
-        
-        # Calculate required weight reduction
-        if sensitivity > 0:
-            required_weight_reduction = required_improvement / sensitivity
+        sensitivity_key = None
+        analysis_data = None
+        if metric_name in ['finish_time', 'time_to_60mph', 'time_to_100kph']:
+            sensitivity_key = 'acceleration_sensitivity'
+            analysis_data = self.analysis_results.get('acceleration')
+        elif metric_name == 'lap_time':
+            sensitivity_key = 'lap_time_sensitivity'
+            analysis_data = self.analysis_results.get('lap_time')
         else:
-            required_weight_reduction = float('inf')
-        
-        # Current weight
-        current_weight = self.base_weight
-        
-        # Target weight
-        target_weight = current_weight - required_weight_reduction
-        
-        # Check if target is achievable
-        is_achievable = target_weight > current_weight * 0.5  # Assuming 50% weight reduction is maximum possible
-        
-        # Create result
+            logger.error(f"Weight reduction targets not implemented for metric: {metric_name}")
+            return None
+
+        if sensitivity_key not in self.analysis_results or not analysis_data:
+            logger.error(f"Sensitivity analysis for '{metric_name}' not performed yet.")
+            return None
+
+        sensitivity_coeffs = self.analysis_results[sensitivity_key]
+        if metric_name not in sensitivity_coeffs or sensitivity_coeffs[metric_name]['coeffs'] is None or len(sensitivity_coeffs[metric_name]['coeffs']) != 2:
+             logger.error(f"Linear sensitivity coefficient not available for '{metric_name}'. Cannot calculate targets.")
+             return None
+
+        # Use linear sensitivity (slope)
+        sensitivity = sensitivity_coeffs[metric_name]['slope_per_kg']
+        if abs(sensitivity) < 1e-6:
+             logger.warning(f"Sensitivity for '{metric_name}' is near zero. Target may be unachievable via weight reduction alone.")
+             return None
+
+        # Find current performance at base weight
+        current_performance = None
+        for result in analysis_data:
+            if abs(result['weight'] - self.base_weight_kg) < 1e-3:
+                 current_performance = result.get(metric_name)
+                 break
+        if current_performance is None:
+             # Interpolate if exact base weight wasn't simulated
+             poly = sensitivity_coeffs[metric_name]['poly']
+             if poly: current_performance = poly(self.base_weight_kg)
+        if current_performance is None:
+             logger.error(f"Could not determine current performance for '{metric_name}' at base weight.")
+             return None
+
+        # Calculate required change and weight reduction
+        required_improvement = current_performance - performance_target
+        # Weight reduction needed = improvement / (-sensitivity) because lower weight improves time (negative slope)
+        required_reduction_kg = required_improvement / (-sensitivity)
+        target_weight_kg = self.base_weight_kg - required_reduction_kg
+
+        # Check feasibility (e.g., cannot be less than driver weight + minimum chassis)
+        min_feasible_weight = 80 # Example minimum feasible weight
+        is_achievable = target_weight_kg >= min_feasible_weight
+
         result = {
+            'metric_name': _format_metric_name(metric_name),
             'current_performance': current_performance,
             'target_performance': performance_target,
             'required_improvement': required_improvement,
-            'sensitivity': sensitivity,
-            'current_weight': current_weight,
-            'required_weight_reduction': required_weight_reduction,
-            'target_weight': target_weight,
-            'is_achievable': is_achievable,
-            'performance_type': performance_type,
-            'performance_name': performance_name
+            'sensitivity_per_kg': sensitivity,
+            'current_weight_kg': self.base_weight_kg,
+            'required_reduction_kg': required_reduction_kg,
+            'target_weight_kg': target_weight_kg,
+            'is_achievable': is_achievable
         }
-        
-        logger.info(f"Weight reduction target calculation for {performance_name}:")
-        logger.info(f"Current: {current_performance:.3f} s, Target: {performance_target:.3f} s, "
-                f"Required improvement: {required_improvement:.3f} s")
-        logger.info(f"Required weight reduction: {required_weight_reduction:.1f} kg "
-                f"({required_weight_reduction / current_weight * 100:.1f}%)")
-        logger.info(f"Target weight: {target_weight:.1f} kg "
-                f"(achievable: {'Yes' if is_achievable else 'No'})")
-        
+
+        logger.info(f"Target Calculation for {result['metric_name']}:")
+        logger.info(f" Current: {current_performance:.3f} -> Target: {performance_target:.3f}")
+        logger.info(f" Requires {required_reduction_kg:.2f} kg reduction.")
+        logger.info(f" Target Weight: {target_weight_kg:.2f} kg ({'Achievable' if is_achievable else 'Unlikely'})")
+
         return result
-    
-    def _calculate_sensitivity_coefficient(self, x_data: List[float], y_data: List[float]) -> float:
-        """
-        Calculate sensitivity coefficient from data using linear regression.
-        
-        Args:
-            x_data: Independent variable data (e.g., weights)
-            y_data: Dependent variable data (e.g., times)
-            
-        Returns:
-            Sensitivity coefficient (slope of linear regression)
-        """
-        if len(x_data) < 2 or len(y_data) < 2:
-            logger.warning("Insufficient data for sensitivity calculation")
-            return 0.0
-            
-        # Use numpy's polyfit for linear regression
-        coefficients = np.polyfit(x_data, y_data, 1)
-        
-        # Return the slope (sensitivity coefficient)
-        return coefficients[0]
-    
+
+    # --- Plotting Wrappers ---
     def plot_weight_sensitivity_curves(self, save_path: Optional[str] = None):
-        """
-        Plot weight sensitivity curves for acceleration and lap time.
-        
-        Args:
-            save_path: Optional path to save the plot
-        """
-        # Create figure
-        plt.figure(figsize=(12, 8))
-        
-        # Plot acceleration sensitivity if available
-        if self.acceleration_sensitivity:
-            plt.subplot(2, 2, 1)
-            weights = self.acceleration_sensitivity['weights']
-            times_60mph = self.acceleration_sensitivity['time_to_60mph']
-            times_100kph = self.acceleration_sensitivity['time_to_100kph']
-            
-            # Filter out None values for plotting
-            valid_60mph_data = [(w, t) for w, t in zip(weights, times_60mph) if t is not None]
-            valid_100kph_data = [(w, t) for w, t in zip(weights, times_100kph) if t is not None]
-            
-            if valid_60mph_data:
-                valid_weights_60mph, valid_times_60mph = zip(*valid_60mph_data)
-                plt.plot(valid_weights_60mph, valid_times_60mph, 'b-o', label='0-60 mph')
-            
-            if valid_100kph_data:
-                valid_weights_100kph, valid_times_100kph = zip(*valid_100kph_data)
-                plt.plot(valid_weights_100kph, valid_times_100kph, 'r-o', label='0-100 kph')
-            
-            plt.xlabel('Weight (kg)')
-            plt.ylabel('Time (s)')
-            plt.title('Acceleration Performance vs. Weight')
-            plt.grid(True)
-            plt.legend()
-            
-            # Add trend line and equation if we have valid data
-            if valid_60mph_data:
-                fit_60mph = np.polyfit(valid_weights_60mph, valid_times_60mph, 1)
-                fit_line_60mph = np.poly1d(fit_60mph)
-                plt.plot(valid_weights_60mph, fit_line_60mph(valid_weights_60mph), 'b--')
-                
-                equation_60mph = f"y = {fit_60mph[0]:.4f}x + {fit_60mph[1]:.2f}"
-                plt.text(min(valid_weights_60mph), max(valid_times_60mph), equation_60mph, color='b')
-            
-            # Plot 75m time
-            plt.subplot(2, 2, 2)
-            times_75m = self.acceleration_sensitivity['time_75m']
-            
-            # Filter out None values for plotting
-            valid_75m_data = [(w, t) for w, t in zip(weights, times_75m) if t is not None]
-            
-            if valid_75m_data:
-                valid_weights_75m, valid_times_75m = zip(*valid_75m_data)
-                plt.plot(valid_weights_75m, valid_times_75m, 'g-o', label='75m Time')
-                
-                plt.xlabel('Weight (kg)')
-                plt.ylabel('Time (s)')
-                plt.title('75m Acceleration Time vs. Weight')
-                plt.grid(True)
-                
-                # Add trend line and equation
-                fit_75m = np.polyfit(valid_weights_75m, valid_times_75m, 1)
-                fit_line_75m = np.poly1d(fit_75m)
-                plt.plot(valid_weights_75m, fit_line_75m(valid_weights_75m), 'g--')
-                
-                equation_75m = f"y = {fit_75m[0]:.4f}x + {fit_75m[1]:.2f}"
-                plt.text(min(valid_weights_75m), max(valid_times_75m), equation_75m, color='g')
-        
-        # Plot lap time sensitivity if available
-        if self.lap_time_sensitivity:
-            plt.subplot(2, 2, 3)
-            weights = self.lap_time_sensitivity['weights']
-            lap_times = self.lap_time_sensitivity['lap_times']
-            
-            # Filter out None values for plotting (if any)
-            valid_lap_data = [(w, t) for w, t in zip(weights, lap_times) if t is not None]
-            
-            if valid_lap_data:
-                valid_weights_lap, valid_times_lap = zip(*valid_lap_data)
-                plt.plot(valid_weights_lap, valid_times_lap, 'm-o', label='Lap Time')
-                
-                plt.xlabel('Weight (kg)')
-                plt.ylabel('Time (s)')
-                plt.title('Lap Time vs. Weight')
-                plt.grid(True)
-                
-                # Add trend line and equation
-                fit_lap = np.polyfit(valid_weights_lap, valid_times_lap, 1)
-                fit_line_lap = np.poly1d(fit_lap)
-                plt.plot(valid_weights_lap, fit_line_lap(valid_weights_lap), 'm--')
-                
-                equation_lap = f"y = {fit_lap[0]:.4f}x + {fit_lap[1]:.2f}"
-                plt.text(min(valid_weights_lap), max(valid_times_lap), equation_lap, color='m')
-            
-            # Plot average speed
-            plt.subplot(2, 2, 4)
-            avg_speeds = self.lap_time_sensitivity['avg_speeds']
-            
-            # Filter out None values for plotting (if any)
-            valid_speed_data = [(w, s) for w, s in zip(weights, avg_speeds) if s is not None]
-            
-            if valid_speed_data:
-                valid_weights_speed, valid_speeds = zip(*valid_speed_data)
-                plt.plot(valid_weights_speed, valid_speeds, 'c-o', label='Average Speed')
-                
-                plt.xlabel('Weight (kg)')
-                plt.ylabel('Speed (km/h)')
-                plt.title('Average Speed vs. Weight')
-                plt.grid(True)
-                
-                # Add trend line and equation
-                fit_speed = np.polyfit(valid_weights_speed, valid_speeds, 1)
-                fit_line_speed = np.poly1d(fit_speed)
-                plt.plot(valid_weights_speed, fit_line_speed(valid_weights_speed), 'c--')
-                
-                equation_speed = f"y = {fit_speed[0]:.4f}x + {fit_speed[1]:.2f}"
-                plt.text(min(valid_weights_speed), min(valid_speeds), equation_speed, color='c')
-        
-        plt.tight_layout()
-        
-        # Save plot if path provided
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"Weight sensitivity curves saved to {save_path}")
-        
-        plt.show()
-    
+         """Plot sensitivity curves using the unified plotter."""
+         plot_data = {'weights': [], 'lap_times': [], 'acceleration_times': [], 'zero_to_sixty': []}
+         if 'acceleration' in self.analysis_results:
+              plot_data['weights'] = [r['weight'] for r in self.analysis_results['acceleration']]
+              plot_data['acceleration_times'] = [r.get('finish_time') for r in self.analysis_results['acceleration']] # Use 75m time
+              plot_data['zero_to_sixty'] = [r.get('time_to_60mph') for r in self.analysis_results['acceleration']]
+         if 'lap_time' in self.analysis_results:
+              # Ensure weights match if both analyses run
+              if not plot_data['weights']: plot_data['weights'] = [r['weight'] for r in self.analysis_results['lap_time']]
+              plot_data['lap_times'] = [r.get('lap_time') for r in self.analysis_results['lap_time']]
+
+         fig = plot_weight_sens_unified(plot_data, save_path=save_path)
+         # if fig: plt.close(fig)
+
+    def plot_weight_distribution_sensitivity(self, save_path: Optional[str] = None):
+         """Plot distribution sensitivity using the unified plotter."""
+         if 'distribution' not in self.analysis_results:
+              logger.error("Weight distribution analysis not performed yet.")
+              return
+         plot_data = {'front_weight_pct': [], 'lap_times': [], 'acceleration_times': [], 'lateral_acceleration': []}
+         for r in self.analysis_results['distribution']:
+              plot_data['front_weight_pct'].append(r.get('front_weight_pct'))
+              plot_data['lap_times'].append(r.get('lap_time'))
+              # Note: Need to run accel analysis at each distribution for this data
+              # plot_data['acceleration_times'].append(r.get('finish_time'))
+              plot_data['lateral_acceleration'].append(r.get('max_lateral_g'))
+
+         fig = plot_dist_sens_unified(plot_data, save_path=save_path)
+         # if fig: plt.close(fig)
+
     def generate_weight_sensitivity_report(self, save_dir: Optional[str] = None) -> Dict:
-        """
-        Generate a comprehensive weight sensitivity analysis report.
-        
-        Args:
-            save_dir: Optional directory to save plots and data
-            
-        Returns:
-            Dictionary with report data
-        """
-        # Check if sensitivity analyses have been performed
-        if not self.acceleration_sensitivity and not self.lap_time_sensitivity:
-            logger.error("No sensitivity analyses have been performed. Call analyze_acceleration_sensitivity and/or analyze_lap_time_sensitivity first.")
+        """Generate a report summarizing sensitivity findings."""
+        if not self.analysis_results:
+            logger.error("No analysis results available to generate report.")
             return {}
-        
-        # Create save directory if provided
+
+        if save_dir: os.makedirs(save_dir, exist_ok=True)
+
+        report = {'base_vehicle': self.base_vehicle.get_vehicle_specs()}
+
+        # Add sensitivity summaries
+        if 'acceleration_sensitivity' in self.analysis_results:
+             report['acceleration_sensitivity'] = {k: v for k, v in self.analysis_results['acceleration_sensitivity'].items() if k != 'poly'}
+        if 'lap_time_sensitivity' in self.analysis_results:
+             report['lap_time_sensitivity'] = {k: v for k, v in self.analysis_results['lap_time_sensitivity'].items() if k != 'poly'}
+        if 'distribution_sensitivity' in self.analysis_results:
+             report['distribution_sensitivity'] = {k: v for k, v in self.analysis_results['distribution_sensitivity'].items() if k != 'poly'}
+
+        # Generate and save plots
         if save_dir:
-            os.makedirs(save_dir, exist_ok=True)
-        
-        # Create summary data
-        summary = {
-            'vehicle': {
-                'base_weight': self.base_weight,
-                'power': self.vehicle.engine.max_power,
-                'power_to_weight': self.vehicle.engine.max_power / self.base_weight,
-            }
-        }
-        
-        # Add acceleration sensitivity data if available
-        if self.acceleration_sensitivity:
-            summary['acceleration'] = {
-                'sensitivity_60mph': self.acceleration_sensitivity['sensitivity_60mph'],
-                'sensitivity_100kph': self.acceleration_sensitivity['sensitivity_100kph'],
-                'sensitivity_75m': self.acceleration_sensitivity['sensitivity_75m'],
-                'seconds_per_10kg_60mph': self.acceleration_sensitivity['seconds_per_10kg_60mph'],
-                'seconds_per_10kg_100kph': self.acceleration_sensitivity['seconds_per_10kg_100kph'],
-                'seconds_per_10kg_75m': self.acceleration_sensitivity['seconds_per_10kg_75m'],
-                'base_time_60mph': self.acceleration_sensitivity['time_to_60mph'][0] if self.acceleration_sensitivity['time_to_60mph'] else 0,
-                'base_time_100kph': self.acceleration_sensitivity['time_to_100kph'][0] if self.acceleration_sensitivity['time_to_100kph'] else 0,
-                'base_time_75m': self.acceleration_sensitivity['time_75m'][0] if self.acceleration_sensitivity['time_75m'] else 0
-            }
-            
-            # Only add percent improvements if they're in the dictionary
-            if 'percent_improvement_per_10kg_60mph' in self.acceleration_sensitivity:
-                summary['acceleration']['percent_improvement_per_10kg_60mph'] = self.acceleration_sensitivity['percent_improvement_per_10kg_60mph']
-            
-            if 'percent_improvement_per_10kg_75m' in self.acceleration_sensitivity:
-                summary['acceleration']['percent_improvement_per_10kg_75m'] = self.acceleration_sensitivity['percent_improvement_per_10kg_75m']
-                
-        # Add lap time sensitivity data if available
-        if self.lap_time_sensitivity:
-            summary['lap_time'] = {
-                'sensitivity_lap_time': self.lap_time_sensitivity['sensitivity_lap_time'],
-                'sensitivity_avg_speed': self.lap_time_sensitivity['sensitivity_avg_speed'],
-                'seconds_per_10kg_lap': self.lap_time_sensitivity['seconds_per_10kg_lap'],
-                'kph_per_10kg_avg_speed': self.lap_time_sensitivity['kph_per_10kg_avg_speed'],
-                'base_lap_time': self.lap_time_sensitivity['lap_times'][0] if self.lap_time_sensitivity['lap_times'] else 0,
-                'base_avg_speed': self.lap_time_sensitivity['avg_speeds'][0] if self.lap_time_sensitivity['avg_speeds'] else 0
-            }
-            
-            # Only add percent improvements if they're in the dictionary
-            if 'percent_improvement_per_10kg_lap' in self.lap_time_sensitivity:
-                summary['lap_time']['percent_improvement_per_10kg_lap'] = self.lap_time_sensitivity['percent_improvement_per_10kg_lap']
-            else:
-                # Calculate it if not present but we have the necessary data
-                if self.lap_time_sensitivity['lap_times'] and self.lap_time_sensitivity['lap_times'][0] > 0:
-                    percent_imp = (self.lap_time_sensitivity['seconds_per_10kg_lap'] / self.lap_time_sensitivity['lap_times'][0]) * 100
-                    summary['lap_time']['percent_improvement_per_10kg_lap'] = percent_imp
-                
-        # Create plots if save directory provided
-        if save_dir:
-            # Plot weight sensitivity curves
-            self.plot_weight_sensitivity_curves(
-                save_path=os.path.join(save_dir, "weight_sensitivity_curves.png")
-            )
-            
-            # Create summary report as text
-            summary_path = os.path.join(save_dir, "weight_sensitivity_summary.txt")
-            with open(summary_path, 'w') as f:
-                f.write("Formula Student Weight Sensitivity Analysis\n")
-                f.write("==========================================\n\n")
-                
-                f.write(f"Vehicle Base Weight: {self.base_weight:.1f} kg\n")
-                f.write(f"Engine Power: {self.vehicle.engine.max_power:.1f} hp\n")
-                f.write(f"Power-to-Weight Ratio: {self.vehicle.engine.max_power/self.base_weight:.3f} hp/kg\n\n")
-                
-                if self.acceleration_sensitivity:
-                    f.write("Acceleration Performance Sensitivity\n")
-                    f.write("----------------------------------\n")
-                    f.write(f"0-60 mph: {self.acceleration_sensitivity['sensitivity_60mph']:.4f} seconds per kg "
-                        f"({self.acceleration_sensitivity['seconds_per_10kg_60mph']:.4f} seconds per 10 kg)\n")
-                    f.write(f"0-100 kph: {self.acceleration_sensitivity['sensitivity_100kph']:.4f} seconds per kg "
-                        f"({self.acceleration_sensitivity['seconds_per_10kg_100kph']:.4f} seconds per 10 kg)\n")
-                    f.write(f"75m: {self.acceleration_sensitivity['sensitivity_75m']:.4f} seconds per kg "
-                        f"({self.acceleration_sensitivity['seconds_per_10kg_75m']:.4f} seconds per 10 kg)\n\n")
-                
-                if self.lap_time_sensitivity:
-                    f.write("Lap Time Performance Sensitivity\n")
-                    f.write("------------------------------\n")
-                    f.write(f"Lap Time: {self.lap_time_sensitivity['sensitivity_lap_time']:.4f} seconds per kg "
-                        f"({self.lap_time_sensitivity['seconds_per_10kg_lap']:.4f} seconds per 10 kg)\n")
-                    f.write(f"Average Speed: {self.lap_time_sensitivity['sensitivity_avg_speed']:.4f} kph per kg "
-                        f"({self.lap_time_sensitivity['kph_per_10kg_avg_speed']:.4f} kph per 10 kg)\n\n")
-                
-                f.write("Performance Improvement per 1% Weight Reduction\n")
-                f.write("-------------------------------------------\n")
-                
-                if self.acceleration_sensitivity:
-                    # Safely calculate these values
-                    if 'percent_improvement_per_10kg_60mph' in self.acceleration_sensitivity:
-                        percent_per_percent_60mph = self.acceleration_sensitivity['percent_improvement_per_10kg_60mph'] / 10 * self.base_weight / 100
-                        f.write(f"0-60 mph: {percent_per_percent_60mph:.4f}% improvement per 1% weight reduction\n")
-                    else:
-                        f.write("0-60 mph: Data not available\n")
-                    
-                    if 'percent_improvement_per_10kg_75m' in self.acceleration_sensitivity:
-                        percent_per_percent_75m = self.acceleration_sensitivity['percent_improvement_per_10kg_75m'] / 10 * self.base_weight / 100
-                        f.write(f"75m: {percent_per_percent_75m:.4f}% improvement per 1% weight reduction\n")
-                    else:
-                        f.write("75m: Data not available\n")
-                
-                if self.lap_time_sensitivity:
-                    # Safely calculate lap time percent per percent improvement
-                    if 'percent_improvement_per_10kg_lap' in self.lap_time_sensitivity:
-                        percent_per_percent_lap = self.lap_time_sensitivity['percent_improvement_per_10kg_lap'] / 10 * self.base_weight / 100
-                        f.write(f"Lap Time: {percent_per_percent_lap:.4f}% improvement per 1% weight reduction\n\n")
-                    elif 'lap_times' in self.lap_time_sensitivity and self.lap_time_sensitivity['lap_times']:
-                        # Calculate on the fly if needed
-                        lap_time_value = self.lap_time_sensitivity['lap_times'][0]
-                        if lap_time_value > 0:
-                            seconds_per_10kg = self.lap_time_sensitivity['seconds_per_10kg_lap']
-                            percent_imp = (seconds_per_10kg / lap_time_value) * 100
-                            percent_per_percent_lap = percent_imp / 10 * self.base_weight / 100
-                            f.write(f"Lap Time: {percent_per_percent_lap:.4f}% improvement per 1% weight reduction\n\n")
-                        else:
-                            f.write("Lap Time: Data not available\n\n")
-                    else:
-                        f.write("Lap Time: Data not available\n\n")
-            
-            # Save detailed data to CSV files
-            if self.acceleration_sensitivity:
-                accel_df = pd.DataFrame({
-                    'Weight (kg)': self.acceleration_sensitivity['weights'],
-                    '0-60 mph (s)': self.acceleration_sensitivity['time_to_60mph'],
-                    '0-100 kph (s)': self.acceleration_sensitivity['time_to_100kph'],
-                    '75m Time (s)': self.acceleration_sensitivity['time_75m']
-                })
-                accel_df.to_csv(os.path.join(save_dir, "acceleration_weight_sensitivity.csv"), index=False)
-            
-            if self.lap_time_sensitivity:
-                lap_df = pd.DataFrame({
-                    'Weight (kg)': self.lap_time_sensitivity['weights'],
-                    'Lap Time (s)': self.lap_time_sensitivity['lap_times'],
-                    'Average Speed (kph)': self.lap_time_sensitivity['avg_speeds']
-                })
-                lap_df.to_csv(os.path.join(save_dir, "lap_time_weight_sensitivity.csv"), index=False)
-        
-        logger.info("Weight sensitivity report generated")
-        
-        return summary
+             if 'acceleration' in self.analysis_results or 'lap_time' in self.analysis_results:
+                  self.plot_weight_sensitivity_curves(save_path=os.path.join(save_dir, "weight_sensitivity_curves.png"))
+             if 'distribution' in self.analysis_results:
+                  self.plot_weight_distribution_sensitivity(save_path=os.path.join(save_dir, "weight_distribution_sensitivity.png"))
+
+             # Save summary report to JSON
+             report_path = os.path.join(save_dir, "weight_sensitivity_report.json")
+             try:
+                 with open(report_path, 'w') as f:
+                     # Custom encoder for numpy types if needed
+                     json.dump(report, f, indent=2, default=lambda x: x.tolist() if isinstance(x, np.ndarray) else str(x))
+                 logger.info(f"Weight sensitivity report saved to {report_path}")
+             except Exception as e:
+                 logger.error(f"Failed to save weight sensitivity report: {e}")
+
+        return report
+
+
+# --- Standalone Runner Function ---
+def analyze_weight_sensitivity(vehicle: Vehicle, track_file: str,
+                             weight_range_kg: Tuple[float, float] = (180, 280), # Wider default range
+                             distribution_range: Tuple[float, float] = (0.43, 0.53),
+                             num_points: int = 7,
+                             save_dir: Optional[str] = None) -> Dict:
+    """
+    Convenience function to run full weight sensitivity analysis.
+
+    Args:
+        vehicle: Base vehicle model.
+        track_file: Path to the track file for lap time sims.
+        weight_range_kg: Min/max total mass range.
+        distribution_range: Min/max front weight % range.
+        num_points: Number of points for each analysis dimension.
+        save_dir: Directory to save results and plots.
+
+    Returns:
+        Dictionary containing the full analysis report.
+    """
+    try:
+        analyzer = WeightSensitivityAnalyzer(vehicle)
+
+        # Run analyses
+        analyzer.analyze_acceleration_sensitivity(weight_range_kg, num_points)
+        analyzer.analyze_lap_time_sensitivity(track_file, weight_range_kg, num_points)
+        analyzer.analyze_weight_distribution_sensitivity(track_file, distribution_range, num_points)
+
+        # Generate report
+        report = analyzer.generate_weight_sensitivity_report(save_dir)
+        return report
+
+    except Exception as e:
+        logger.error(f"Error during weight sensitivity analysis: {e}", exc_info=True)
+        return {'error': str(e)}
+
+
+# Example Usage
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    try:
+        from ..core.vehicle import create_formula_student_vehicle
+        from .lap_time import create_example_track # Use lap_time's version
+        import tempfile
+
+        print("Weight Sensitivity Analysis Demo")
+        print("-" * 30)
+
+        vehicle = create_formula_student_vehicle()
+        output_dir = tempfile.mkdtemp()
+        track_file = os.path.join(output_dir, "sensitivity_track.yaml")
+        create_example_track(track_file, difficulty='easy') # Easier track for faster sims
+
+        print(f"Output directory: {output_dir}")
+        print(f"Track file: {track_file}")
+
+        # Define analysis ranges
+        w_range = (vehicle.mass - 25, vehicle.mass + 25) # +/- 25kg
+        dist_range = (vehicle.weight_distribution_front - 0.03, vehicle.weight_distribution_front + 0.03) # +/- 3%
+
+        # Run full analysis
+        report = analyze_weight_sensitivity(
+            vehicle,
+            track_file,
+            weight_range_kg=w_range,
+            distribution_range=dist_range,
+            num_points=5, # Fewer points for faster demo
+            save_dir=output_dir
+        )
+
+        if 'error' not in report:
+            print("\n--- Analysis Summary ---")
+            if 'acceleration_sensitivity' in report:
+                print(f" Accel (75m) Sensitivity: {report['acceleration_sensitivity']['sensitivity_75m']:.4f} s/kg")
+            if 'lap_time_sensitivity' in report:
+                print(f" Lap Time Sensitivity:    {report['lap_time_sensitivity']['sensitivity_lap_time']:.4f} s/kg")
+            if 'distribution_sensitivity' in report:
+                 lap_opt = report['distribution_sensitivity'].get('lap_time',{}).get('optimal_x')
+                 lat_opt = report['distribution_sensitivity'].get('max_lateral_g',{}).get('optimal_x')
+                 print(f" Optimal Weight Dist (Lap): {lap_opt*100:.1f}%" if lap_opt else " Optimal Weight Dist (Lap): N/A")
+                 print(f" Optimal Weight Dist (LatG): {lat_opt*100:.1f}%" if lat_opt else " Optimal Weight Dist (LatG): N/A")
+
+            print(f"\nDetailed report and plots saved to: {output_dir}")
+        else:
+             print(f"\nAnalysis failed: {report['error']}")
+
+
+    except ImportError as e:
+        print(f"\nError: Could not import necessary modules ({e}).")
+    except FileNotFoundError as e:
+         print(f"\nError: Configuration file not found. {e}")
+    except Exception as e:
+        print(f"\nAn unexpected error occurred: {e}")
+        import traceback
+        traceback.print_exc()

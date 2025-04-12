@@ -1,87 +1,58 @@
 """
 Performance analysis module for Formula Student powertrain simulation.
 
-This module provides tools for simulating, analyzing, and optimizing the 
-performance of a Formula Student vehicle across different dynamic events.
-It includes specialized analysis tools for acceleration, lap time, endurance,
-and weight sensitivity calculations.
+Provides tools for simulating and analyzing vehicle performance in standard
+Formula Student dynamic events like Acceleration, Lap Time (Autocross/Endurance),
+and Skidpad. Includes optimization capabilities and sensitivity analysis.
 """
 
-# Import from acceleration module
-from .acceleration import (
-    AccelerationSimulator,
-    create_acceleration_simulator,
-    run_fs_acceleration_simulation
-)
+# Import core simulation classes needed by performance modules
+# Use relative imports within the package
+try:
+    from ..core.vehicle import Vehicle
+    from ..core.track import Track
+    from ..core.track_integration import TrackProfile
+    from ..core.simulator import Simulator # Base simulator if needed
+except ImportError:
+    # Define placeholders if core modules aren't found (e.g., during isolated testing)
+    class Vehicle: pass
+    class Track: pass
+    class TrackProfile: pass
+    class Simulator: pass
 
-# Import from lap time module
-from .lap_time import (
-    LapTimeSimulator,
-    CorneringPerformance,
-    create_lap_time_simulator,
-    run_fs_lap_simulation,
-    create_example_track
-)
-
-# Import from optimal lap time module
-from .optimal_lap_time import (
-    OptimalLapTimeOptimizer,
-    run_advanced_lap_optimization
-)
-
-# Import from lap time optimization module
-from .lap_time_optimization import (
-    run_lap_optimization,
-    compare_optimization_methods
-)
-
-# Import from weight sensitivity module
-from .weight_sensitivity import (
-    WeightSensitivityAnalyzer
-)
-
-# Import from endurance module
-from .endurance import (
-    EnduranceSimulator,
-    EnduranceAnalysis,
-    ReliabilityEvent,
-    create_endurance_simulator,
-    run_endurance_simulation,
-    optimize_endurance_setup,
-    compare_endurance_configurations
-)
+# Import specific performance simulators and analyzers
+from .acceleration import AccelerationSimulator, run_fs_acceleration_simulation
+from .lap_time import LapTimeSimulator, CorneringPerformance, run_fs_lap_simulation
+from .optimal_lap_time import OptimalLapTimeOptimizer, run_advanced_lap_optimization
+from .lap_time_optimization import run_lap_optimization, compare_optimization_methods
+from .endurance import EnduranceSimulator, EnduranceAnalysis, ReliabilityEvent, run_endurance_simulation
+from .weight_sensitivity import WeightSensitivityAnalyzer
 
 # Define package exports
 __all__ = [
     # Acceleration
     'AccelerationSimulator',
-    'create_acceleration_simulator',
     'run_fs_acceleration_simulation',
-    
-    # Lap time
+
+    # Lap time (Basic/Track Following)
     'LapTimeSimulator',
     'CorneringPerformance',
-    'create_lap_time_simulator',
     'run_fs_lap_simulation',
-    'create_example_track',
-    
-    # Optimal lap time
+
+    # Optimal Lap Time (Advanced Dynamics/Optimization)
     'OptimalLapTimeOptimizer',
     'run_advanced_lap_optimization',
-    
-    # Lap time optimization
+
+    # Lap Time Optimization Interface
     'run_lap_optimization',
     'compare_optimization_methods',
-    
-    # Weight sensitivity
-    'WeightSensitivityAnalyzer',
-    
+
     # Endurance
     'EnduranceSimulator',
     'EnduranceAnalysis',
     'ReliabilityEvent',
-    'create_endurance_simulator',
     'run_endurance_simulation',
-    'optimize_endurance_setup',
-    'compare_endurance_configurations'
+
+    # Weight Sensitivity
+    'WeightSensitivityAnalyzer',
 ]
