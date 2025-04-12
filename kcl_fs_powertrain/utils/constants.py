@@ -46,6 +46,8 @@ LITERS_TO_M3 = 0.001  # Convert liters to cubic meters
 M3_TO_LITERS = 1000.0  # Convert cubic meters to liters
 GAL_TO_LITERS = 3.78541178  # Convert US gallons to liters
 LITERS_TO_GAL = 1 / GAL_TO_LITERS  # Convert liters to US gallons
+BAR_TO_PA = 100000.0  # Convert bar to Pascal
+PA_TO_BAR = 1 / BAR_TO_PA   # Convert Pascal to bar
 
 # Temperature conversions
 def celsius_to_kelvin(temp_c: float) -> float:
@@ -181,7 +183,7 @@ def calculate_efficiency_score(eff_factor_your: float, eff_factor_min: float, ef
 DEFAULT_TRACK_WIDTH = 3.0  # m, typical track width for Formula Student tracks
 
 # Fuel properties Class (moved here from fuel_systems.py to avoid circular imports if needed later)
-class FuelProperties:
+class FuelPropertiesConstants:
     """Properties of different fuel types."""
     # Values: [density (kg/L), energy density (MJ/kg), stoich_afr, latent_heat (kJ/kg), octane_ron]
     _PROPERTIES = {
@@ -191,18 +193,17 @@ class FuelProperties:
         'METHANOL': [0.79, 19.9, 6.5, 1100, 109]
     }
 
+class FuelPropertiesData: # Renamed from FuelProperties
+    """Class holding properties for a specific fuel type, based on constants."""
     def __init__(self, fuel_type: str = 'E85'):
-        """
-        Initialize fuel properties.
+        lookup_key = fuel_type.upper() # Allow case-insensitive lookup
+        if lookup_key not in FuelPropertiesConstants._PROPERTIES_LOOKUP:
+            # Try matching without RON if applicable
+            if 'GASOLINE' in lookup_key: lookup_key = 'GASOLINE_98RON'
+            if lookup_key not in FuelPropertiesConstants._PROPERTIES_LOOKUP:
+                raise ValueError(f"Unknown fuel type: {fuel_type}. Available: {list(FuelPropertiesConstants._PROPERTIES_LOOKUP.keys())}")
 
-        Args:
-            fuel_type (str): Name of the fuel type (e.g., 'E85', 'GASOLINE_98RON').
-                             Must match a key in _PROPERTIES.
-        """
-        if fuel_type not in self._PROPERTIES:
-            raise ValueError(f"Unknown fuel type: {fuel_type}. Available: {list(self._PROPERTIES.keys())}")
-
-        props = self._PROPERTIES[fuel_type]
+        props = FuelPropertiesConstants._PROPERTIES_LOOKUP[lookup_key]
         self.name = fuel_type
         self.density_kg_per_L = props[0]
         self.energy_density_MJ_per_kg = props[1]
@@ -230,3 +231,26 @@ class FuelProperties:
             'octane_ron': self.octane_ron,
             'volumetric_energy_density_MJ_per_L': self.get_volumetric_energy_density_MJ_per_L()
         }
+    def __init__(self, fuel_type: str = 'E85'):
+        """
+        Initialize fuel properties.
+
+        Args:
+            fuel_type (str): Name of the fuel type (e.g., 'E85', 'GASOLINE_98RON').
+                             Must match a key in _PROPERTIES.
+        """
+        if fuel_type not in self._PROPERTIES:
+            raise ValueError(f"Unknown fuel type: {fuel_type}. Available: {list(self._PROPERTIES.keys())}")
+
+        props = self._PROPERTIES[fuel_type]
+        self.name = fuel_type
+        self.density_kg_per_L = props[0]
+        self.energy_density_MJ_per_kg = props[1]
+        self.stoichiometric_afr = props[2]
+        self.latent_heat_kJ_per_kg = props[3]
+        self.octane_ron = props[4]
+
+        # Derived properties
+        self.density_kg_per_m3 = self.density_kg_per_L * 1000
+        self.energy_density_J_per_kg = self.energy_density_MJ_per_kg * 1e6
+        self.latent_heat_J_per_kg = self.latent_heat_kJ_per_kg * 1000

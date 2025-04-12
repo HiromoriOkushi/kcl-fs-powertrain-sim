@@ -274,6 +274,17 @@ class Simulator:
                  logger.info(f"Simulation stop triggered by event: {self.simulation_stop_reason}")
                  # The main run loop will check self.simulation_stop_reason
 
+            # Handle gear shift completion if CAS system modeled with events
+            if event.event_type == EventType.GEAR_SHIFT_COMPLETE:
+                 target_gear = event.data.get('target_gear')
+                 if target_gear is not None and hasattr(self.vehicle, 'cas_system') and self.vehicle.cas_system:
+                      # Finalize gear change in vehicle model and CAS state
+                      self.vehicle.cas_system.complete_shift(self.current_time_s)
+                      # Vehicle's current_gear is now updated by cas_system.complete_shift
+                      logger.info(f"Gear shift completed to gear {self.vehicle.current_gear}")
+                 else:
+                      logger.warning("GEAR_SHIFT_COMPLETE event missing target_gear data or CAS system.")
+
     def _calculate_time_step(self) -> float:
          """Determine the time step for the next iteration."""
          if not self.adaptive_stepping:
@@ -302,27 +313,23 @@ class Simulator:
 
     def _integrate_state(self, dt: float):
         """Integrate the vehicle state over dt using the chosen method."""
-        # This requires a state vector representation and derivatives function
-        # For now, call the vehicle's simplified update methods
+        # Euler integration is performed by calling the vehicle's update method.
+        # This method calculates forces based on the *start* of the step state
+        # and updates velocity/position based on that constant acceleration over dt.
         if self.integration_method == IntegrationMethod.EULER:
-            # Euler is implicitly handled by calling vehicle.update_vehicle_state
-            # which uses current accel to update speed, then speed to update pos.
-            # We just need to call the vehicle's update method.
+            # Ensure ambient temp is passed correctly
             self.vehicle.update_vehicle_state(dt, self.environment.ambient_temp_C)
         elif self.integration_method == IntegrationMethod.RK4:
-             logger.warning("RK4 integration not fully implemented in this core simulator structure. Using Euler via vehicle.update_vehicle_state.")
-             # To implement RK4 here, we'd need:
-             # 1. A function `get_vehicle_state_vector()` in Vehicle
-             # 2. A function `set_vehicle_state_from_vector()` in Vehicle
-             # 3. A function `calculate_state_derivatives(state_vector, controls)` either here or in Vehicle
-             # 4. Perform the RK4 steps using these functions.
-             # For now, fallback to Euler via vehicle update:
+             # RK4 requires a state vector and derivative function, which is complex
+             # to implement generically here without strict state management in Vehicle.
+             # Falling back to Euler via vehicle.update_vehicle_state.
+             logger.log(logging.DEBUG if self.step_count % 100 != 0 else logging.WARNING, # Log warning periodically
+                        "RK4 integration selected but not implemented in CoreSimulator; using Euler via vehicle.update_vehicle_state.")
              self.vehicle.update_vehicle_state(dt, self.environment.ambient_temp_C)
         else:
              logger.error(f"Unsupported integration method: {self.integration_method}")
              # Fallback to Euler
              self.vehicle.update_vehicle_state(dt, self.environment.ambient_temp_C)
-
     def _log_simulation_data(self):
          """Log data from the current simulation state."""
          # Create a snapshot of the state for logging
@@ -354,6 +361,7 @@ class Simulator:
         if self.simulation_stop_reason: return False # Stop if already flagged
 
         # 1. Process Events at current time
+        # This handles scheduled events like shift completions, simulation end times etc.
         self._process_events()
         if self.simulation_stop_reason: return False # Event might trigger stop
 
@@ -364,11 +372,36 @@ class Simulator:
              self.simulation_stop_reason = "Zero dt"
              return False
 
-        # 3. Get Control Inputs (Assume self.current_controls is set)
-        # TODO: Add hook for external controller/driver model
+        # 3. Get Control Inputs (Assume self.current_controls is set externally)
+        # Check for gear change request
+        requested_gear = self.current_controls.gear_request
+        if requested_gear is not None and requested_gear != self.vehicle.current_gear:
+             # Check if CAS is currently shifting
+             can_initiate_shift = True
+             if self.vehicle.cas_system and self.vehicle.cas_system.system_state != ShiftState.IDLE:
+                  can_initiate_shift = False
+                  logger.debug(f"Ignoring gear request {requested_gear}: CAS is busy ({self.vehicle.cas_system.system_state.name})")
+
+             if can_initiate_shift:
+                 # Initiate gear change via vehicle method
+                 success, shift_duration_s = self.vehicle.change_gear(requested_gear)
+                 if success and shift_duration_s > 0:
+                      # Schedule a GEAR_SHIFT_COMPLETE event
+                      completion_time = self.current_time_s + shift_duration_s
+                      self._queue_event(SimulationEvent(EventType.GEAR_SHIFT_COMPLETE, completion_time,
+                                                       {'target_gear': requested_gear}))
+                      logger.debug(f"Scheduled GEAR_SHIFT_COMPLETE for gear {requested_gear} at {completion_time:.3f}s")
+                 # Reset the request regardless of success to avoid repeated attempts
+                 self.current_controls.gear_request = None
+
+        # Apply current controls to vehicle state (needed before integration)
+        self.vehicle.throttle_input = self.current_controls.throttle
+        self.vehicle.brake_input = self.current_controls.brake
+        # Steering might be handled differently depending on dynamics model
+        # self.vehicle.steering_angle_rad = self.current_controls.steering_rad
 
         # 4. Integrate Vehicle State
-        # The vehicle's update method handles physics integration (simplified Euler for now)
+        # The vehicle's update method handles physics integration
         # It updates speed, position, RPM, temps based on current state and dt
         self._integrate_state(dt)
 

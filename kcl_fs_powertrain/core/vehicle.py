@@ -71,6 +71,7 @@ class Vehicle:
     """
 
     def __init__(self,
+                 config: Optional[Dict] = None, # Accept pre-loaded config dict
                  config_path: Optional[str] = None,
                  engine: Optional[MotorcycleEngine] = None,
                  drivetrain: Optional[DrivetrainSystem] = None,
@@ -85,7 +86,8 @@ class Vehicle:
         Initialize the vehicle model.
 
         Args:
-            config_path: Path to the main vehicle YAML configuration file.
+            config: Optional pre-loaded configuration dictionary.
+            config_path: Path to the main vehicle YAML configuration file (used if config dict not provided).
             engine, drivetrain, etc.: Optional pre-configured component instances.
             team_name: Identifying name for the vehicle/team.
         """
@@ -105,14 +107,32 @@ class Vehicle:
         self.track_width_rear_m: float = 1.15
         self.cg_height_m: float = 0.28
         self.tire_radius_m: float = 0.2286
+        # Braking parameter (moved here for consistency)
+        self.max_braking_g: float = 1.8 # Max braking deceleration relative to g
 
-        # Load config first
-        if config_path and os.path.exists(config_path):
-            self.load_config(config_path)
-        elif config_path:
-            logger.warning(f"Vehicle config file not found: {config_path}. Using defaults.")
+        # --- Load configuration ---
+        # Priority: 1. Passed config dict, 2. config_path
+        if config is not None:
+            self.config = copy.deepcopy(config) # Use passed dict
+            logger.info("Vehicle initialized using provided configuration dictionary.")
+        elif config_path and os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    self.config = yaml.safe_load(f) or {}
+                self.config_path = config_path # Store path if loaded successfully
+                logger.info(f"Vehicle base configuration loaded from {config_path}")
+            except Exception as e:
+                logger.error(f"Error loading vehicle config from {config_path}: {e}")
+                self.config = {} # Ensure config is dict even on error
+        else:
+            logger.warning(f"Vehicle config not provided or path invalid: {config_path}. Using defaults.")
+            self.config = {} # Ensure config is dict
+
+        # Apply base vehicle parameters from the config (or defaults if config empty)
+        self._apply_base_config()
 
         # --- Component Initialization ---
+        # These methods now rely on self.config being populated
         self._initialize_engine(engine)
         self._initialize_drivetrain(drivetrain)
         # Pass self to cooling system init for potential back-references if needed by factories
@@ -120,7 +140,7 @@ class Vehicle:
         self._initialize_shifting_systems(shift_manager, cas_system)
         self._initialize_aero_cooling(side_pods, rear_radiator, cooling_assist)
 
-        # Initialize Cornering Performance calculator after core components
+        # Initialize Cornering Performance calculator after core components are set up
         self.cornering = CorneringPerformance(self)
 
         # --- Current State Variables ---
@@ -136,14 +156,18 @@ class Vehicle:
 
         # Internal simulation state
         self.last_update_time: float = 0.0
+        self.include_thermal: bool = self.config.get('simulation_settings',{}).get('include_thermal', True)
 
-        # Initialize thermal state from engine if possible
-        self.engine_temperature = getattr(self.engine, 'engine_temperature', 25.0)
-        self.coolant_temperature = getattr(self.engine, 'coolant_temperature', 25.0)
-        self.oil_temperature = getattr(self.engine, 'oil_temperature', 25.0)
+        # Initialize thermal state from components if possible
+        # Prioritize external cooling system's temp as it represents the bulk fluid temp
+        self.coolant_temperature = getattr(self.cooling_system, 'coolant_temp_C', 25.0)
+        # Engine block and oil temp might still be tracked separately by engine model
+        self.engine_temperature = getattr(self.engine, 'engine_temperature', self.coolant_temperature + 5.0) # Start slightly warmer
+        self.oil_temperature = getattr(self.engine, 'oil_temperature', self.coolant_temperature)
+        # Vehicle's own thermal factor reflects engine's current derating
+        self.thermal_factor = getattr(self.engine, 'thermal_factor', 1.0)
 
         logger.info(f"{self.team_name} Vehicle initialized. Mass: {self.mass:.1f} kg")
-
     def load_config(self, config_path: str):
         """Load vehicle base parameters from YAML file."""
         if not os.path.exists(config_path):
@@ -172,105 +196,187 @@ class Vehicle:
 
         except Exception as e:
             logger.error(f"Error loading vehicle config from {config_path}: {e}")
+    
+    def _apply_base_config(self):
+         """Apply base vehicle parameters from the self.config dictionary."""
+         vehicle_cfg = self.config.get('vehicle', {})
+         self.mass = float(vehicle_cfg.get('mass', self.mass))
+         self.frontal_area_m2 = float(vehicle_cfg.get('frontal_area_m2', self.frontal_area_m2))
+         self.drag_coefficient = float(vehicle_cfg.get('drag_coefficient', self.drag_coefficient))
+         self.lift_coefficient = float(vehicle_cfg.get('lift_coefficient', self.lift_coefficient))
+         self.rolling_resistance_coeff = float(vehicle_cfg.get('rolling_resistance_coeff', self.rolling_resistance_coeff))
+         self.weight_distribution_front = float(vehicle_cfg.get('weight_distribution_front', self.weight_distribution_front))
+         self.wheelbase_m = float(vehicle_cfg.get('wheelbase_m', self.wheelbase_m))
+         self.track_width_front_m = float(vehicle_cfg.get('track_width_front_m', self.track_width_front_m))
+         self.track_width_rear_m = float(vehicle_cfg.get('track_width_rear_m', self.track_width_rear_m))
+         self.cg_height_m = float(vehicle_cfg.get('cg_height_m', self.cg_height_m))
+         self.max_braking_g = float(vehicle_cfg.get('max_braking_g', self.max_braking_g))
 
+         tire_cfg = self.config.get('tires', {})
+         self.tire_radius_m = float(tire_cfg.get('radius_m', self.tire_radius_m))
+
+         # Apply simulation settings
+         sim_cfg = self.config.get('simulation_settings', self.config.get('simulation', {})) # Check both keys
+         self.include_thermal = bool(sim_cfg.get('include_thermal', self.include_thermal))
+         logger.debug(f"Base parameters applied. Mass={self.mass:.1f}, IncludeThermal={self.include_thermal}")
 
     def _initialize_engine(self, engine_instance: Optional[MotorcycleEngine]):
-        """Initialize the engine component."""
+        """Initialize the engine component using self.config."""
         if isinstance(engine_instance, MotorcycleEngine):
             self.engine = engine_instance
             logger.info("Using pre-configured Engine instance.")
         else:
-            engine_config_ref = self.config.get('engine')
+            engine_config_ref = self.config.get('engine_config_path', self.config.get('engine')) # Allow path or inline dict
             if isinstance(engine_config_ref, str) and os.path.exists(engine_config_ref):
                 logger.info(f"Initializing Engine from config file: {engine_config_ref}")
                 self.engine = MotorcycleEngine(config_path=engine_config_ref)
             elif isinstance(engine_config_ref, dict):
-                logger.info("Initializing Engine from inline config.")
+                logger.info("Initializing Engine from inline config in vehicle config.")
                 self.engine = MotorcycleEngine(engine_params=engine_config_ref)
             else:
                 logger.warning("No valid engine config found. Creating default MotorcycleEngine.")
-                self.engine = MotorcycleEngine()
+                # Attempt to find default config path relative to vehicle config path if available
+                default_engine_path = None
+                if self.config_path:
+                     # Construct path relative to the *vehicle* config file's location
+                     base_cfg_dir = os.path.dirname(self.config_path)
+                     # Assume standard project structure: configs/engine/cbr600f4i.yaml relative to project root
+                     # This requires knowing the depth of the vehicle config relative to root
+                     # Safer approach: Assume a fixed relative path from the vehicle config's dir
+                     default_engine_path = os.path.normpath(os.path.join(base_cfg_dir, '..', 'configs', 'engine', 'cbr600f4i.yaml')) # Adjust relative path if needed
+                if default_engine_path and os.path.exists(default_engine_path):
+                     logger.info(f"Attempting to load default engine config: {default_engine_path}")
+                     self.engine = MotorcycleEngine(config_path=default_engine_path)
+                else:
+                     self.engine = MotorcycleEngine() # Absolute default
 
         # Ensure essential attributes
         for attr, default in [('idle_rpm', 1300.0), ('redline_rpm', 14000.0),
                               ('max_torque_nm', 65.0), ('engine_temperature', 25.0),
                               ('coolant_temperature', 25.0), ('oil_temperature', 25.0),
-                              ('thermal_factor', 1.0)]:
+                              ('thermal_factor', 1.0), ('max_power_rpm', 12500.0), # Needed by strategy factory
+                              ('max_torque_rpm', 10500.0)]: # Needed by strategy factory
             if not hasattr(self.engine, attr): setattr(self.engine, attr, default)
 
+        # Ensure engine has a heat model instance
+        if not hasattr(self.engine, 'heat_model') or self.engine.heat_model is None:
+             logger.debug("Creating default heat model for engine.")
+             # Use thermal config potentially loaded by engine, or default
+             thermal_cfg = getattr(self.engine, 'thermal_config', ThermalConfig())
+             # Ensure the heat model can be instantiated (check import)
+             if EngineHeatModel:
+                self.engine.heat_model = EngineHeatModel(thermal_cfg, self.engine)
+             else:
+                logger.error("EngineHeatModel class not available to create instance.")
+                self.engine.heat_model = None
 
     def _initialize_drivetrain(self, drivetrain_instance: Optional[DrivetrainSystem]):
-        """Initialize the drivetrain component."""
+        """Initialize the drivetrain component using self.config."""
         if isinstance(drivetrain_instance, DrivetrainSystem):
             self.drivetrain = drivetrain_instance
             logger.info("Using pre-configured Drivetrain instance.")
         else:
-             # Try loading from config
-             dt_config_ref = self.config.get('drivetrain')
-             trans_config_ref = self.config.get('transmission') # Allow separate file/dict
-             fd_config_ref = self.config.get('final_drive')
-             diff_config_ref = self.config.get('differential')
+             # Try loading from config paths or inline dicts specified in main config
+             dt_config_path_ref = self.config.get('drivetrain_config_path')
+             trans_config_ref = self.config.get('transmission_config_path', self.config.get('transmission'))
+             fd_config_ref = self.config.get('final_drive_config_path', self.config.get('final_drive'))
+             diff_config_ref = self.config.get('differential_config_path', self.config.get('differential'))
 
              transmission = None
              final_drive = None
              differential = None
 
-             # Load Transmission
-             if isinstance(trans_config_ref, str) and os.path.exists(trans_config_ref):
-                  with open(trans_config_ref, 'r') as f: trans_params = yaml.safe_load(f).get('transmission', {})
-                  transmission = Transmission(**trans_params)
-             elif isinstance(trans_config_ref, dict):
-                  transmission = Transmission(**trans_config_ref)
-             else: # Default
-                  transmission = Transmission([2.750, 2.000, 1.667, 1.444, 1.304, 1.208])
+             # Find base directory for relative paths (if main config path exists)
+             base_cfg_dir = os.path.dirname(self.config_path) if self.config_path else '.'
 
-             # Load Final Drive
-             if isinstance(fd_config_ref, str) and os.path.exists(fd_config_ref):
-                  with open(fd_config_ref, 'r') as f: fd_params = yaml.safe_load(f).get('final_drive', {})
+             # Helper to resolve path
+             def resolve_path(ref):
+                 if isinstance(ref, str):
+                     path = os.path.join(base_cfg_dir, ref) if not os.path.isabs(ref) else ref
+                     return path if os.path.exists(path) else None
+                 return None
+
+             # Load Transmission
+             trans_path = resolve_path(trans_config_ref)
+             if trans_path:
+                  with open(trans_path, 'r') as f: trans_params = yaml.safe_load(f).get('transmission', {})
+                  transmission = Transmission(**trans_params)
+             elif isinstance(trans_config_ref, dict): # Inline dict
+                  transmission = Transmission(**trans_config_ref)
+             if transmission is None: # Default if loading failed
+                 logger.debug("Using default transmission parameters.")
+                 transmission = Transmission([2.750, 2.000, 1.667, 1.444, 1.304, 1.208])
+
+             # Load Final Drive (similar logic)
+             fd_path = resolve_path(fd_config_ref)
+             if fd_path:
+                  with open(fd_path, 'r') as f: fd_params = yaml.safe_load(f).get('final_drive', {})
                   final_drive = FinalDrive(**fd_params)
              elif isinstance(fd_config_ref, dict):
                   final_drive = FinalDrive(**fd_config_ref)
-             else: # Default
-                  final_drive = FinalDrive(14, 53)
+             if final_drive is None:
+                 logger.debug("Using default final drive parameters.")
+                 final_drive = FinalDrive(14, 53)
 
-             # Load Differential
-             if isinstance(diff_config_ref, str) and os.path.exists(diff_config_ref):
-                 with open(diff_config_ref, 'r') as f: diff_params = yaml.safe_load(f).get('differential', {})
+             # Load Differential (similar logic)
+             diff_path = resolve_path(diff_config_ref)
+             if diff_path:
+                 with open(diff_path, 'r') as f: diff_params = yaml.safe_load(f).get('differential', {})
                  differential = Differential(**diff_params)
              elif isinstance(diff_config_ref, dict):
                  differential = Differential(**diff_config_ref)
-             else: # Default
-                 differential = Differential(locked=True)
+             if differential is None:
+                 logger.debug("Using default differential parameters (LOCKED).")
+                 differential = Differential(diff_type="LOCKED")
 
-             self.drivetrain = DrivetrainSystem(transmission, final_drive, differential, self.tire_radius_m)
+             # Use drivetrain config path if available for inertia etc.
+             dt_config_path = resolve_path(dt_config_path_ref)
+
+             self.drivetrain = DrivetrainSystem(
+                 transmission, final_drive, differential,
+                 wheel_radius_m=self.tire_radius_m, # Use vehicle's radius
+                 config_path=dt_config_path # Pass specific path if exists
+             )
              logger.info("Drivetrain initialized from config/defaults.")
 
         if not hasattr(self.drivetrain, 'num_gears'): # Ensure attribute exists
              self.drivetrain.num_gears = len(getattr(self.drivetrain.transmission, 'gear_ratios', []))
 
-
     def _initialize_cooling_system(self, cooling_instance: Optional[ExternalCoolingSystem], vehicle_ref):
-        """Initialize the main external cooling system."""
+        """Initialize the main external cooling system using self.config."""
         if isinstance(cooling_instance, ExternalCoolingSystem):
             self.cooling_system = cooling_instance
             logger.info("Using pre-configured external CoolingSystem instance.")
         else:
-            cooling_config_ref = self.config.get('cooling_system')
-            if isinstance(cooling_config_ref, str) and os.path.exists(cooling_config_ref):
-                logger.info(f"Initializing external CoolingSystem from config file: {cooling_config_ref}")
-                # Assume config file contains component details or use factory
-                self.cooling_system = create_formula_student_cooling_system(config_dir=os.path.dirname(cooling_config_ref))
-            elif isinstance(cooling_config_ref, dict):
+            cooling_config_path_ref = self.config.get('cooling_system_config_path')
+            cooling_config_inline = self.config.get('cooling_system')
+            # Determine config directory (relative to main vehicle config if possible)
+            base_cfg_dir = os.path.dirname(self.config_path) if self.config_path else '.'
+            config_path = None
+            if cooling_config_path_ref:
+                resolved_path = os.path.join(base_cfg_dir, cooling_config_path_ref) if not os.path.isabs(cooling_config_path_ref) else cooling_config_path_ref
+                if os.path.exists(resolved_path):
+                    config_path = resolved_path
+                else:
+                    logger.warning(f"Cooling system config path not found: {resolved_path}")
+
+            config_dir = os.path.dirname(config_path) if config_path else os.path.normpath(os.path.join(base_cfg_dir, '..', 'configs', 'thermal')) # Default relative location
+
+            if config_path:
+                logger.info(f"Initializing external CoolingSystem from config file: {config_path}")
+                # Use factory with the specific config directory containing the file
+                self.cooling_system = create_formula_student_cooling_system(config_dir=config_dir)
+            elif isinstance(cooling_config_inline, dict):
                  logger.info("Initializing external CoolingSystem from inline config.")
                  # Manually create components from dict - requires component classes
                  try:
-                      rad_cfg = cooling_config_ref.get('radiator', {})
-                      pump_cfg = cooling_config_ref.get('water_pump', {})
-                      fan_cfg = cooling_config_ref.get('cooling_fan', {})
-                      thermo_cfg = cooling_config_ref.get('thermostat', {})
-                      system_cfg = cooling_config_ref.get('system', {})
+                      from ..thermal.cooling_system import Radiator, WaterPump, CoolingFan, Thermostat # Local import
+                      rad_cfg = cooling_config_inline.get('radiator', {})
+                      pump_cfg = cooling_config_inline.get('water_pump', {})
+                      fan_cfg = cooling_config_inline.get('cooling_fan', {})
+                      thermo_cfg = cooling_config_inline.get('thermostat', {})
+                      system_cfg = cooling_config_inline.get('system', {})
 
-                      from ..thermal.cooling_system import Radiator, WaterPump, CoolingFan, Thermostat
                       radiator = Radiator(**rad_cfg) if rad_cfg else Radiator()
                       pump = WaterPump(**pump_cfg) if pump_cfg else WaterPump()
                       fan = CoolingFan(**fan_cfg) if fan_cfg else None # Fan optional
@@ -279,36 +385,44 @@ class Vehicle:
                       self.cooling_system = ExternalCoolingSystem(radiator, pump, fan, thermostat, **system_cfg)
                  except Exception as e:
                       logger.error(f"Failed to create cooling system from inline config: {e}. Creating default.")
-                      self.cooling_system = create_formula_student_cooling_system()
+                      self.cooling_system = create_formula_student_cooling_system(config_dir=config_dir) # Pass default dir
             else:
                 logger.info("No cooling system config found. Creating default FS cooling system.")
-                self.cooling_system = create_formula_student_cooling_system()
+                self.cooling_system = create_formula_student_cooling_system(config_dir=config_dir) # Pass default dir
 
         # Ensure essential cooling system attributes exist
         if not hasattr(self.cooling_system, 'coolant_temp_C'): self.cooling_system.coolant_temp_C = 25.0
-
+        if not hasattr(self.cooling_system, 'total_thermal_capacity_J_K'): # Ensure capacity is set
+            self.cooling_system.total_coolant_mass_kg = self.cooling_system.coolant_volume_L * self.cooling_system.coolant_density_kg_L
+            self.cooling_system.total_thermal_capacity_J_K = self.cooling_system.total_coolant_mass_kg * self.cooling_system.coolant_specific_heat_J_kgK
+            if self.cooling_system.total_thermal_capacity_J_K <= 0: self.cooling_system.total_thermal_capacity_J_K = 1e-3
 
     def _initialize_shifting_systems(self, manager_instance: Optional[StrategyManager], cas_instance: Optional[CASSystem]):
-        """Initialize shift manager and CAS system."""
+        """Initialize shift manager and CAS system using self.config."""
         if isinstance(manager_instance, StrategyManager):
             self.shift_manager = manager_instance
             logger.info("Using pre-configured StrategyManager instance.")
         else:
-            # Create default FS strategies
             if self.engine and self.drivetrain:
+                 # Factory needs engine params and drivetrain info
                  self.shift_manager = create_formula_student_strategies(
                      engine_max_rpm=self.engine.redline_rpm,
                      engine_peak_power_rpm=self.engine.max_power_rpm,
                      engine_peak_torque_rpm=self.engine.max_torque_rpm,
                      gear_ratios=self.drivetrain.transmission.gear_ratios,
-                     num_gears=self.drivetrain.num_gears, # Pass num_gears
+                     num_gears=self.drivetrain.num_gears,
                      idle_rpm=self.engine.idle_rpm
                  )
-                 # Optionally load strategy config to customize points
-                 strat_cfg_ref = self.config.get('shift_strategy')
-                 if isinstance(strat_cfg_ref, str) and os.path.exists(strat_cfg_ref):
-                      self.shift_manager.load_strategies_from_config(strat_cfg_ref)
-                 logger.info("Initialized default StrategyManager with FS strategies.")
+                 # Load strategy config from path specified in main vehicle config
+                 strat_cfg_path_ref = self.config.get('shift_strategy_config_path')
+                 base_cfg_dir = os.path.dirname(self.config_path) if self.config_path else '.'
+                 if strat_cfg_path_ref:
+                      strat_cfg_path = os.path.join(base_cfg_dir, strat_cfg_path_ref) if not os.path.isabs(strat_cfg_path_ref) else strat_cfg_path_ref
+                      if os.path.exists(strat_cfg_path):
+                          self.shift_manager.load_strategies_from_config(strat_cfg_path)
+                      else:
+                           logger.warning(f"Shift strategy config path not found: {strat_cfg_path}")
+                 logger.info("Initialized StrategyManager with FS strategies (potentially customized).")
             else:
                  logger.warning("Cannot initialize StrategyManager: Engine or Drivetrain missing.")
                  self.shift_manager = None
@@ -317,49 +431,67 @@ class Vehicle:
             self.cas_system = cas_instance
             logger.info("Using pre-configured CASSystem instance.")
         elif self.drivetrain and self.engine:
-            # Load CAS config if available
-            cas_cfg_ref = self.config.get('cas_system', self.config.get('transmission')) # Check both potential locations
-            cas_config_path = None
-            if isinstance(cas_cfg_ref, str) and os.path.exists(cas_cfg_ref):
-                 cas_config_path = cas_cfg_ref
-            elif isinstance(cas_cfg_ref, dict) and 'cas' in cas_cfg_ref:
-                 # If CAS params are nested within transmission config
-                  cas_config_path = self.config_path # Pass main vehicle config to load nested dict
+            # Load CAS config if path specified in main vehicle config
+            cas_cfg_path_ref = self.config.get('cas_system_config_path')
+            cas_cfg_path = None
+            base_cfg_dir = os.path.dirname(self.config_path) if self.config_path else '.'
+            if cas_cfg_path_ref:
+                 resolved_path = os.path.join(base_cfg_dir, cas_cfg_path_ref) if not os.path.isabs(cas_cfg_path_ref) else cas_cfg_path_ref
+                 if os.path.exists(resolved_path):
+                      cas_cfg_path = resolved_path
+                 else:
+                      logger.warning(f"CAS config path specified but not found: {resolved_path}")
 
             self.cas_system = CASSystem(
                 gear_ratios=self.drivetrain.transmission.gear_ratios,
                 engine=self.engine,
-                config_path=cas_config_path
+                config_path=cas_cfg_path # Pass path, constructor handles loading
             )
             logger.info("Initialized CASSystem.")
         else:
              logger.warning("Cannot initialize CASSystem: Engine or Drivetrain missing.")
              self.cas_system = None
-
+             
     def _initialize_aero_cooling(self, side_pods_instance, rear_rad_instance, assist_instance):
-        """Initialize optional side pods, rear radiator, cooling assist."""
+        """Initialize optional side pods, rear radiator, cooling assist using self.config."""
+        base_cfg_dir = os.path.dirname(self.config_path) if self.config_path else '.'
+
+        def resolve_path(ref_key):
+            ref = self.config.get(ref_key)
+            if isinstance(ref, str):
+                path = os.path.join(base_cfg_dir, ref) if not os.path.isabs(ref) else ref
+                return path if os.path.exists(path) else None
+            return None
+
+        # Side Pods
         if isinstance(side_pods_instance, DualSidePodSystem):
             self.side_pods = side_pods_instance
-        elif self.config.get('side_pods'):
-             # Logic to load/create from config
-             self.side_pods = create_standard_side_pod_system() # Use factory
-             logger.info("Initialized default DualSidePodSystem.")
+        elif self.config.get('side_pods') or self.config.get('side_pod_config_path'):
+             config_path = resolve_path('side_pod_config_path')
+             config_dir = os.path.dirname(config_path) if config_path else os.path.normpath(os.path.join(base_cfg_dir, '..', 'configs', 'thermal'))
+             self.side_pods = create_standard_side_pod_system(config_dir=config_dir) # Use factory
+             logger.info("Initialized DualSidePodSystem.")
         else: self.side_pods = None
 
+        # Rear Radiator
         if isinstance(rear_rad_instance, RearRadiatorSystem):
             self.rear_radiator = rear_rad_instance
-        elif self.config.get('rear_radiator'):
-             self.rear_radiator = create_default_rear_radiator_system()
-             logger.info("Initialized default RearRadiatorSystem.")
+        elif self.config.get('rear_radiator') or self.config.get('rear_radiator_config_path'):
+             config_path = resolve_path('rear_radiator_config_path')
+             config_dir = os.path.dirname(config_path) if config_path else os.path.normpath(os.path.join(base_cfg_dir, '..', 'configs', 'thermal'))
+             self.rear_radiator = create_default_rear_radiator_system(config_dir=config_dir)
+             logger.info("Initialized RearRadiatorSystem.")
         else: self.rear_radiator = None
 
+        # Cooling Assist
         if isinstance(assist_instance, CoolingAssistSystem):
              self.cooling_assist = assist_instance
-        elif self.config.get('cooling_assist'):
-             self.cooling_assist = create_default_cooling_assist_system()
-             logger.info("Initialized default CoolingAssistSystem.")
+        elif self.config.get('cooling_assist') or self.config.get('cooling_assist_config_path'):
+             config_path = resolve_path('cooling_assist_config_path')
+             config_dir = os.path.dirname(config_path) if config_path else os.path.normpath(os.path.join(base_cfg_dir, '..', 'configs', 'thermal'))
+             self.cooling_assist = create_default_cooling_assist_system(config_dir=config_dir)
+             logger.info("Initialized CoolingAssistSystem.")
         else: self.cooling_assist = None
-
 
     def update_engine_state(self):
         """Update engine RPM and calculate torque based on current vehicle state."""
@@ -408,73 +540,133 @@ class Vehicle:
         # Store for force calculation
         self._current_total_wheel_torque = total_wheel_torque_nm
 
-    def update_thermal_state(self, dt: float, ambient_temp_C: float):
-         """Update the thermal state of the engine and cooling system."""
-         if not self.engine or not self.cooling_system: return
+    def update_thermal_state(self, dt: float, ambient_temp_C: Optional[float] = None):
+        """
+        Update the thermal state of the engine and cooling system.
+        Relies on EngineHeatModel for heat generation and ExternalCoolingSystem for rejection.
+        """
+        if not self.include_thermal or not self.engine or not self.cooling_system or not hasattr(self.engine, 'heat_model') or self.engine.heat_model is None:
+            self.thermal_factor = 1.0 # Ensure no thermal penalty if not simulating
+            return
 
-         # 1. Update Engine Internal Thermal State (using its own method)
-         # This calculates heat generation and internal transfers based on current op point
-         if hasattr(self.engine, 'update_thermal_state') and callable(self.engine.update_thermal_state):
-             # Pass necessary external info to engine's thermal update
-             # We need cooling effectiveness from the external system
-             # Placeholder: Estimate effectiveness based on speed/fan (improve this)
-             cooling_effectiveness_est = 0.5 + 0.5 * np.clip(self.current_speed_mps / 20.0, 0, 1)
-             if self.cooling_system.cooling_fan and self.cooling_system.cooling_fan.is_active:
-                  cooling_effectiveness_est = max(cooling_effectiveness_est, 0.8) # Fan boost
+        ambient_temp = ambient_temp_C if ambient_temp_C is not None else 25.0
 
-             engine_temps = self.engine.update_thermal_state(
-                 ambient_temp=ambient_temp_C,
-                 cooling_effectiveness=cooling_effectiveness_est, # Pass estimated effectiveness
-                 dt=dt
-             )
-             # Update vehicle's temperature mirrors
-             self.engine_temperature = engine_temps.get('engine_temp', self.engine_temperature)
-             self.coolant_temperature = engine_temps.get('coolant_temp', self.coolant_temperature)
-             self.oil_temperature = engine_temps.get('oil_temp', self.oil_temperature)
+        # 1. Calculate Engine Heat Generation (using engine's heat model)
+        heat_gen = self.engine.heat_model.calculate_heat_generation(self.current_engine_rpm, self.throttle_input)
+        heat_to_coolant_W = heat_gen.get('to_coolant', 0.0)
+        heat_to_oil_W = heat_gen.get('to_oil', 0.0)
+        heat_block_ambient_gen = heat_gen.get('to_ambient', 0.0) # Heat generated that goes directly to ambient
 
-         # 2. Update External Cooling System State
-         # Provide engine heat input to the external system
-         # This requires the engine model to estimate heat *to the coolant*
-         heat_to_coolant_W = 0.0
-         if hasattr(self.engine, 'heat_model') and hasattr(self.engine.heat_model, 'calculate_heat_generation'):
-              heat_gen = self.engine.heat_model.calculate_heat_generation(self.current_engine_rpm, self.throttle_input)
-              heat_to_coolant_W = heat_gen.get('to_coolant', 0.0)
-         elif self.engine: # Estimate if no detailed model
-             power_kw = self.engine.get_power(self.current_engine_rpm, self.throttle_input)
-             heat_to_coolant_W = power_kw * 1000 * 1.5 # Rough estimate: 1.5x power is heat to coolant
+        # 2. Update External Cooling System State (simulates radiator, fan, pump)
+        # Provide current engine block temperature for heat transfer calculation within cooling system if needed
+        self.cooling_system.simulate_step(
+            ambient_temp_C=ambient_temp,
+            vehicle_speed_mps=self.current_speed_mps,
+            engine_temp=self.engine_temperature, # Pass current engine block temp
+            engine_rpm=self.current_engine_rpm,
+            engine_load=self.throttle_input, # Use throttle as proxy
+            engine_heat_input_W=heat_to_coolant_W, # Heat transferred FROM engine TO coolant
+            dt=dt
+        )
 
-         # Update the external cooling system
-         self.cooling_system.simulate_step(
-              ambient_temp_C=ambient_temp_C,
-              vehicle_speed_mps=self.current_speed_mps,
-              engine_temp=self.engine_temperature, # Pass engine block temp
-              engine_rpm=self.current_engine_rpm,
-              engine_load=self.throttle_input, # Use throttle as load proxy
-              engine_heat_input_W=heat_to_coolant_W,
-              dt=dt
-         )
-         # Update vehicle's coolant temp mirror from the system's result
-         self.coolant_temperature = self.cooling_system.coolant_temp_C
+        # Get heat rejected by the radiator from the cooling system's state
+        heat_rejected_W = self.cooling_system.radiator_heat_rejection_W
+        # Get the updated coolant temperature from the cooling system
+        self.coolant_temperature = self.cooling_system.coolant_temp_C
 
+        # 3. Update Engine/Oil Temperatures using heat flows and capacities
+        thermal_cfg = self.engine.heat_model.config
+        capacities = thermal_cfg.get_thermal_capacities()
+        # Ensure capacities dict is valid or use safe defaults
+        safe_caps = {'engine_block': 50000, 'engine_oil': 10000, 'coolant_engine': 8000}
+        safe_caps.update(capacities) # Update with actual values if they exist
 
-    def change_gear(self, target_gear: int) -> bool:
-         """Request a gear change via the CAS system if available, else directly."""
-         if self.cas_system:
-             direction = ShiftDirection.NEUTRAL
-             if target_gear > self.current_gear: direction = ShiftDirection.UP
-             elif target_gear < self.current_gear: direction = ShiftDirection.DOWN
-             success = self.cas_system.request_shift(direction, target_gear)
-             # Update vehicle's current gear if CAS succeeded (CAS updates its internal state)
-             if success: self.current_gear = self.cas_system.current_gear
-             return success
-         elif self.drivetrain:
-              success = self.drivetrain.change_gear(target_gear)
-              if success: self.current_gear = target_gear
-              return success
-         else:
-              logger.error("Cannot change gear: No CAS or Drivetrain system.")
-              return False
+        # Calculate heat transfer rates between components
+        # Use the current temperatures *before* updating them
+        temps_current = {'engine': self.engine_temperature, 'oil': self.oil_temperature, 'coolant': self.coolant_temperature}
+        internal_transfer = self.engine.heat_model.calculate_internal_heat_transfer(temps_current)
+        ambient_loss = self.engine.heat_model.calculate_ambient_heat_loss(temps_current, ambient_temp, self.current_speed_mps)
 
+        q_block_to_coolant = internal_transfer['coolant_to_block'] # Heat from block TO coolant
+        q_block_to_oil = internal_transfer['oil_to_block']         # Heat from block TO oil
+        q_block_to_ambient_loss = ambient_loss['block_to_ambient'] # Heat from block TO ambient air
+        q_oil_to_ambient_loss = ambient_loss['oil_to_ambient']     # Heat from oil TO ambient air
+
+        # Net heat flow for engine block: heat generated directly to ambient - transfer to coolant - transfer to oil - direct loss to air
+        q_net_engine = heat_block_ambient_gen - q_block_to_coolant - q_block_to_oil - q_block_to_ambient_loss
+
+        # Net heat flow for oil: heat generated to oil + heat from block - direct loss to air
+        q_net_oil = heat_to_oil_W + q_block_to_oil - q_oil_to_ambient_loss
+
+        # Coolant temp is managed by the external system, but we track engine block and oil temps here
+        self.engine_temperature += (q_net_engine * dt) / max(1e-3, safe_caps['engine_block'])
+        self.oil_temperature += (q_net_oil * dt) / max(1e-3, safe_caps['engine_oil'])
+
+        # Clamp temperatures
+        self.engine_temperature = max(ambient_temp - 5, self.engine_temperature)
+        self.oil_temperature = max(ambient_temp - 5, self.oil_temperature)
+
+        # Update engine's internal temperature estimates and thermal factor
+        if hasattr(self.engine, 'engine_temperature'): self.engine.engine_temperature = self.engine_temperature
+        if hasattr(self.engine, 'coolant_temperature'): self.engine.coolant_temperature = self.coolant_temperature # Keep engine's view synced
+        if hasattr(self.engine, 'oil_temperature'): self.engine.oil_temperature = self.oil_temperature
+        if hasattr(self.engine, '_get_thermal_performance_factor'):
+             current_thermal_factor = self.engine._get_thermal_performance_factor(self.engine_temperature)
+             self.thermal_factor = current_thermal_factor
+             if hasattr(self.engine, 'thermal_factor'): self.engine.thermal_factor = current_thermal_factor # Keep engine's factor synced
+
+    def change_gear(self, target_gear: int) -> Tuple[bool, float]:
+        """
+        Request a gear change. Returns success and estimated shift time.
+
+        Args:
+            target_gear: The desired gear number (0 for Neutral).
+
+        Returns:
+            Tuple (success: bool, shift_duration_s: float).
+            Shift duration is 0 if no shift occurs or direct change.
+        """
+        shift_duration_s = 0.0
+        success = False
+
+        if self.drivetrain is None:
+            logger.error("Cannot change gear: No Drivetrain system.")
+            return False, 0.0
+
+        if target_gear == self.current_gear:
+             return True, 0.0 # No change needed
+
+        # Determine shift direction
+        direction = ShiftDirection.NEUTRAL
+        if target_gear > self.current_gear: direction = ShiftDirection.UP
+        elif target_gear < self.current_gear: direction = ShiftDirection.DOWN
+
+        if self.cas_system:
+            # CAS handles readiness checks and overrev protection internally now
+            success = self.cas_system.request_shift(direction, target_gear_override=target_gear)
+            if success:
+                # Shift *initiated*. Gear change happens later via event or state check.
+                # Get estimated time for the *calling simulator* to handle.
+                shift_duration_s = self.cas_system.get_total_shift_time_ms(direction) / 1000.0
+                # DO NOT update self.current_gear here. It's updated when the shift completes.
+                logger.debug(f"CAS shift {self.current_gear}->{target_gear} initiated. Estimated duration: {shift_duration_s*1000:.1f} ms.")
+            else:
+                logger.debug(f"CAS shift request {self.current_gear}->{target_gear} rejected.")
+        else:
+            # Direct transmission change if no CAS
+            if 0 <= target_gear <= self.drivetrain.num_gears:
+                 success = self.drivetrain.change_gear(target_gear)
+                 if success:
+                     self.current_gear = target_gear # Direct change, update immediately
+                     shift_duration_s = 0.050 # Default direct shift time penalty if no CAS
+                     logger.debug(f"Direct shift to gear {target_gear} successful.")
+                 else:
+                     logger.warning(f"Direct gear change to {target_gear} failed.")
+            else:
+                 logger.error(f"Invalid target gear {target_gear} for direct change.")
+                 success = False
+
+        return success, shift_duration_s
     def calculate_forces(self) -> Dict[str, float]:
         """Calculate major longitudinal forces acting on the vehicle."""
         # 1. Tractive Force (from wheel torque calculated in drivetrain update)

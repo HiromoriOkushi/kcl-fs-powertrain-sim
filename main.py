@@ -10,13 +10,13 @@ command-line arguments.
 import os
 import sys
 import numpy as np
-import matplotlib.pyplot as plt
 import pandas as pd
 import time
 import yaml
 import logging
 import argparse
 import copy
+import json
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
@@ -40,7 +40,7 @@ try:
 
     # Event Simulators
     from kcl_fs_powertrain.performance.acceleration import AccelerationSimulator, run_fs_acceleration_simulation
-    from kcl_fs_powertrain.performance.lap_time import LapTimeSimulator, run_fs_lap_simulation
+    from kcl_fs_powertrain.performance.lap_time import LapTimeSimulator, run_fs_lap_simulation, CorneringPerformance # Added CorneringPerformance
     from kcl_fs_powertrain.performance.endurance import EnduranceSimulator, run_endurance_simulation
 
     # Analysis Tools
@@ -53,7 +53,7 @@ try:
     from kcl_fs_powertrain.track_generator.enums import TrackMode, SimType
 
     # Plotting & Utils
-    from kcl_fs_powertrain.utils.plotting import set_plot_style, save_plot
+    from kcl_fs_powertrain.utils.plotting import set_plot_style, save_plot # Keep plot setup
     from kcl_fs_powertrain.utils.validation import validate_full_vehicle_performance
 except ImportError as e:
     print(f"ERROR: Failed to import necessary simulation modules: {e}")
@@ -436,68 +436,110 @@ class SimulationManager:
         """Generate final summary report and save results."""
         log.info("--- Generating Final Report ---")
         # 1. Save combined results dictionary
-        results_path = self.get_output_path('final_results.json')
+        results_path = os.path.join(self.output_dir, 'final_results.json')
         try:
+             # Custom encoder to handle numpy types and potentially other objects
+             def default_serializer(obj):
+                 if isinstance(obj, np.ndarray): return obj.tolist()
+                 if isinstance(obj, (np.int_, np.integer)): return int(obj)
+                 if isinstance(obj, (np.float_, np.floating)): return float(obj)
+                 if isinstance(obj, (np.bool_)): return bool(obj)
+                 # Handle potential enums
+                 if isinstance(obj, Enum): return obj.name
+                 # Try converting other known types or fallback to string
+                 try:
+                     if pd.isna(obj): return None # Handle pandas NaT/NaN specifically
+                     # Add checks for other specific non-serializable types if needed
+                     return str(obj) # Fallback to string representation
+                 except Exception:
+                     return None # Return None if conversion fails
+
+             # Create a deep copy to avoid modifying original results during serialization attempt
+             results_to_save = copy.deepcopy(self.results)
+
              with open(results_path, 'w') as f:
-                  # Custom encoder needed for potential numpy arrays or objects
-                  def default_serializer(obj):
-                      if isinstance(obj, np.ndarray): return obj.tolist()
-                      if isinstance(obj, (np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64)): return int(obj)
-                      if isinstance(obj, (np.float_, np.float16, np.float32, np.float64)): return float(obj)
-                      if isinstance(obj, (np.bool_)): return bool(obj)
-                      if hasattr(obj, 'to_dict') and callable(obj.to_dict): return obj.to_dict()
-                      try: return str(obj) # Fallback to string
-                      except: return None
-                  json.dump(self.results, f, indent=2, default=default_serializer)
+                  json.dump(results_to_save, f, indent=2, default=default_serializer)
              log.info(f"Combined results saved to: {results_path}")
+        except TypeError as te:
+             log.error(f"Failed to serialize results to JSON: {te}. Check for non-serializable types.")
+             # Optionally save as YAML as a fallback?
+             try:
+                 yaml_path = os.path.join(self.output_dir, 'final_results.yaml')
+                 with open(yaml_path, 'w') as yf:
+                     yaml.dump(results_to_save, yf, default_flow_style=False, sort_keys=False, allow_unicode=True)
+                 log.info(f"Saved results as YAML fallback: {yaml_path}")
+             except Exception as ye:
+                 log.error(f"Failed to save results as YAML fallback either: {ye}")
         except Exception as e:
-             log.error(f"Failed to save combined results JSON: {e}")
+             log.error(f"Failed to save combined results: {e}")
+
 
         # 2. Create a simple text summary
-        summary_path = self.get_output_path('summary_report.txt')
+        summary_path = os.path.join(self.output_dir, 'summary_report.txt')
         try:
              with open(summary_path, 'w') as f:
                  f.write("KCL Formula Student Powertrain Simulation Report\n")
                  f.write("="*50 + "\n")
-                 f.write(f"Timestamp: {self.timestamp}\n")
+                 f.write(f"Timestamp: {self.config.get('timestamp', 'N/A')}\n") # Get timestamp from config
                  f.write(f"Output Directory: {self.output_dir}\n")
-                 f.write(f"Vehicle Base Mass: {self.vehicle.mass:.1f} kg\n")
-                 if self.track: f.write(f"Track: {self.track.name} ({self.track.total_length:.1f} m)\n")
+                 if self.vehicle:
+                     f.write(f"Vehicle Base Mass: {getattr(self.vehicle, 'mass', 'N/A'):.1f} kg\n")
+                 else:
+                     f.write("Vehicle: N/A\n")
+                 if self.track:
+                     f.write(f"Track: {getattr(self.track, 'name', 'N/A')} ({getattr(self.track, 'total_length', 0.0):.1f} m)\n")
+                 else:
+                     f.write("Track: N/A\n")
+
                  f.write("\n--- Event Results Summary ---\n")
-                 if 'acceleration' in self.results and 'error' not in self.results['acceleration']:
+                 if 'acceleration' in self.results and isinstance(self.results['acceleration'], dict) and 'error' not in self.results['acceleration']:
                       accel = self.results['acceleration']
                       f.write(f" Acceleration (75m): {accel.get('finish_time', 'N/A'):.3f} s\n")
                       f.write(f"  0-60 mph: {accel.get('time_to_60mph', 'N/A'):.3f} s\n")
-                 if 'lap_time' in self.results and 'error' not in self.results['lap_time']:
+                 elif 'acceleration' in self.results and isinstance(self.results['acceleration'], dict):
+                      f.write(f" Acceleration: ERROR ({self.results['acceleration'].get('error', 'Unknown')})\n")
+                 else: f.write(" Acceleration: Not run or no results.\n")
+
+                 if 'lap_time' in self.results and isinstance(self.results['lap_time'], dict) and 'error' not in self.results['lap_time']:
                       lap = self.results['lap_time']
                       f.write(f" Lap Time (Autocross): {lap.get('lap_time', 'N/A'):.3f} s\n")
                       f.write(f"  Avg Speed: {lap.get('avg_speed_kph', 'N/A'):.1f} km/h\n")
-                 if 'endurance' in self.results and 'error' not in self.results['endurance']:
+                 elif 'lap_time' in self.results and isinstance(self.results['lap_time'], dict):
+                      f.write(f" Lap Time (Autocross): ERROR ({self.results['lap_time'].get('error', 'Unknown')})\n")
+                 else: f.write(" Lap Time (Autocross): Not run or no results.\n")
+
+                 if 'endurance' in self.results and isinstance(self.results['endurance'], dict) and 'error' not in self.results['endurance']:
                       endurance = self.results['endurance']
-                      score = self.results['endurance_score']
+                      score = self.results.get('endurance_score', {})
                       f.write(f" Endurance ({endurance.get('completed_laps',0)} laps): {endurance.get('status','DNF')}\n")
                       if endurance.get('completed'):
                            f.write(f"  Total Time: {endurance.get('total_time_s','N/A'):.2f} s\n")
                            f.write(f"  Total Fuel: {endurance.get('total_fuel_L','N/A'):.2f} L\n")
                            f.write(f"  Total Score: {score.get('total_score','N/A'):.1f}\n")
+                 elif 'endurance' in self.results and isinstance(self.results['endurance'], dict):
+                     f.write(f" Endurance: ERROR ({self.results['endurance'].get('error', 'Unknown')})\n")
+                 else: f.write(" Endurance: Not run or no results.\n")
+
 
                  # Add summaries from analyses if run
                  f.write("\n--- Analysis Summaries ---\n")
-                 if 'weight_sensitivity' in self.results and 'error' not in self.results['weight_sensitivity']:
+                 if 'weight_sensitivity' in self.results and isinstance(self.results['weight_sensitivity'], dict) and 'error' not in self.results['weight_sensitivity']:
                      f.write(" Weight Sensitivity: Analysis performed (see JSON/plots).\n")
-                 if 'lap_optimization_comparison' in self.results and 'error' not in self.results['lap_optimization_comparison']:
+                 elif 'weight_sensitivity' in self.results and isinstance(self.results['weight_sensitivity'], dict):
+                      f.write(f" Weight Sensitivity: ERROR ({self.results['weight_sensitivity'].get('error', 'Unknown')})\n")
+                 else: f.write(" Weight Sensitivity: Not run.\n")
+
+                 if 'lap_optimization_comparison' in self.results and isinstance(self.results['lap_optimization_comparison'], dict) and 'error' not in self.results['lap_optimization_comparison']:
                       comp = self.results['lap_optimization_comparison']
                       f.write(f" Lap Optimization Comparison:\n")
                       f.write(f"  Basic: {comp.get('basic',{}).get('lap_time','N/A'):.3f}s | Advanced: {comp.get('advanced',{}).get('lap_time','N/A'):.3f}s\n")
+                 elif 'lap_optimization_comparison' in self.results and isinstance(self.results['lap_optimization_comparison'], dict):
+                     f.write(f" Lap Optimization Comparison: ERROR ({self.results['lap_optimization_comparison'].get('error', 'Unknown')})\n")
+                 else: f.write(" Lap Optimization Comparison: Not run.\n")
 
              log.info(f"Summary report saved to: {summary_path}")
         except Exception as e:
             log.error(f"Failed to save summary report: {e}")
-
-    def get_output_path(self, *args) -> str:
-         """Construct a path within the simulation's output directory."""
-         return os.path.join(self.output_dir, *args)
-
 
 # =========================================================================
 # Main Execution Block
@@ -526,12 +568,14 @@ def main():
     # 1. Parse Arguments
     args = parse_arguments()
 
-    # 2. Configure Logging
+    # 2. Configure Logging (configure only once)
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
-    logging.basicConfig(level=log_level, format='%(asctime)s [%(levelname)-7s] %(name)-25s: %(message)s', datefmt='%H:%M:%S')
-    # Optionally configure file logging
+    log_format = '%(asctime)s [%(levelname)-7s] %(name)-25s: %(message)s'
+    log_datefmt = '%H:%M:%S'
+    logging.basicConfig(level=log_level, format=log_format, datefmt=log_datefmt)
+    # Optional: Configure file logging here if desired
     # file_handler = logging.FileHandler('simulation.log')
-    # file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)-7s] %(name)s: %(message)s'))
+    # file_handler.setFormatter(logging.Formatter(log_format, datefmt=log_datefmt))
     # logging.getLogger().addHandler(file_handler)
 
     log.info("Starting KCL FS Powertrain Simulation...")
@@ -540,25 +584,34 @@ def main():
     # 3. Load Configuration
     # Pass CLI args to config manager for overrides and output dir setup
     config_manager = ConfigurationManager()
+    # Pass CLI args explicitly here
     config = config_manager.load_configuration(main_config_path=args.config, cli_args=args)
-    # Store parsed args in config for later access if needed
-    config['cli_args'] = args
+    # Store parsed args in config for later access if needed (e.g., track file override)
+    config['cli_args'] = vars(args) # Store args as dict
+    # Add timestamp to config for reporting
+    config['timestamp'] = config_manager.timestamp
 
     # Apply plot setting override
     if args.no_plots:
+         # Check if output_settings exists, create if not
+         if 'output_settings' not in config: config['output_settings'] = {}
          config['output_settings']['save_plots'] = False
+    # Set plot style (imported from utils)
     set_plot_style('clean') # Set default plotting style
 
-    # 4. Initialize Simulation Manager
+    # 4. Initialize Simulation Manager (pass the final config dict)
     simulation_manager = SimulationManager(config)
 
     # 5. Setup Environment (Vehicle, Track)
     try:
         simulation_manager.setup()
+        # Additional check: Ensure vehicle has cornering calculator after setup
+        if simulation_manager.vehicle and (not hasattr(simulation_manager.vehicle, 'cornering') or simulation_manager.vehicle.cornering is None):
+             logger.debug("Initializing CorneringPerformance within main setup.")
+             simulation_manager.vehicle.cornering = CorneringPerformance(simulation_manager.vehicle)
     except Exception as e:
          log.critical(f"Failed to set up simulation environment: {e}", exc_info=True)
          sys.exit(1)
-
 
     # 6. Run Simulations
     try:
@@ -570,12 +623,13 @@ def main():
     # 7. Run Analyses
     try:
         # Update analysis settings from CLI args if provided
-        if args.run_sensitivity: config['analysis_settings']['enable_weight_sensitivity'] = True
-        if args.run_optimization: config['analysis_settings']['enable_lap_optimization'] = True
+        # Ensure analysis_settings dictionary exists
+        if 'analysis_settings' not in simulation_manager.config: simulation_manager.config['analysis_settings'] = {}
+        if args.run_sensitivity: simulation_manager.config['analysis_settings']['enable_weight_sensitivity'] = True
+        if args.run_optimization: simulation_manager.config['analysis_settings']['enable_lap_optimization'] = True
         simulation_manager.run_analyses()
     except Exception as e:
          log.error(f"Error during analysis: {e}", exc_info=True)
-
 
     # 8. Generate Report
     try:
@@ -583,14 +637,15 @@ def main():
     except Exception as e:
          log.error(f"Error generating final report: {e}", exc_info=True)
 
-
     # 9. Final Summary
     end_time = time.time()
     total_duration = end_time - start_time
     log.info("--- Simulation Finished ---")
     log.info(f"Total execution time: {total_duration:.2f} seconds")
-    log.info(f"Results saved in: {simulation_manager.output_dir}")
-
+    if simulation_manager.output_dir:
+        log.info(f"Results saved in: {simulation_manager.output_dir}")
+    else:
+        log.warning("Output directory was not set, results may not be saved correctly.")
 
 if __name__ == "__main__":
     main()

@@ -17,12 +17,6 @@ import logging
 # Import from local modules
 from .engine_thermal import EngineHeatModel, ThermalConfig
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("MotorcycleEngine")
 
 
 class MotorcycleEngine:

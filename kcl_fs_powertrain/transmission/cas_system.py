@@ -20,12 +20,6 @@ except ImportError:
     class MotorcycleEngine: pass # Placeholder
     MotorcycleEngine = None
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("CAS_System")
 
 
 class ShiftState(Enum):
@@ -169,6 +163,8 @@ class CASSystem:
     def request_shift(self, direction: ShiftDirection, target_gear_override: Optional[int] = None) -> bool:
         """
         Request a gear shift. Checks readiness and constraints.
+        Updates internal state but does not block. Returns True if shift initiated.
+        The calling simulator MUST schedule a completion event.
 
         Args:
             direction: UP, DOWN, or NEUTRAL.
@@ -177,8 +173,8 @@ class CASSystem:
         Returns:
             True if the shift process was initiated, False otherwise.
         """
-        current_time_ms = time.monotonic() * 1000.0
-        if not self._check_shift_readiness(current_time_ms):
+        current_time_s = time.monotonic() # Use seconds for system time
+        if not self._check_shift_readiness(current_time_s):
             return False
 
         # Determine target gear
@@ -186,12 +182,12 @@ class CASSystem:
         if target_gear is None:
             if direction == ShiftDirection.UP and self.current_gear < self.num_gears:
                 target_gear = self.current_gear + 1
-            elif direction == ShiftDirection.DOWN and self.current_gear > 1:
+            elif direction == ShiftDirection.DOWN and self.current_gear > 0: # Allow shift from 1 to N
                 target_gear = self.current_gear - 1
             elif direction == ShiftDirection.NEUTRAL:
                 target_gear = 0
             else:
-                logger.info(f"Shift request ignored: Cannot shift {direction.name} from gear {self.current_gear}.")
+                logger.debug(f"Shift request ignored: Cannot shift {direction.name} from gear {self.current_gear}.")
                 return False # Invalid shift direction from current gear
 
         # Validate target gear
@@ -204,68 +200,56 @@ class CASSystem:
 
         # Check overrev on downshifts (requires engine RPM)
         if direction == ShiftDirection.DOWN and self.engine:
-             if self._check_overrev(target_gear, self.engine.current_rpm):
+             current_rpm = getattr(self.engine, 'current_rpm', 0)
+             if self._check_overrev(target_gear, current_rpm):
                  return False # Overrev prevented shift
 
         # --- If all checks pass, initiate shift ---
-        self.shift_start_time_ms = current_time_ms
-        logger.info(f"Initiating shift: {self.current_gear} -> {target_gear}")
+        self.shift_start_time_s = current_time_s
+        self.system_state = ShiftState.SHIFT_IN_PROGRESS # Set state to busy
+        self.target_gear_during_shift = target_gear # Store target gear
+        logger.info(f"CAS Initiating shift: {self.current_gear} -> {target_gear}")
 
-        # Simulate the sequence (in reality, this would involve hardware commands)
-        # The actual gear change happens at the end of the sequence
-        if self._simulate_shift_sequence(direction):
-             self.current_gear = target_gear # Update gear state *after* successful sequence
-             self.last_shift_finish_time_ms = time.monotonic() * 1000.0
-             self._shift_timestamps.append(self.last_shift_finish_time_ms)
-             self._log_shift(self.current_gear, target_gear, self.last_shift_finish_time_ms - self.shift_start_time_ms)
-             return True
+        # The shift process is initiated. The external simulator is responsible
+        # for scheduling the completion event based on get_total_shift_time_ms()
+        # and calling complete_shift().
+        return True
+    
+    def complete_shift(self, current_time_s: float):
+        """Mark the current shift as complete and update state."""
+        if self.system_state == ShiftState.SHIFT_IN_PROGRESS:
+             shift_duration_ms = (current_time_s - self.shift_start_time_s) * 1000.0
+             from_gear = self.current_gear
+             # Ensure target gear was stored during request_shift
+             to_gear = getattr(self, 'target_gear_during_shift', -1) # Get the stored target, default to invalid
+             if to_gear == -1:
+                  logger.error("Cannot complete shift: Target gear was not stored.")
+                  self.system_state = ShiftState.ERROR
+                  return
+
+             self.current_gear = to_gear # Update the gear
+             self.system_state = ShiftState.IDLE # Ready for next shift
+             self.last_shift_finish_time_s = current_time_s
+             self._shift_timestamps_s.append(current_time_s)
+             self._log_shift(from_gear, to_gear, shift_duration_ms)
+             logger.info(f"CAS shift completed: {from_gear} -> {to_gear} in {shift_duration_ms:.1f} ms.")
+             # Clear stored target only after successful completion
+             if hasattr(self, 'target_gear_during_shift'):
+                  delattr(self, 'target_gear_during_shift')
         else:
-             # Shift failed during simulation
-             return False
-
-    def _simulate_shift_sequence(self, direction: ShiftDirection) -> bool:
-        """Internal helper to simulate the timed sequence of a shift."""
-        try:
-            # 1. Preparation Phase
-            self.system_state = ShiftState.PREPARE_UPSHIFT if direction == ShiftDirection.UP else ShiftState.PREPARE_DOWNSHIFT
-            # Simulate throttle adjustment (reduction for up, prep for blip for down)
-            # logger.debug(f" {self.system_state.name}...")
-            time.sleep(self.prepare_time_ms / 1000.0)
-
-            # 2. Ignition Cut
-            self.system_state = ShiftState.IGNITION_CUT
-            # logger.debug(" Ignition Cut...")
-            # Simulate cutting ignition - engine torque goes to ~0
-            time.sleep(self.ignition_cut_time_ms / 1000.0)
-
-            # 3. Actuation & Throttle Blip (if downshift)
-            self.system_state = ShiftState.ACTUATING_SHIFT
-            # logger.debug(" Actuating Shift...")
-            if direction == ShiftDirection.DOWN:
-                 self.system_state = ShiftState.THROTTLE_BLIP
-                 # logger.debug(" Throttle Blip...")
-                 # Simulate throttle blip
-                 time.sleep(self.throttle_blip_time_ms / 1000.0)
-                 self.system_state = ShiftState.ACTUATING_SHIFT # Back to actuating after blip finishes
-
-            # Simulate mechanical actuation
-            time.sleep(self.shift_actuation_time_ms / 1000.0)
-
-            # 4. Recovery Phase
-            self.system_state = ShiftState.RECOVERY
-            # logger.debug(" Recovery...")
-            # Simulate restoring ignition and throttle
-            time.sleep(self.recovery_time_ms / 1000.0)
-
-            # 5. Back to Idle
-            self.system_state = ShiftState.IDLE
-            # logger.debug(" Shift sequence complete.")
-            return True
-
-        except Exception as e:
-             logger.error(f"Error during shift sequence simulation: {e}")
-             self.system_state = ShiftState.ERROR
-             return False
+             logger.warning(f"complete_shift called when not in SHIFT_IN_PROGRESS state (current state: {self.system_state.name}).")
+    
+    def reset(self):
+         """Reset CAS state to initial conditions."""
+         self.current_gear = 0 # Start in Neutral
+         self.system_state = ShiftState.IDLE
+         self.last_shift_finish_time_s = -self.min_shift_interval_ms / 1000.0 # Allow immediate first shift
+         self.shift_start_time_s = 0.0
+         self.shift_log = []
+         self._shift_timestamps_s = []
+         if hasattr(self, 'target_gear_during_shift'):
+             delattr(self, 'target_gear_during_shift') # Ensure cleared on reset
+         logger.info("CAS system state reset.")
 
     def _log_shift(self, from_gear: int, to_gear: int, duration_ms: float):
          """Log details of a completed shift."""

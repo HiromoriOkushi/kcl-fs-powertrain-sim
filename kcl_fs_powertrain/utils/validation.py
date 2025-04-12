@@ -583,6 +583,23 @@ def save_validation_results(validation_results: Dict, file_path: str) -> bool:
         logger.error(f"Error saving validation results to {file_path}: {e}")
         return False
 
+def _format_metric_name(metric: str) -> str:
+    """Format metric name for display in plots."""
+    name_map = {
+        'time_to_60mph': '0-60 mph Time', 'time_to_100kph': '0-100 km/h Time',
+        'finish_time': '75m Time', 'acceleration_time': '75m Time',
+        'peak_acceleration_g': 'Peak Accel (g)', 'avg_speed_kph': 'Avg Speed (km/h)',
+        'max_speed_kph': 'Max Speed (km/h)', 'max_lateral_g': 'Max Lateral (g)',
+        'lap_time': 'Lap Time', 'lap_time_autocross': 'Autocross Lap Time',
+        'engine_temp': 'Engine Temp', 'coolant_temp': 'Coolant Temp', 'oil_temp': 'Oil Temp',
+        'max_engine_temp': 'Max Engine Temp', 'max_coolant_temp': 'Max Coolant Temp', 'max_oil_temp': 'Max Oil Temp',
+        'power_to_weight': 'Power/Weight (kW/kg)', 'specific_power': 'Specific Power (HP/L)',
+        'vehicle_mass': 'Vehicle Mass (kg)', 'weight_distribution': 'Front Weight Dist (%)',
+        'skidpad_time': 'Skidpad Time', 'avg_speed_autocross': 'Autocross Avg Speed (km/h)',
+        'fuel_efficiency_endurance': 'Endurance Fuel Eff (L/lap)', 'max_speed': 'Top Speed (km/h)',
+        'average_lap_time': 'Avg Lap Time (Skidpad)' # Added for skidpad results key
+    }
+    return name_map.get(metric, metric.replace('_', ' ').title())
 
 def plot_validation_results(validation_results: Dict, save_path: Optional[str] = None) -> Optional[plt.Figure]:
     """
