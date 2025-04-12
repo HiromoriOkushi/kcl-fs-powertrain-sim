@@ -20,26 +20,36 @@ import yaml
 from typing import Dict, List, Tuple, Optional
 import pandas as pd
 
-# Import modules from the kcl_fs_powertrain package
-# Adjust the path if needed to import from the correct location
-sys.path.append('..')  # Add parent directory to path
+# --- Add project root to Python path ---
+# This allows running this script directly from the examples directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(script_dir, '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+# -----------------------------------------
 
+# Import modules from the kcl_fs_powertrain package (Use absolute paths)
 try:
     from kcl_fs_powertrain.engine.motorcycle_engine import MotorcycleEngine
     from kcl_fs_powertrain.engine.torque_curve import TorqueCurve
     from kcl_fs_powertrain.transmission.gearing import Transmission, FinalDrive, Differential, DrivetrainSystem
     from kcl_fs_powertrain.transmission.shift_strategy import (
-        ShiftStrategy, MaxAccelerationStrategy, MaxEfficiencyStrategy, 
+        ShiftStrategy, MaxAccelerationStrategy, MaxEfficiencyStrategy,
         EnduranceStrategy, AccelerationEventStrategy, StrategyManager,
-        create_formula_student_strategies, ShiftCondition
+        create_formula_student_strategies, ShiftCondition # Removed ShiftCondition from import as it's defined inline
     )
-    from kcl_fs_powertrain.transmission.cas_system import CASSystem, ShiftDirection
-except ImportError:
-    print("Warning: Unable to import KCL Formula Student modules.")
+    from kcl_fs_powertrain.transmission.cas_system import CASSystem, ShiftDirection, ShiftState
+    from kcl_fs_powertrain.utils.plotting import save_plot, _apply_common_ax_settings # Import needed plot utils
+    from kcl_fs_powertrain.utils.constants import KW_TO_HP, HP_TO_KW # Import needed constants
+    ENGINE_MODULES_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Unable to import KCL Formula Student modules: {e}")
     print("Creating visualization with placeholder data instead.")
     ENGINE_MODULES_AVAILABLE = False
-else:
-    ENGINE_MODULES_AVAILABLE = True
+    # Define placeholders for missing classes/enums if needed for the script to run in fallback mode
+    class ShiftState: pass
+    class ShiftDirection: UP=1; DOWN=-1; NEUTRAL=0
+    class ShiftCondition: RPM_THRESHOLD=0 # Dummy value
 
 
 class TransmissionVisualizer:

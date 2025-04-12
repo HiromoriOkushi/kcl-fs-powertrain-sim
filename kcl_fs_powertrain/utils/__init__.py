@@ -24,7 +24,7 @@ from .constants import (
     KG_TO_LBS, LBS_TO_KG, PSI_TO_PA, PA_TO_PSI,
     INCH_TO_M, M_TO_INCH, MM_TO_M, M_TO_MM,
     DEG_TO_RAD, RAD_TO_DEG, LITERS_TO_M3, M3_TO_LITERS,
-    GAL_TO_LITERS, LITERS_TO_GAL,
+    GAL_TO_LITERS, LITERS_TO_GAL, BAR_TO_PA, PA_TO_BAR,
 
     # Formula Student reference values
     FS_MAX_TRACK_WIDTH, FS_ACCELERATION_LENGTH, FS_SKIDPAD_RADIUS,
@@ -107,7 +107,7 @@ __all__ = [
     'KG_TO_LBS', 'LBS_TO_KG', 'PSI_TO_PA', 'PA_TO_PSI',
     'INCH_TO_M', 'M_TO_INCH', 'MM_TO_M', 'M_TO_MM',
     'DEG_TO_RAD', 'RAD_TO_DEG', 'LITERS_TO_M3', 'M3_TO_LITERS',
-    'GAL_TO_LITERS', 'LITERS_TO_GAL',
+    'GAL_TO_LITERS', 'LITERS_TO_GAL', 'BAR_TO_PA', 'PA_TO_BAR',
 
     # Enumerations
     'TireType', 'EngineType', 'ThermalWarningLevel',
@@ -126,7 +126,7 @@ __all__ = [
 
     # Plot functions
     'set_plot_style', 'save_plot',
-    'plot_engine_performance', 'plot_vehicle_performance_summary',
+    'plot_engine_performance', 'plot_vehicle_performance_summary', # <--- Ensure it's in __all__
     'plot_torque_curves_comparison', 'plot_track_layout',
     'plot_racing_line_analysis', 'plot_thermal_performance',
     'plot_thermal_comparison', 'plot_cooling_system_map',

@@ -26,9 +26,9 @@ from .shift_strategy import (
     MaxAccelerationStrategy,
     MaxEfficiencyStrategy,
     EnduranceStrategy,
-    AccelerationEventStrategy, # Keep even if specific event has own file
-    SkidpadStrategy, # Added for clarity
-    AutocrossStrategy, # Added for clarity
+    AccelerationEventStrategy,
+    # SkidpadStrategy, # Removed - not explicitly defined
+    # AutocrossStrategy, # Removed - not explicitly defined
     StrategyManager,
     create_formula_student_strategies,
     ShiftPoint,
@@ -55,8 +55,8 @@ __all__ = [
     'MaxEfficiencyStrategy',
     'EnduranceStrategy',
     'AccelerationEventStrategy',
-    'SkidpadStrategy',
-    'AutocrossStrategy',
+    # 'SkidpadStrategy', # Removed
+    # 'AutocrossStrategy', # Removed
     'StrategyManager',
     'create_formula_student_strategies',
     'ShiftPoint',

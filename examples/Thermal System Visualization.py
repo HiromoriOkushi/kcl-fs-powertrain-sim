@@ -5,36 +5,55 @@ This script demonstrates the thermal performance of different cooling system
 configurations for a Formula Student racing car, providing visualizations
 of thermal behavior under various operating conditions.
 """
-
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import os
 from time import time
-
+# --- Add project root to Python path ---
+# This allows running this script directly from the examples directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(script_dir, '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+# -----------------------------------------
 # Import modules from the Formula Student powertrain package
-from ..kcl_fs_powertrain.thermal.cooling_system import (
-    CoolingSystem, Radiator, RadiatorType, CoolingFan, FanType, WaterPump, PumpType, Thermostat
-)
-from ..kcl_fs_powertrain.thermal.rear_radiator import (
-    RearRadiator, RearRadiatorDuct, RearRadiatorSystem, MountingPosition, DuctType
-)
-from ..kcl_fs_powertrain.thermal.side_pod import (
-    SidePod, SidePodRadiator, SidePodSystem, DualSidePodSystem, SidePodType, RadiatorOrientation
-)
-from ..kcl_fs_powertrain.thermal.electric_compressor import (
-    ElectricCompressor, CompressorControl, CoolingAssistSystem
-)
-from ..kcl_fs_powertrain.engine.engine_thermal import (
-    ThermalConfig, EngineHeatModel, ThermalSimulation, CoolingSystem as EngineCoolingSystem
-)
-from ..kcl_fs_powertrain.utils.plotting import (
-    set_plot_style, plot_thermal_performance, plot_thermal_comparison,
-    plot_cooling_system_map, plot_endurance_results
-)
+try:
+    from kcl_fs_powertrain.thermal.cooling_system import ( # Use absolute import
+        CoolingSystem, Radiator, RadiatorType, CoolingFan, FanType, WaterPump, PumpType, Thermostat,
+        create_formula_student_cooling_system
+    )
+    from kcl_fs_powertrain.thermal.rear_radiator import (
+        RearRadiator, RearRadiatorDuct, RearRadiatorSystem, MountingPosition, DuctType,
+        create_optimized_rear_radiator_system # Import factory function
+    )
+    from kcl_fs_powertrain.thermal.side_pod import (
+        SidePod, SidePodRadiator, SidePodSystem, DualSidePodSystem, SidePodType, RadiatorOrientation,
+        create_cooling_optimized_side_pod_system # Import factory function
+    )
+    from kcl_fs_powertrain.thermal.electric_compressor import (
+        ElectricCompressor, CompressorControl, CoolingAssistSystem,
+        create_high_performance_cooling_assist_system # Import factory function
+    )
+    from kcl_fs_powertrain.engine.engine_thermal import (
+        ThermalConfig, EngineHeatModel, ThermalSimulation,
+        CoolingSystem as EngineCoolingSystem # This alias might be confusing, ensure it's used carefully
+    )
+    from kcl_fs_powertrain.utils.plotting import (
+        set_plot_style, plot_thermal_performance, plot_thermal_comparison,
+        plot_cooling_system_map, plot_endurance_results
+    )
+    # Import constants if needed
+    from kcl_fs_powertrain.utils.constants import BAR_TO_PA, LITERS_TO_M3
+except ImportError as e:
+    print(f"Error importing modules: {e}")
+    print("Please ensure the package is installed or run from the project root.")
+    sys.exit(1)
+
 
 # Create output directory for plots
-output_dir = "thermal_results"
+output_dir = os.path.join(project_root, "plots", "thermal_example") # Save plots relative to project root
 os.makedirs(output_dir, exist_ok=True)
 
 # Set plot style

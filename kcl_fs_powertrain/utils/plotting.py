@@ -16,19 +16,14 @@ import pandas as pd
 from typing import Dict, List, Tuple, Optional, Union, Any
 import os
 import logging
+from enum import Enum
 
 
 # Import constants for unit conversions
 from .constants import (
     MS_TO_KMH, MS_TO_MPH, KG_TO_LBS, KW_TO_HP, LITERS_TO_GAL,
-    NM_TO_LBFT, M_TO_INCH, M_TO_MM
-)
+    NM_TO_LBFT, M_TO_INCH, M_TO_MM, GRAVITY)
 # Import ReliabilityEvent for endurance plot
-try:
-    from ..performance.endurance import ReliabilityEvent # <-- ADD THIS IMPORT
-except ImportError:
-    class ReliabilityEvent(Enum): NONE=0 # Mock Enum as fallback <-- ADD FALLBACK
-    logger.warning("Could not import ReliabilityEvent for plotting.")
 
 # Configure logging
 logging.basicConfig(
@@ -1171,179 +1166,211 @@ def plot_weight_distribution_sensitivity(sensitivity_data: Dict, title: Optional
 # Endurance plotting functions
 #------------------------------------------------------------------------------
 # plot_endurance_results and plot_endurance_comparison implemented here.
-
 def plot_endurance_results(endurance_data: Dict, title: Optional[str] = None,
                          unit_system: str = 'metric',
-                         save_path: Optional[str] = None) -> Optional[plt.Figure]:
+                         save_path: Optional[str] = None,
+                         plot_type: str = 'summary') -> Optional[plt.Figure]:
     """
-    Plot endurance event simulation results.
+    Plot endurance event simulation results. Can plot specific aspects.
 
     Args:
-        endurance_data: Dict from EnduranceSimulator.simulate_endurance or similar.
+        endurance_data: Dict containing endurance results. Expected keys depend on plot_type.
+                         Should include 'lap_times'. Optionally 'fuel_consumption', 'thermal_states',
+                         'component_wear', 'reliability_events', 'score', 'total_time', 'dnf_reason'.
         title: Plot title.
         unit_system: Unit system ('metric' or 'imperial').
         save_path: Path to save plot (if None, not saved).
+        plot_type: Type of plot ('summary', 'lap_times', 'thermal', 'fuel', 'wear').
 
     Returns:
         Matplotlib figure or None if error.
     """
-    # Extract primary results
     lap_times = endurance_data.get('lap_times', [])
     lap_numbers = np.arange(1, len(lap_times) + 1)
-    total_time = endurance_data.get('total_time', 0)
-    completed = endurance_data.get('completed', False)
-    dnf_reason = endurance_data.get('dnf_reason')
 
-    # Extract detailed results if available
-    detailed = endurance_data.get('detailed_results', {})
-    fuel_consumption = detailed.get('fuel_consumption', []) # Per lap
-    thermal_states = detailed.get('thermal_states', []) # Per lap
-    component_wear = endurance_data.get('component_wear', {})
-    reliability_events = endurance_data.get('reliability_events', []) # List of ReliabilityEvent enums or names
-
-    if not lap_times:
-        logger.warning("No lap times found in endurance data.")
-        # Decide if you want to plot partial results or return None
-        # For now, let's try to plot what we can
-
-    # Create figure
-    fig = plt.figure(figsize=(15, 14)) # Taller figure for more plots
-    gs = gridspec.GridSpec(4, 2) # 4 rows, 2 columns
+    if not lap_times and plot_type != 'wear': # Wear plot doesn't strictly need lap times
+        logger.warning("No lap times found in endurance data for plotting.")
+        # return None # Allow plotting just wear if requested
 
     # Unit conversions
     if unit_system.lower() == 'imperial':
         fuel_factor, fuel_unit = LITERS_TO_GAL, "gal"
-        temp_convert = lambda t: t * 9/5 + 32 if t is not None else None
+        temp_convert = lambda t: t * 9 / 5 + 32 if t is not None else None
         temp_unit = "°F"
     else:
         fuel_factor, fuel_unit = 1.0, "L"
         temp_convert = lambda t: t
         temp_unit = "°C"
 
-    # --- Plot Lap Times ---
-    ax1 = fig.add_subplot(gs[0, :]) # Span both columns
-    if len(lap_times) > 0:
-        ax1.plot(lap_numbers, lap_times, 'b-o', linewidth=DEFAULT_LINE_WIDTH, markersize=DEFAULT_MARKER_SIZE, label='Lap Time')
+    colors = COLOR_SCHEMES['default']
+
+    # Determine plot layout based on type
+    if plot_type == 'summary':
+        fig = plt.figure(figsize=(15, 14))
+        gs = gridspec.GridSpec(3, 2, height_ratios=[2, 1, 1]) # Adjusted for summary without score plot initially
+        ax_lap = fig.add_subplot(gs[0, :])
+        ax_fuel = fig.add_subplot(gs[1, 0])
+        ax_thermal = fig.add_subplot(gs[1, 1])
+        ax_wear = fig.add_subplot(gs[2, 0])
+        ax_score = fig.add_subplot(gs[2, 1]) # Keep score plot location
+    elif plot_type == 'lap_times':
+        fig, ax_lap = plt.subplots(figsize=DEFAULT_FIG_SIZE)
+        ax_fuel, ax_thermal, ax_wear, ax_score = None, None, None, None
+    elif plot_type == 'fuel':
+        fig, ax_fuel = plt.subplots(figsize=DEFAULT_FIG_SIZE)
+        ax_lap, ax_thermal, ax_wear, ax_score = None, None, None, None
+    elif plot_type == 'thermal':
+        fig, ax_thermal = plt.subplots(figsize=DEFAULT_FIG_SIZE)
+        ax_lap, ax_fuel, ax_wear, ax_score = None, None, None, None
+    elif plot_type == 'wear':
+        fig, ax_wear = plt.subplots(figsize=(8, 6)) # Smaller for wear bar chart
+        ax_lap, ax_fuel, ax_thermal, ax_score = None, None, None, None
+    else:
+        logger.error(f"Unknown plot_type for plot_endurance_results: {plot_type}")
+        return None
+
+
+    # --- Plot Lap Times (if axis exists) ---
+    if ax_lap is not None and len(lap_times) > 0:
+        ax_lap.plot(lap_numbers, lap_times, 'b-o', linewidth=DEFAULT_LINE_WIDTH, markersize=DEFAULT_MARKER_SIZE, label='Lap Time')
         avg_lap_time = np.mean(lap_times)
         best_lap_time = np.min(lap_times)
-        ax1.axhline(y=avg_lap_time, color='r', linestyle='--', alpha=0.7, label=f'Avg: {avg_lap_time:.2f}s')
-        ax1.axhline(y=best_lap_time, color='g', linestyle='--', alpha=0.7, label=f'Best: {best_lap_time:.2f}s')
+        ax_lap.axhline(y=avg_lap_time, color='r', linestyle='--', alpha=0.7, label=f'Avg: {avg_lap_time:.2f}s')
+        ax_lap.axhline(y=best_lap_time, color='g', linestyle='--', alpha=0.7, label=f'Best: {best_lap_time:.2f}s')
 
-        # # Mark reliability events
-        reliability_events = endurance_data.get('reliability_events', []) # Get the list
-        for i, event in enumerate(reliability_events): # Iterate through events
-            # Check if it's a valid ReliabilityEvent instance or name and not NONE
-            event_name = None
-            if isinstance(event, ReliabilityEvent):
-                event_name = event.name
-            elif isinstance(event, str): # Handle if stored as string name
-                event_name = event
+        # Mark reliability events (pass event names as strings in data)
+        reliability_events = endurance_data.get('reliability_events', []) # Expect list of strings or Enums
+        if len(reliability_events) == len(lap_numbers):
+            for i, event in enumerate(reliability_events):
+                event_name = str(event.name) if hasattr(event, 'name') else str(event) # Get name robustly
+                if event_name and event_name.upper() != 'NONE': # Check name case-insensitively
+                    ax_lap.scatter([lap_numbers[i]], [lap_times[i]], color='red', marker='x', s=100, zorder=5)
+                    ax_lap.annotate(event_name.replace('_', ' ').title(),
+                                   xy=(lap_numbers[i], lap_times[i]),
+                                   xytext=(lap_numbers[i], lap_times[i] + 0.05 * (np.max(lap_times) - np.min(lap_times))),
+                                   ha='center', rotation=30, size=8, color='red')
 
-            if event_name and event_name != 'NONE': # Check the name
-                if i < len(lap_times): # Check index bounds
-                    ax1.scatter([lap_numbers[i]], [lap_times[i]], color='red', marker='x', s=100, zorder=5)
-                    ax1.annotate(event_name.replace('_', ' ').title(),
-                               xy=(lap_numbers[i], lap_times[i]),
-                               xytext=(lap_numbers[i], lap_times[i] + 0.05 * (np.max(lap_times) - np.min(lap_times))),
-                               ha='center', rotation=30, size=8, color='red')
+        _apply_common_ax_settings(ax_lap, xlabel='Lap Number', ylabel='Lap Time (s)', title='Lap Times')
+        ax_lap.legend(loc='best')
+        ax_lap.xaxis.set_major_locator(MaxNLocator(integer=True))
 
-    _apply_common_ax_settings(ax1, xlabel='Lap Number', ylabel='Lap Time (s)', title='Lap Times')
-    ax1.legend(loc='best')
-    ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
+    # --- Plot Fuel Consumption (if axis exists) ---
+    if ax_fuel is not None:
+        fuel_consumption = endurance_data.get('fuel_consumption', []) # Should be per lap
+        if len(fuel_consumption) == len(lap_numbers):
+            cumulative_fuel = np.cumsum(fuel_consumption) * fuel_factor
+            ln_fuel = ax_fuel.plot(lap_numbers, cumulative_fuel, 'g-o', linewidth=DEFAULT_LINE_WIDTH, markersize=DEFAULT_MARKER_SIZE, label=f'Cumulative ({fuel_unit})')
+            _apply_common_ax_settings(ax_fuel, xlabel='Lap Number', ylabel=f'Cumulative Fuel ({fuel_unit})', title='Fuel Consumption')
 
-    # --- Plot Fuel Consumption ---
-    ax2 = fig.add_subplot(gs[1, 0])
-    if len(fuel_consumption) == len(lap_numbers):
-        cumulative_fuel = np.cumsum(fuel_consumption) * fuel_factor
-        ax2.plot(lap_numbers, cumulative_fuel, 'g-o', linewidth=DEFAULT_LINE_WIDTH, markersize=DEFAULT_MARKER_SIZE, label='Cumulative Fuel')
+            # Add per-lap consumption on secondary axis
+            ax_fuel_b = ax_fuel.twinx()
+            per_lap_fuel = np.array(fuel_consumption) * fuel_factor
+            bars_fuel = ax_fuel_b.bar(lap_numbers, per_lap_fuel, alpha=0.3, color='green', label=f'Per Lap ({fuel_unit})')
+            ax_fuel_b.set_ylabel(f'Per Lap ({fuel_unit})', color='green')
+            ax_fuel_b.tick_params(axis='y', colors='green')
+            ax_fuel_b.legend(loc='upper right')
+            ax_fuel.legend(loc='upper left') # Main legend
+            ax_fuel.xaxis.set_major_locator(MaxNLocator(integer=True))
+        else:
+             ax_fuel.text(0.5, 0.5, "Fuel data unavailable or mismatched", ha='center', va='center')
 
-        # Add per-lap consumption on secondary axis
-        ax2b = ax2.twinx()
-        per_lap_fuel = np.array(fuel_consumption) * fuel_factor
-        ax2b.bar(lap_numbers, per_lap_fuel, alpha=0.3, color='green', label=f'Per Lap ({fuel_unit})')
-        ax2b.set_ylabel(f'Per Lap Consumption ({fuel_unit})', color='green')
-        ax2b.tick_params(axis='y', colors='green')
-        ax2b.legend(loc='upper right')
 
-    _apply_common_ax_settings(ax2, xlabel='Lap Number', ylabel=f'Cumulative Fuel ({fuel_unit})', title='Fuel Consumption')
-    ax2.legend(loc='upper left')
-    ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
+    # --- Plot Thermal Profile (if axis exists) ---
+    if ax_thermal is not None:
+        thermal_states = endurance_data.get('thermal_states', []) # List of dicts per lap
+        if len(thermal_states) == len(lap_numbers):
+            engine_temps = [temp_convert(s.get('engine_temp')) for s in thermal_states]
+            coolant_temps = [temp_convert(s.get('coolant_temp')) for s in thermal_states]
+            oil_temps = [temp_convert(s.get('oil_temp')) for s in thermal_states]
 
-    # --- Plot Thermal Profile ---
-    ax3 = fig.add_subplot(gs[1, 1])
-    if len(thermal_states) == len(lap_numbers):
-        engine_temps = [temp_convert(s.get('engine_temp')) for s in thermal_states]
-        coolant_temps = [temp_convert(s.get('coolant_temp')) for s in thermal_states]
-        oil_temps = [temp_convert(s.get('oil_temp')) for s in thermal_states]
+            has_engine = any(t is not None for t in engine_temps)
+            has_coolant = any(t is not None for t in coolant_temps)
+            has_oil = any(t is not None for t in oil_temps)
 
-        if any(engine_temps): ax3.plot(lap_numbers, engine_temps, 'r-o', label='Engine')
-        if any(coolant_temps): ax3.plot(lap_numbers, coolant_temps, 'b-o', label='Coolant')
-        if any(oil_temps): ax3.plot(lap_numbers, oil_temps, 'y-o', label='Oil') # Yellow for oil
+            if has_engine: ax_thermal.plot(lap_numbers, engine_temps, 'r-o', label='Engine')
+            if has_coolant: ax_thermal.plot(lap_numbers, coolant_temps, 'b-o', label='Coolant')
+            if has_oil: ax_thermal.plot(lap_numbers, oil_temps, 'y-o', label='Oil') # Yellow for oil
 
-        # Add critical temperature lines if available
-        limits = endurance_data.get('thermal_limits', {})
-        crit_eng = limits.get('engine_critical_temp')
-        crit_cool = limits.get('coolant_critical_temp')
-        if crit_eng: ax3.axhline(temp_convert(crit_eng), color='red', linestyle='--', alpha=0.6, label='Eng Crit')
-        if crit_cool: ax3.axhline(temp_convert(crit_cool), color='blue', linestyle='--', alpha=0.6, label='Cool Crit')
+            # Add thermal limits if passed in data
+            limits = endurance_data.get('thermal_limits', {})
+            crit_eng = limits.get('engine_critical_temp')
+            crit_cool = limits.get('coolant_critical_temp')
+            if crit_eng: ax_thermal.axhline(temp_convert(crit_eng), color='red', linestyle='--', alpha=0.6, label='Eng Crit')
+            if crit_cool: ax_thermal.axhline(temp_convert(crit_cool), color='blue', linestyle='--', alpha=0.6, label='Cool Crit')
 
-        _apply_common_ax_settings(ax3, xlabel='Lap Number', ylabel=f'End-of-Lap Temp ({temp_unit})', title='Thermal Profile')
-        ax3.legend(loc='best')
-        ax3.xaxis.set_major_locator(MaxNLocator(integer=True))
+            _apply_common_ax_settings(ax_thermal, xlabel='Lap Number', ylabel=f'End-of-Lap Temp ({temp_unit})', title='Thermal Profile')
+            ax_thermal.legend(loc='best')
+            ax_thermal.xaxis.set_major_locator(MaxNLocator(integer=True))
+        else:
+             ax_thermal.text(0.5, 0.5, "Thermal data unavailable or mismatched", ha='center', va='center')
 
-    # --- Plot Component Wear ---
-    ax4 = fig.add_subplot(gs[2, 0])
-    if component_wear:
-        components = list(component_wear.keys())
-        wear_values = [w * 100 for w in component_wear.values()] # Percentage
-        colors = [plt.cm.OrRd(w / 100.0) for w in wear_values] # Color based on wear
+    # --- Plot Component Wear (if axis exists) ---
+    if ax_wear is not None:
+        component_wear = endurance_data.get('component_wear', {})
+        if component_wear:
+            components = list(component_wear.keys())
+            wear_values = [w * 100 for w in component_wear.values()] # Percentage
+            colors = [plt.cm.OrRd(w / 100.0) for w in wear_values] # Color based on wear
 
-        bars = ax4.barh(components, wear_values, color=colors)
-        for bar, wear in zip(bars, wear_values):
-            ax4.text(wear + 1, bar.get_y() + bar.get_height()/2, f'{wear:.1f}%', va='center')
+            bars = ax_wear.barh(components, wear_values, color=colors)
+            for bar, wear in zip(bars, wear_values):
+                ax_wear.text(wear + 1, bar.get_y() + bar.get_height()/2, f'{wear:.1f}%', va='center')
 
-        _apply_common_ax_settings(ax4, xlabel='Wear (%)', ylabel='Component', title='Component Wear')
-        ax4.set_xlim(0, 105)
+            _apply_common_ax_settings(ax_wear, xlabel='Final Wear (%)', ylabel='Component', title='Component Wear')
+            ax_wear.set_xlim(0, 105)
+        else:
+            ax_wear.text(0.5, 0.5, "Wear data unavailable", ha='center', va='center')
+            _apply_common_ax_settings(ax_wear, title='Component Wear')
 
-    # --- Plot Score Summary ---
-    ax5 = fig.add_subplot(gs[2, 1])
-    scores = endurance_data.get('score', {})
-    if scores:
-        labels = ['Endurance', 'Efficiency']
-        values = [scores.get('endurance_score', 0), scores.get('efficiency_score', 0)]
-        max_values = [scores.get('max_endurance_score', FS_MAX_ENDURANCE_POINTS), scores.get('max_efficiency_score', FS_MAX_EFFICIENCY_POINTS)]
+    # --- Plot Score Summary (if axis exists and type is summary) ---
+    if ax_score is not None and plot_type == 'summary':
+        scores = endurance_data.get('score', {})
+        if scores:
+            labels = ['Endurance', 'Efficiency']
+            values = [scores.get('endurance_score', 0), scores.get('efficiency_score', 0)]
+            max_values = [scores.get('max_endurance_score', 275), scores.get('max_efficiency_score', 100)] # Use FS maxs
 
-        # Plot scores relative to max possible
-        percentages = [v / max_v * 100 if max_v > 0 else 0 for v, max_v in zip(values, max_values)]
+            percentages = [v / max_v * 100 if max_v > 0 else 0 for v, max_v in zip(values, max_values)]
+            colors_score = [COLOR_SCHEMES['default'][i] for i in [0, 2]] # Blue and Green
 
-        bars = ax5.bar(labels, percentages, color=['blue', 'green'])
-        for bar, score, max_score in zip(bars, values, max_values):
-            ax5.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 1, f'{score:.1f}/{max_score}', ha='center', va='bottom')
+            bars = ax_score.bar(labels, percentages, color=colors_score)
+            for bar, score, max_score in zip(bars, values, max_values):
+                ax_score.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 1, f'{score:.1f}/{max_score}', ha='center', va='bottom')
 
-        _apply_common_ax_settings(ax5, ylabel='Score (% of Max)', title='Event Scores')
-        ax5.set_ylim(0, 110)
-        ax5.axhline(100, color='k', linestyle='--', alpha=0.3)
+            _apply_common_ax_settings(ax_score, ylabel='Score (% of Max)', title='Event Scores')
+            ax_score.set_ylim(0, 110)
+            ax_score.axhline(100, color='k', linestyle='--', alpha=0.3)
+        else:
+             ax_score.text(0.5, 0.5, "Score data unavailable", ha='center', va='center')
+             _apply_common_ax_settings(ax_score, title='Event Scores')
 
-    # --- Status Text ---
-    status_text = f"Status: {'Completed' if completed else 'DNF'}"
-    if dnf_reason: status_text += f" (Reason: {dnf_reason})"
-    if total_time: status_text += f" | Total Time: {total_time:.1f}s"
-    if fuel_consumption: status_text += f" | Fuel Used: {np.sum(fuel_consumption)*fuel_factor:.2f} {fuel_unit}"
-    if scores: status_text += f" | Total Score: {scores.get('total_score', 0):.1f}"
 
-    plt.figtext(0.5, 0.01, status_text, ha='center', fontsize=DEFAULT_LABEL_SIZE,
-               bbox=dict(facecolor='white', alpha=0.8, edgecolor='lightgray'))
+    # --- Status Text (only for summary plot) ---
+    if plot_type == 'summary':
+        completed = endurance_data.get('completed', False)
+        dnf_reason = endurance_data.get('dnf_reason')
+        total_time = endurance_data.get('total_time', 0)
+        fuel_sum = np.sum(endurance_data.get('fuel_consumption', [])) * fuel_factor
+        scores = endurance_data.get('score', {})
 
-    plot_title = title if title else 'Endurance Event Results'
+        status_text = f"Status: {'Completed' if completed else 'DNF'}"
+        if dnf_reason: status_text += f" (Reason: {dnf_reason})"
+        if total_time: status_text += f" | Time: {total_time:.1f}s"
+        if fuel_consumption: status_text += f" | Fuel: {fuel_sum:.2f}{fuel_unit}"
+        if scores: status_text += f" | Score: {scores.get('total_score', 0):.1f}"
+
+        plt.figtext(0.5, 0.01, status_text, ha='center', fontsize=DEFAULT_LABEL_SIZE,
+                   bbox=dict(facecolor='white', alpha=0.8, edgecolor='lightgray'))
+
+    plot_title = title if title else f'Endurance Results ({plot_type.replace("_"," ").title()})'
     fig.suptitle(plot_title, fontsize=DEFAULT_TITLE_SIZE+2)
 
-    plt.tight_layout(rect=[0, 0.05, 1, 0.95]) # Adjust for suptitle and bottom text
+    plt.tight_layout(rect=[0, 0.05 if plot_type=='summary' else 0.03, 1, 0.95])
 
     if save_path:
         save_plot(fig, save_path)
 
     return fig
-
 
 def plot_endurance_comparison(comparison_data: List[Dict], title: Optional[str] = None,
                             unit_system: str = 'metric',

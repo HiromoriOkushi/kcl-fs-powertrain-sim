@@ -21,10 +21,8 @@ from .fuel_systems import (
 
 # Import thermal model components
 from .engine_thermal import (
-    ThermalConfig, EngineHeatModel, ThermalSimulation, CoolingPerformance,
-    # CoolingSystem is often imported from thermal package, alias if needed
-    # Or ensure the one here is specifically EngineCoolingSystem if different
-    CoolingSystem as EngineCoolingSystemComponent
+    ThermalConfig, EngineHeatModel, ThermalSimulation, CoolingPerformance
+
 )
 
 __all__ = [
@@ -40,5 +38,5 @@ __all__ = [
 
     # Engine thermal
     'ThermalConfig', 'EngineHeatModel', 'ThermalSimulation',
-    'CoolingPerformance', 'EngineCoolingSystemComponent'
+    'CoolingPerformance'
 ]
