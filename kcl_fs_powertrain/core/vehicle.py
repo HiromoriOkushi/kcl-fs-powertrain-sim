@@ -1021,8 +1021,56 @@ class Vehicle:
 
 
 # --- Factory Function ---
-# create_formula_student_vehicle remains the same
+def create_formula_student_vehicle(config_path: Optional[str] = None, config_dict: Optional[Dict] = None) -> 'Vehicle':
+    """
+    Factory function to create a Vehicle instance representing a typical FS car.
 
+    It initializes the Vehicle class, which in turn handles loading component
+    configurations based on paths defined internally or within the provided
+    config_path/config_dict.
+
+    Args:
+        config_path: Optional path to a main vehicle config file containing paths
+                     to component configs or component parameters themselves.
+                     (Often handled by ConfigurationManager before calling this).
+        config_dict: Optional pre-loaded configuration dictionary. Takes precedence
+                     over config_path if both are provided.
+
+    Returns:
+        A configured Vehicle instance.
+
+    Raises:
+        RuntimeError: If vehicle creation fails critically.
+    """
+    # Use a logger specific to the factory or the vehicle module
+    factory_logger = logging.getLogger("VehicleFactory") # Or use logger=logging.getLogger("Vehicle")
+    factory_logger.info("Creating default Formula Student Vehicle instance...")
+    try:
+        # Instantiate the Vehicle class.
+        # Pass config_dict if provided, otherwise pass config_path.
+        # The Vehicle constructor's logic handles loading and component init.
+        vehicle = Vehicle(config=config_dict, config_path=config_path)
+
+        # Optional: Perform post-instantiation checks or setup if needed
+        # For example, ensure the cornering calculator is initialized if it wasn't in __init__
+        if not hasattr(vehicle, 'cornering') or vehicle.cornering is None:
+             # This might indicate an issue during Vehicle.__init__ if it was supposed
+             # to be created there. Adding it here ensures it exists.
+             # Need to import CorneringPerformance locally if not already imported at module level
+             try:
+                 from ..performance.lap_time import CorneringPerformance
+                 factory_logger.debug("Initializing CorneringPerformance in factory function.")
+                 vehicle.cornering = CorneringPerformance(vehicle)
+             except ImportError:
+                 factory_logger.error("Could not import CorneringPerformance to initialize in factory.")
+
+        factory_logger.info("Default Formula Student Vehicle instance created successfully.")
+        return vehicle
+    except Exception as e:
+        factory_logger.critical(f"Failed to create Formula Student vehicle: {e}", exc_info=True)
+        # Raising might be better than returning None, as the simulation
+        # likely cannot proceed without a vehicle.
+        raise RuntimeError(f"Failed to create Formula Student vehicle: {e}") from e
 # Example Usage
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

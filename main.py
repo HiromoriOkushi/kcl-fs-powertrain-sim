@@ -19,7 +19,7 @@ import copy
 import json
 from datetime import datetime
 from typing import Dict, Any, Optional, List
-from enum import Enum # <--- Added missing import
+from enum import Enum 
 
 # --- Add project root to Python path ---
 # This allows running main.py from the project root directory
@@ -64,7 +64,7 @@ try:
 
     # Plotting & Utils
     # V-- Import the missing function here
-    from kcl_fs_powertrain.utils.plotting import set_plot_style, save_plot, plot_vehicle_performance_summary
+    from kcl_fs_powertrain.utils.plotting import set_plot_style, save_plot
     from kcl_fs_powertrain.utils.validation import validate_full_vehicle_performance
 except ImportError as e:
     print(f"ERROR: Failed to import necessary simulation modules: {e}")

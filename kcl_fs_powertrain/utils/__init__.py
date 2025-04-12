@@ -62,7 +62,7 @@ from .constants import (
 # Import plotting functions
 from .plotting import (
     set_plot_style, save_plot,
-    plot_engine_performance, plot_vehicle_performance_summary,
+    plot_engine_performance,
     plot_torque_curves_comparison, plot_track_layout,
     plot_racing_line_analysis, plot_thermal_performance,
     plot_thermal_comparison, plot_cooling_system_map,
@@ -126,7 +126,7 @@ __all__ = [
 
     # Plot functions
     'set_plot_style', 'save_plot',
-    'plot_engine_performance', 'plot_vehicle_performance_summary', # <--- Ensure it's in __all__
+    'plot_engine_performance',
     'plot_torque_curves_comparison', 'plot_track_layout',
     'plot_racing_line_analysis', 'plot_thermal_performance',
     'plot_thermal_comparison', 'plot_cooling_system_map',
